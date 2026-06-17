@@ -4,7 +4,8 @@
   "description": "A code map that routes to coordinates, not meaning. Guides an LLM to the crate; the LLM interprets the raw from there.",
   "type": "module",
   "bin": {
-    "map": "./src/cli/main.ts"
+    "map": "./src/cli/main.ts",
+    "map-mcp": "./src/mcp/server.ts"
   },
   "scripts": {
     "map": "node src/cli/main.ts",

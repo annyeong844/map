@@ -143,31 +143,31 @@ Add `--json` to any command for machine-readable output. Queries accept a bare n
 
 ### As an MCP server
 
-A model consumes the same three primitives over stdio (newline-delimited JSON-RPC,
-zero deps):
+A model consumes the same three primitives over stdio (newline-delimited JSON-RPC).
+Install once so it's on `PATH` (no absolute paths in any config):
 
 ```bash
-MAP_INDEX=.map-index.json node src/mcp/server.ts
+npm link            # exposes the `map` and `map-mcp` bins
 ```
 
-Exposes `locate`, `read`, `grep`. The server routes and quotes; it never summarizes.
-It **auto-reloads** the index when the file changes (it stats the index before each
-tool call), so a `map index` rebuild takes effect immediately — no client reconnect
-needed. A long-lived server that only read the index at boot would otherwise serve a
-stale snapshot until reconnected.
+Then register it — globally (every project) or per-project:
+
+```bash
+claude mcp add code-map --scope user -- map-mcp
+```
 
 ```jsonc
-// settings example — paths resolve from the project directory
-{
-  "mcpServers": {
-    "code-map": {
-      "command": "node",
-      "args": ["src/mcp/server.ts"],
-      "env": { "MAP_INDEX": ".map-index.json" }
-    }
-  }
-}
+// or by hand — no paths, no env
+{ "mcpServers": { "code-map": { "command": "map-mcp" } } }
 ```
+
+Exposes `locate`, `read`, `grep`. The server **auto-detects** the index: it walks up
+from the working directory for `.map-index.json`, so one global server serves whatever
+project it's launched in — just run `map index` in that project. It **auto-reloads**
+when the index changes (stats it before each tool call), so a rebuild (or the first
+build in a fresh project) takes effect with no client reconnect; a project with no
+index yet stays connected and the tools say so. The server routes and quotes; it
+never summarizes.
 
 ---
 

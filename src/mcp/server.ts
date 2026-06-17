@@ -8,7 +8,8 @@
  *
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { grep } from '../core/grep.ts';
 import { locate } from '../core/locate.ts';
@@ -17,40 +18,51 @@ import { loadIndex } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
 
 const PROTOCOL = '2025-06-18';
-const indexPath = process.env.MAP_INDEX ?? argIndex() ?? '.map-index.json';
 
-let index: MapIndex;
-let indexMtimeMs = 0;
-try {
-  index = loadIndex(indexPath);
-  indexMtimeMs = statSync(indexPath).mtimeMs;
-} catch (e) {
-  process.stderr.write(`code-map MCP: cannot load index at ${indexPath}: ${(e as Error).message}\n`);
-  process.exit(1);
+/** Walk up from `start` looking for `name`; null if never found. */
+function findUp(name: string, start: string): string | null {
+  let dir = resolve(start);
+  for (;;) {
+    if (existsSync(join(dir, name))) return join(dir, name);
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
+// Index location, in order: explicit env/flag, else auto-detected by walking up
+// from the working directory — so one global server serves whatever project it is
+// launched in — else the cwd default. No absolute path is baked into any config.
+const indexPath = process.env.MAP_INDEX ?? argIndex() ?? findUp('.map-index.json', process.cwd()) ?? resolve('.map-index.json');
+
+let index: MapIndex | null = null;
+let indexMtimeMs = 0;
+
 /**
- * Reload the index if its file changed since we last read it. A long-lived
- * server would otherwise keep serving the snapshot it booted with — so every
- * `map index` rebuild would silently go unseen until the client reconnected.
- * One stat per tool call is far cheaper than that footgun.
+ * (Re)load the index when its file appears or changes. Called before every tool
+ * call, so a `map index` rebuild — or the first build in a fresh project — is
+ * picked up with no client reconnect. A missing/half-written index is non-fatal:
+ * the server stays up and retries on the next call.
  */
 function ensureFresh(): void {
   let mtimeMs: number;
   try {
     mtimeMs = statSync(indexPath).mtimeMs;
   } catch {
-    return; // index momentarily missing (mid-write) — keep serving what we have
+    return; // no index yet (or mid-write) — keep whatever we have (possibly none)
   }
-  if (mtimeMs === indexMtimeMs) return;
+  if (index && mtimeMs === indexMtimeMs) return;
   try {
     index = loadIndex(indexPath);
     indexMtimeMs = mtimeMs;
-    process.stderr.write(`code-map MCP: reloaded index (${index.meta.entryCount} symbols)\n`);
+    process.stderr.write(`code-map MCP: loaded index (${index.meta.entryCount} symbols) from ${indexPath}\n`);
   } catch {
     // half-written index — keep the prior good copy, retry on the next call
   }
 }
+
+ensureFresh();
+if (!index) process.stderr.write(`code-map MCP: no index at ${indexPath} yet — run \`map index\`; tools will pick it up on the next call.\n`);
 
 const TOOLS = [
   {
@@ -97,6 +109,9 @@ const TOOLS = [
 
 function callTool(name: string, args: Record<string, any>): string {
   ensureFresh();
+  if (!index) {
+    return JSON.stringify({ error: `No code-map index found at ${indexPath}. Run \`map index --root <repo>\` to build one; it will be picked up automatically.` }, null, 2);
+  }
   switch (name) {
     case 'locate':
       return JSON.stringify(locate(index, String(args.query), { kind: args.kind, file: args.file, limit: args.limit }), null, 2);

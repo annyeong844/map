@@ -1,10 +1,10 @@
 import { parseSync } from 'oxc-parser';
 
 /**
- * Module-private top-level definitions — the coverage Lumin's symbol graph
- * leaves out (it indexes the export surface, since that is all dead-export /
- * fan-in analysis needs). The map fills the gap by parsing each source file
- * with the same parser Lumin uses (oxc) and keeping only what isn't exported.
+ * Module-private top-level definitions — the coverage the symbol graph leaves
+ * out (it indexes the export surface, since that is all dead-export / fan-in
+ * analysis needs). The map fills the gap by parsing each source file with oxc
+ * and keeping only what isn't exported.
  *
  * oxc returns UTF-16 char offsets for start/end — identical to the convention
  * the rest of the map slices by, so no offset conversion is needed.
@@ -18,7 +18,7 @@ export interface PrivateDef {
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 
-/** Only files oxc can parse (TS/JS family). Lumin still covers .vue/.py/.go exports. */
+/** Only files oxc can parse (TS/JS family). The symbol graph still covers .vue/.py/.go exports. */
 export function isParseable(file: string): boolean {
   return JS_TS.test(file);
 }

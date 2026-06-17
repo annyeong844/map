@@ -48,7 +48,7 @@ async function readAll(root: string, files: string[], concurrency = 32): Promise
 }
 
 export interface BuildOptions {
-  /** Path to the symbol-graph artifact (build-symbol-graph.mjs output). */
+  /** Path to the symbol-graph artifact (its symbols.json output). */
   symbolsPath: string;
   /** Source root the paths resolve against. Defaults to symbols.meta.root. */
   root?: string;
@@ -64,7 +64,7 @@ export interface BuildReport {
   filesMissing: string[];
   defs: number;
   methods: number;
-  /** Module-private top-level defs the map parsed itself (Lumin omits these). */
+  /** Module-private top-level defs the map parsed itself (the symbol graph omits these). */
   privateDefs: number;
   /** Files reused verbatim from the previous index (incremental). */
   reused: number;
@@ -128,9 +128,9 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     const f = posix(file);
     const names = new Set<string>();
     exportNames.set(f, names);
-    // Process every source file Lumin saw, even those with zero exports (their
-    // defs object is empty) — that is exactly where private-only CLI scripts
-    // live, and where Lumin's export-surface index gives us nothing.
+    // Process every source file the symbol graph saw, even those with zero
+    // exports (their defs object is empty) — that is exactly where private-only
+    // CLI scripts live, and where the export-surface index gives us nothing.
     if (!byFile.has(f)) byFile.set(f, []);
     for (const d of Object.values(defs)) {
       names.add(d.name);
@@ -234,7 +234,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       fileTokens[file] = token(text);
       if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, srcHash: srcHash(file) };
       // Private-symbol coverage: parse the file ourselves (oxc) and add every
-      // top-level definition Lumin's export surface left out. Same char-offset
+      // top-level definition the export surface left out. Same char-offset
       // convention, so these slice exactly like the exported ones.
       if (isParseable(file)) {
         const exported = exportNames.get(file) ?? new Set<string>();

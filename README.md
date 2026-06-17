@@ -45,15 +45,15 @@ why retrieval collapses to roughly `grep + grep + read_file`.
 
 Coordinates come from two sources, and the map only ever **reads** the source tree:
 
-1. **Lumin's symbol graph** (`build-symbol-graph.mjs`'s `.audit/symbols.json`) — the
-   **export surface**. Every `defIndex` entry already carries `path`, `line`, and a
-   `definitionId` encoding the **char-offset range** (e.g.
-   `_lib/alias-map.mjs#FunctionDeclaration:1289-2609`), plus `fanInByIdentity` for
+1. **A symbol-graph artifact** (a `symbols.json` with a `defIndex`, e.g. produced under
+   `.audit/`) — the **export surface**. Every `defIndex` entry already carries `path`,
+   `line`, and a `definitionId` encoding the **char-offset range** (e.g.
+   `lib/alias-map.mjs#FunctionDeclaration:1289-2609`), plus `fanInByIdentity` for
    ranking. Class methods come from `classMethodIndex` (line-only, bounded by their
-   next sibling). Lumin is treated as read-only reference and is never modified.
+   next sibling). The artifact and source tree are treated as read-only input.
 
-2. **The map's own oxc pass** — the **module-private surface** Lumin omits (it indexes
-   only exports, since that is all dead-export / fan-in analysis needs). For each
+2. **The map's own oxc pass** — the **module-private surface** the symbol graph omits
+   (it indexes only exports, since that is all dead-export / fan-in analysis needs). For each
    TS/JS file the map parses it with `oxc-parser` and adds every top-level definition
    that isn't already exported (`visibility: "module-private"`, fan-in 0). oxc returns
    UTF-16 char offsets — the same convention — so these slice exactly like exports.
@@ -107,9 +107,9 @@ pure-JS fallback otherwise.
 
 ```bash
 # Reads <root>/.audit/symbols.json by default; writes ./.map-index.json
-node src/cli/main.ts index --root /path/to/repo
-node src/cli/main.ts index --root /path/to/repo --symbols /path/to/symbols.json --out .map-index.json
-node src/cli/main.ts index --root /path/to/repo --force   # ignore prior index, rebuild all
+node src/cli/main.ts index --root .                  # index the current repo
+node src/cli/main.ts index --root ../target-repo --symbols ../target-repo/symbols.json --out .map-index.json
+node src/cli/main.ts index --root ../target-repo --force   # ignore prior index, rebuild all
 ```
 
 **Incremental.** A rebuild reuses every file whose bytes (filesystem `mtime`+`size`)
@@ -155,13 +155,13 @@ needed. A long-lived server that only read the index at boot would otherwise ser
 stale snapshot until reconnected.
 
 ```jsonc
-// settings example
+// settings example — paths resolve from the project directory
 {
   "mcpServers": {
     "code-map": {
       "command": "node",
-      "args": ["/abs/path/map/src/mcp/server.ts"],
-      "env": { "MAP_INDEX": "/abs/path/.map-index.json" }
+      "args": ["src/mcp/server.ts"],
+      "env": { "MAP_INDEX": ".map-index.json" }
     }
   }
 }
@@ -175,8 +175,8 @@ stale snapshot until reconnected.
 src/
   core/            # retrieval library (only dep: oxc-parser)
     types.ts          # MapEntry / MapIndex — coordinates only, no meaning fields
-    build-index.ts    # Lumin symbols.json (exports + methods) + oxc private pass → index
-    extract-private.ts# oxc parse → module-private top-level defs Lumin omits
+    build-index.ts    # symbol-graph symbols.json (exports + methods) + oxc private pass → index
+    extract-private.ts# oxc parse → module-private top-level defs the symbol graph omits
     locate.ts         # tiered ranked routing  ← the one thing that must be precise
     read.ts           # exact slice + token check + searchText re-anchoring
     grep.ts           # ripgrep wrapper, JS fallback

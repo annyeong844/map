@@ -15,7 +15,7 @@ function fixture(source: string, eol: '\n' | '\r\n' = '\n') {
   const text = source.replace(/\n/g, eol);
   writeFileSync(join(root, 'src/sample.ts'), text);
 
-  // Derive real char offsets so the artifact mirrors what build-symbol-graph emits.
+  // Derive real char offsets so the artifact mirrors what the symbol graph emits.
   const defOf = (name: string) => {
     const decl = `function ${name}`;
     const start = text.indexOf(decl);
@@ -24,7 +24,7 @@ function fixture(source: string, eol: '\n' | '\r\n' = '\n') {
     return { name, kind: 'FunctionDeclaration', line, definitionId: `src/sample.ts#FunctionDeclaration:${start}-${end}` };
   };
   const symbols = {
-    meta: { tool: 'build-symbol-graph.mjs', root, schemaVersion: 3 },
+    meta: { tool: 'symbol-graph', root, schemaVersion: 3 },
     defIndex: { 'src/sample.ts': { alpha: defOf('alpha'), beta: defOf('beta') } },
     classMethodIndex: {},
   };
@@ -110,7 +110,7 @@ test('fan-in breaks ties within a match tier, never across tiers', async () => {
     return `#FunctionDeclaration:${s}-${t.indexOf('}', s) + 1}`;
   };
   const symbols = {
-    meta: { tool: 'build-symbol-graph.mjs', root, schemaVersion: 3 },
+    meta: { tool: 'symbol-graph', root, schemaVersion: 3 },
     defIndex: {
       'a/m.ts': { alpha: { name: 'alpha', kind: 'FunctionDeclaration', line: 1, definitionId: `a/m.ts#FunctionDeclaration:14-${body.indexOf('}') + 1}` } },
       'b/m.ts': { alpha: { name: 'alpha', kind: 'FunctionDeclaration', line: 1, definitionId: `b/m.ts#FunctionDeclaration:14-${body.indexOf('}') + 1}` } },
@@ -133,8 +133,8 @@ test('fan-in breaks ties within a match tier, never across tiers', async () => {
   assert.equal(hits[0].fanIn, 30);
 });
 
-test('private pass (oxc) covers module-private defs Lumin omits', async () => {
-  // Lumin's defIndex carries only the export surface. The map parses the file
+test('private pass (oxc) covers module-private defs the symbol graph omits', async () => {
+  // The symbol graph's defIndex carries only the export surface. The map parses the file
   // itself and adds the rest. Source has 1 export + 2 private decls; the
   // artifact lists only the export.
   const root = mkdtempSync(join(tmpdir(), 'map-priv-'));
@@ -154,7 +154,7 @@ test('private pass (oxc) covers module-private defs Lumin omits', async () => {
   writeFileSync(join(root, 'src/m.ts'), text);
   const pubStart = text.indexOf('function pub');
   const symbols = {
-    meta: { tool: 'build-symbol-graph.mjs', root, schemaVersion: 3 },
+    meta: { tool: 'symbol-graph', root, schemaVersion: 3 },
     defIndex: {
       'src/m.ts': {
         pub: { name: 'pub', kind: 'FunctionDeclaration', line: 7, definitionId: `src/m.ts#FunctionDeclaration:${pubStart}-${text.indexOf('}', pubStart) + 1}` },
@@ -192,7 +192,7 @@ test('incremental rebuild reuses unchanged files, re-reads changed ones', async 
     return `${s}-${txt.indexOf('}', s) + 1}`;
   };
   const symbols = {
-    meta: { tool: 'build-symbol-graph.mjs', root, schemaVersion: 3 },
+    meta: { tool: 'symbol-graph', root, schemaVersion: 3 },
     defIndex: {
       'src/a.ts': { aaa: { name: 'aaa', kind: 'FunctionDeclaration', line: 2, definitionId: `src/a.ts#FunctionDeclaration:${idOf(aV1, 'function aaa')}` } },
       'src/b.ts': { bbb: { name: 'bbb', kind: 'FunctionDeclaration', line: 1, definitionId: 'src/b.ts#FunctionDeclaration:0-34' } },

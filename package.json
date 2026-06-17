@@ -1,0 +1,28 @@
+{
+  "name": "@suyeon/code-map",
+  "version": "0.1.0",
+  "description": "A code map that routes to coordinates, not meaning. Guides an LLM to the crate; the LLM interprets the raw from there.",
+  "type": "module",
+  "bin": {
+    "map": "./src/cli/main.ts"
+  },
+  "scripts": {
+    "map": "node src/cli/main.ts",
+    "mcp": "node src/mcp/server.ts",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "keywords": [
+    "code-map",
+    "ast",
+    "retrieval",
+    "llm",
+    "symbol-index"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "oxc-parser": "^0.136.0"
+  }
+}

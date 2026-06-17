@@ -1,12 +1,13 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { extractSymbols } from './extract-symbols.ts';
+import { extractSymbols, type ImportEdge } from './extract-symbols.ts';
+import { computeFanIn } from './fan-in.ts';
 import { listSourceFiles } from './files.ts';
 import type { FileStat, MapEntry, MapIndex } from './types.ts';
 import { firstLine, lineAt, token } from './util.ts';
 
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -85,6 +86,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const entries: MapEntry[] = [];
   const fileTokens: Record<string, string> = {};
   const fileStats: Record<string, FileStat> = {};
+  const fileImports: Record<string, ImportEdge[]> = {};
   const filesMissing: string[] = [];
   const usedIds = new Map<string, number>();
 
@@ -121,6 +123,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       for (const e of prevByFile.get(file) ?? []) entries.push(e);
       fileTokens[file] = prev!.fileTokens[file];
       fileStats[file] = pv!;
+      fileImports[file] = prev!.fileImports?.[file] ?? [];
       reused++;
     } else {
       changedFiles.push(file);
@@ -138,7 +141,9 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     }
     fileTokens[file] = token(src);
     if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size };
-    for (const rec of extractSymbols(file, src)) {
+    const parsed = extractSymbols(file, src);
+    fileImports[file] = parsed.imports;
+    for (const rec of parsed.symbols) {
       const line = lineAt(src, rec.charStart);
       entries.push({
         id: mkId(file, rec.name, rec.kind, line),
@@ -158,6 +163,13 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       });
     }
   }
+
+  // Native fan-in: a global pass over all import edges (reused files contribute
+  // cached edges, so this needs no extra reads). Recomputed every build because a
+  // def's fan-in can shift when *another* file changes its imports.
+  const importsByFile = new Map<string, ImportEdge[]>(Object.entries(fileImports));
+  const fanIn = computeFanIn(files, importsByFile);
+  for (const e of entries) e.fanIn = fanIn.get(`${e.file}::${e.name}`) ?? 0;
 
   entries.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.name.localeCompare(b.name));
 
@@ -181,6 +193,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     },
     fileTokens,
     fileStats,
+    fileImports,
     entries,
   };
 

@@ -64,8 +64,8 @@ Per symbol the map keeps only what's mechanically verifiable, plus two derived f
 - `searchText` — the declaration's first line, the **drift anchor**.
 - a per-file content **token** — the `sourceVersionToken`.
 
-(`fanIn` — a cross-module call-site count for ranking ties — is reserved but not yet
-computed natively; see *Ranking*.)
+(`fanIn` — a cross-module reference count for ranking ties — is computed natively
+from the import graph; see *Ranking*.)
 
 ---
 
@@ -86,14 +86,18 @@ Nothing is silently trusted.
 
 Matching is tiered — exact > case-insensitive exact > prefix > substring > fuzzy —
 and **a better tier always wins** (an exact match outranks a fuzzy one regardless of
-anything else). Within a tier, the closest-length name wins, then path order. There is
-a `fanIn` (cross-module call-site count) tiebreaker slot wired through the ranker, but
-it is **not yet computed natively** — every symbol currently scores 0, so it is inert.
-Computing fan-in ourselves (resolve imports, count cross-file references) is the next
-step; it will disambiguate, e.g., a canonical definition from a vendored copy.
+anything else). Ties *within* a tier break by **fan-in**, then closest-length name,
+then path order.
 
-Either way `read` refuses to guess between two genuinely distinct files, returning the
-ranked candidates instead.
+Fan-in is computed natively: the map enumerates every named/default import and
+re-export edge, resolves the **relative** ones against the indexed file set (no
+filesystem access — path math + membership), and counts the distinct importing files
+per `target::name`. So the symbol the codebase actually depends on floats up — a
+canonical definition over a vendored copy. (Honest scope: namespace imports,
+`export *`, and package/tsconfig-alias specifiers aren't attributed — resolving those
+fully is a module resolver's job, out of scope. Fan-in only sharpens *ranking*; `read`
+still refuses to guess between two genuinely distinct files, returning the ranked
+candidates instead.)
 
 ---
 
@@ -174,8 +178,9 @@ src/
   core/            # retrieval library (only dep: oxc-parser)
     types.ts          # MapEntry / MapIndex — coordinates only, no meaning fields
     files.ts          # enumerate source files (git ls-files, else walk)
-    extract-symbols.ts# oxc parse → every top-level def (exported/private) + class method
-    build-index.ts    # walk + parse + coordinates → index (incremental, drift-aware)
+    extract-symbols.ts# oxc parse → top-level defs (exported/private) + methods + import edges
+    fan-in.ts         # resolve relative imports → cross-file reference counts
+    build-index.ts    # walk + parse + coordinates + fan-in → index (incremental, drift-aware)
     locate.ts         # tiered ranked routing  ← the one thing that must be precise
     read.ts           # exact slice + token check + searchText re-anchoring
     grep.ts           # ripgrep wrapper, JS fallback

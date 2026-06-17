@@ -113,6 +113,28 @@ test('incremental rebuild reuses unchanged files, re-reads changed ones', async 
   assert.equal(forced.changed, 2);
 });
 
+test('native fan-in counts cross-file importers and breaks ranking ties', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'pkg/dup.ts': 'export function dup(): number { return 1; }\nexport function lonely(): number { return 9; }\n',
+      'vendor/dup.ts': 'export function dup(): number { return 1; }\n',
+      // Two files import the canonical pkg/dup; none import the vendored copy.
+      'src/x.ts': "import { dup } from '../pkg/dup.ts';\nexport function x() { return dup(); }\n",
+      'src/y.ts': "import { dup } from '../pkg/dup';\nexport function y() { return dup(); }\n",
+    }),
+  });
+  const canonical = index.entries.find((e) => e.file === 'pkg/dup.ts' && e.name === 'dup')!;
+  const vendored = index.entries.find((e) => e.file === 'vendor/dup.ts' && e.name === 'dup')!;
+  const lonely = index.entries.find((e) => e.name === 'lonely')!;
+  assert.equal(canonical.fanIn, 2, 'imported by x.ts and y.ts (incl. extensionless specifier)');
+  assert.equal(vendored.fanIn, 0);
+  assert.equal(lonely.fanIn, 0, 'exported but never imported');
+  // Ranking: same exact-match tier, so fan-in decides — canonical floats up.
+  const hits = locate(index, 'dup');
+  assert.equal(hits[0].file, 'pkg/dup.ts');
+  assert.equal(hits[0].fanIn, 2);
+});
+
 test('grep parses matches on CRLF files', async () => {
   const root = repo({ 'src/m.ts': SRC.replace(/\n/g, '\r\n') });
   const matches = grep(root, 'function alpha', { fixed: true });

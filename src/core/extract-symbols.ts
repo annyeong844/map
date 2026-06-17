@@ -1,12 +1,14 @@
 import { parseSync } from 'oxc-parser';
 
 /**
- * Extract every routable symbol from one TS/JS file with oxc — the map's own
- * AST pass, owing nothing to any external symbol graph. oxc returns UTF-16 char
- * offsets for start/end, which is exactly what read() slices by.
+ * Extract every routable symbol AND every cross-module import edge from one
+ * TS/JS file with oxc — the map's own AST pass, owing nothing to any external
+ * symbol graph. oxc returns UTF-16 char offsets for start/end, which is exactly
+ * what read() slices by.
  *
- * What we keep: top-level declarations (exported or module-private) and class
- * methods, each with a precise char range. What we don't: meaning.
+ * Symbols: top-level declarations (exported or module-private) and class
+ * methods, each with a precise char range. Edges: which named symbol this file
+ * pulls from which module specifier — the raw material for native fan-in.
  */
 export interface SymbolRec {
   name: string;
@@ -17,6 +19,18 @@ export interface SymbolRec {
   className?: string;
   static?: boolean;
   visibility?: string;
+}
+
+/** A named symbol pulled from another module: `{ source, name }`. `name` is the
+ * name in the *target* module ('default' for default imports). */
+export interface ImportEdge {
+  source: string;
+  name: string;
+}
+
+export interface FileParse {
+  symbols: SymbolRec[];
+  imports: ImportEdge[];
 }
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -31,15 +45,15 @@ function isDeclNode(t: string): boolean {
   return t === 'FunctionDeclaration' || t === 'ClassDeclaration' || t === 'VariableDeclaration' || TYPE_DECL.has(t);
 }
 
-export function extractSymbols(file: string, text: string): SymbolRec[] {
+export function extractSymbols(file: string, text: string): FileParse {
   let res: ReturnType<typeof parseSync>;
   try {
     res = parseSync(file, text);
   } catch {
-    return [];
+    return { symbols: [], imports: [] };
   }
   const body = res?.program?.body;
-  if (!Array.isArray(body)) return [];
+  if (!Array.isArray(body)) return { symbols: [], imports: [] };
 
   // Local top-level declarations by name, so `export { foo as bar }` can point
   // at foo's real coordinates rather than the specifier.
@@ -54,24 +68,43 @@ export function extractSymbols(file: string, text: string): SymbolRec[] {
     }
   }
 
-  const out: SymbolRec[] = [];
+  const symbols: SymbolRec[] = [];
+  const imports: ImportEdge[] = [];
+
   for (const node of body) {
+    if (node.type === 'ImportDeclaration') {
+      for (const spec of node.specifiers ?? []) {
+        if (spec.type === 'ImportSpecifier' && spec.imported?.name) imports.push({ source: node.source.value, name: spec.imported.name });
+        else if (spec.type === 'ImportDefaultSpecifier') imports.push({ source: node.source.value, name: 'default' });
+        // ImportNamespaceSpecifier: no per-symbol attribution — skipped.
+      }
+      continue;
+    }
     if (node.type === 'ExportNamedDeclaration') {
-      if (node.declaration) pushDecl(node.declaration, true, out);
+      if (node.source) {
+        // Re-export `export { x } from './y'`: an edge to y::x, not a local def.
+        for (const spec of node.specifiers ?? []) {
+          if (spec.type === 'ExportSpecifier' && spec.local?.name) imports.push({ source: node.source.value, name: spec.local.name });
+        }
+        continue;
+      }
+      if (node.declaration) pushDecl(node.declaration, true, symbols);
       for (const spec of node.specifiers ?? []) {
         if (spec.type !== 'ExportSpecifier' || !spec.exported?.name) continue;
         const local = spec.local?.name ?? spec.exported.name;
         const target = locals.get(local) ?? spec;
-        out.push({ name: spec.exported.name, kind: 'ExportSpecifier', charStart: target.start, charEnd: target.end, exported: true });
+        symbols.push({ name: spec.exported.name, kind: 'ExportSpecifier', charStart: target.start, charEnd: target.end, exported: true });
       }
-    } else if (node.type === 'ExportDefaultDeclaration') {
-      const t = node.declaration ?? node;
-      out.push({ name: 'default', kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
-    } else if (isDeclNode(node.type)) {
-      pushDecl(node, false, out);
+      continue;
     }
+    if (node.type === 'ExportDefaultDeclaration') {
+      const t = node.declaration ?? node;
+      symbols.push({ name: 'default', kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
+      continue;
+    }
+    if (isDeclNode(node.type)) pushDecl(node, false, symbols);
   }
-  return out;
+  return { symbols, imports };
 }
 
 function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {

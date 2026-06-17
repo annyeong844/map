@@ -74,6 +74,11 @@ export interface MapIndex {
    * on its own bytes, so an unchanged stat means its entries can be reused as-is.
    */
   fileStats: Record<string, FileStat>;
+  /**
+   * Per-file import/re-export edges (`{ source, name }`), cached so incremental
+   * rebuilds can recompute global fan-in without re-reading unchanged files.
+   */
+  fileImports: Record<string, { source: string; name: string }[]>;
   entries: MapEntry[];
 }
 

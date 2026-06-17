@@ -11,17 +11,6 @@ export function posix(p: string): string {
   return p.replace(/\\/g, '/');
 }
 
-/**
- * Parse the byte/char range out of a symbol-graph definitionId.
- *   "_lib/alias-map.mjs#FunctionDeclaration:1289-2609"  ->  { start: 1289, end: 2609 }
- * Returns null when the id carries no range (older schemas, methods).
- */
-export function parseRange(definitionId: string): { start: number; end: number } | null {
-  const m = /:(\d+)-(\d+)\s*$/.exec(definitionId);
-  if (!m) return null;
-  return { start: Number(m[1]), end: Number(m[2]) };
-}
-
 /** All UTF-16 offsets where `needle` occurs in `hay` (non-overlapping). */
 export function indexOfAll(hay: string, needle: string): number[] {
   if (!needle) return [];

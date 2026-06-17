@@ -43,31 +43,29 @@ why retrieval collapses to roughly `grep + grep + read_file`.
 
 ## Where the coordinates come from
 
-Coordinates come from two sources, and the map only ever **reads** the source tree:
+The map parses the source tree itself — no external symbol graph, no precomputed
+artifact. It only ever **reads** the source.
 
-1. **A symbol-graph artifact** (a `symbols.json` with a `defIndex`, e.g. produced under
-   `.audit/`) — the **export surface**. Every `defIndex` entry already carries `path`,
-   `line`, and a `definitionId` encoding the **char-offset range** (e.g.
-   `lib/alias-map.mjs#FunctionDeclaration:1289-2609`), plus `fanInByIdentity` for
-   ranking. Class methods come from `classMethodIndex` (line-only, bounded by their
-   next sibling). The artifact and source tree are treated as read-only input.
+1. **File enumeration.** In a git repo it asks git for tracked + untracked-not-ignored
+   files (`git ls-files --cached --others --exclude-standard`), so `.gitignore` is
+   respected for free and generated/vendored trees stay out. Outside git it walks and
+   skips the usual generated directories.
 
-2. **The map's own oxc pass** — the **module-private surface** the symbol graph omits
-   (it indexes only exports, since that is all dead-export / fan-in analysis needs). For each
-   TS/JS file the map parses it with `oxc-parser` and adds every top-level definition
-   that isn't already exported (`visibility: "module-private"`, fan-in 0). oxc returns
-   UTF-16 char offsets — the same convention — so these slice exactly like exports.
-   This is why `locate` can route to an internal helper, not just the public API.
+2. **Parsing.** Each TS/JS file is parsed with `oxc-parser`. Every top-level
+   declaration — exported **or** module-private — and every class method is recorded
+   with its exact **char-offset range** (e.g. `lib/alias-map.mjs#FunctionDeclaration:...`).
+   `locate` routes to an internal helper just as well as to the public API.
 
-> Offsets are **UTF-16 char offsets**, not bytes. `read` slices the file as a string,
-> so a multibyte-heavy file stays exact.
+> oxc returns **UTF-16 char offsets**, not bytes — exactly what `read` slices by
+> (`fileText.slice(charStart, charEnd)`), so a multibyte-heavy file stays exact.
 
-The transform throws away everything semantic and keeps only what's verifiable,
-adding three derived fields per symbol:
+Per symbol the map keeps only what's mechanically verifiable, plus two derived fields:
 
 - `searchText` — the declaration's first line, the **drift anchor**.
 - a per-file content **token** — the `sourceVersionToken`.
-- `fanIn` — call-site count (from `fanInByIdentity`), the ranking tiebreaker below.
+
+(`fanIn` — a cross-module call-site count for ranking ties — is reserved but not yet
+computed natively; see *Ranking*.)
 
 ---
 
@@ -88,37 +86,37 @@ Nothing is silently trusted.
 
 Matching is tiered — exact > case-insensitive exact > prefix > substring > fuzzy —
 and **a better tier always wins** (an exact match outranks a fuzzy one regardless of
-anything else). Ties *within* a tier break by **fan-in** (call-site count), so the
-symbol the codebase actually depends on floats up — a canonical definition over a
-vendored copy, for instance. Fan-in is a structural count, not interpretation, so it
-sharpens routing without the map ever claiming what a symbol means. It influences
-*ranking only*: `read` still refuses to guess between two genuinely distinct files,
-returning fan-in-ordered candidates instead.
+anything else). Within a tier, the closest-length name wins, then path order. There is
+a `fanIn` (cross-module call-site count) tiebreaker slot wired through the ranker, but
+it is **not yet computed natively** — every symbol currently scores 0, so it is inert.
+Computing fan-in ourselves (resolve imports, count cross-file references) is the next
+step; it will disambiguate, e.g., a canonical definition from a vendored copy.
+
+Either way `read` refuses to guess between two genuinely distinct files, returning the
+ranked candidates instead.
 
 ---
 
 ## Usage
 
 Requires Node ≥ 23.6 (runs TypeScript directly — no build step) and one dependency,
-`oxc-parser` (for the private-symbol pass). `ripgrep` is used when present, with a
-pure-JS fallback otherwise.
+`oxc-parser` (the parser). `ripgrep` is used when present, with a pure-JS fallback.
 
 ### Index
 
 ```bash
-# Reads <root>/.audit/symbols.json by default; writes ./.map-index.json
-node src/cli/main.ts index --root .                  # index the current repo
-node src/cli/main.ts index --root ../target-repo --symbols ../target-repo/symbols.json --out .map-index.json
+# Writes ./.map-index.json; --root defaults to the current directory.
+node src/cli/main.ts index --root .
+node src/cli/main.ts index --root ../target-repo --out ../target-repo/.map-index.json
 node src/cli/main.ts index --root ../target-repo --force   # ignore prior index, rebuild all
 ```
 
-**Incremental.** A rebuild reuses every file whose bytes (filesystem `mtime`+`size`)
-*and* symbol-graph contribution (a per-file `srcHash`) are unchanged, re-reading and
-re-parsing only what actually changed; a true no-op leaves the index untouched. The
-change check is read-free (`stat`), so detection is cheaper than the work it skips.
-On the reference repo this is roughly a full build ~16–23s → incremental ~6–7s (the
-floor is fixed cost: loading/writing the index, statting every file, parsing the
-symbol graph — all far cheaper on a native filesystem than over a Windows mount).
+**Incremental.** A rebuild reuses every file whose bytes are unchanged (filesystem
+`mtime`+`size`, a read-free check), re-reading and re-parsing only what actually
+changed; a true no-op leaves the index untouched. Detection (`stat`) is cheaper than
+the work it skips. On a ~700-file repo over a Windows mount: full build ~5s, no-op
+incremental ~2s (the floor is fixed cost — statting every file, writing the index —
+and is far cheaper on a native filesystem).
 
 ### Locate → Read → Grep
 
@@ -175,15 +173,16 @@ stale snapshot until reconnected.
 src/
   core/            # retrieval library (only dep: oxc-parser)
     types.ts          # MapEntry / MapIndex — coordinates only, no meaning fields
-    build-index.ts    # symbol-graph symbols.json (exports + methods) + oxc private pass → index
-    extract-private.ts# oxc parse → module-private top-level defs the symbol graph omits
+    files.ts          # enumerate source files (git ls-files, else walk)
+    extract-symbols.ts# oxc parse → every top-level def (exported/private) + class method
+    build-index.ts    # walk + parse + coordinates → index (incremental, drift-aware)
     locate.ts         # tiered ranked routing  ← the one thing that must be precise
     read.ts           # exact slice + token check + searchText re-anchoring
     grep.ts           # ripgrep wrapper, JS fallback
     store.ts          # load/save .map-index.json
   cli/main.ts      # CLI adapter
-  mcp/server.ts    # MCP stdio adapter
-test/map.test.ts   # exact-slice, relocation, grep-fallback, CRLF
+  mcp/server.ts    # MCP stdio adapter (auto-reloads on index change)
+test/map.test.ts   # extract, exact-slice, methods, relocation, grep-fallback, incremental, CRLF
 ```
 
 ```bash

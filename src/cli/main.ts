@@ -30,7 +30,7 @@ function parseArgs(argv: string[]): { _: string[]; flags: Record<string, string 
 
 const USAGE = `code-map — routes to coordinates, not meaning.
 
-  map index   --root <dir> [--symbols <symbols.json>] [--out <.map-index.json>] [--force]
+  map index   [--root <dir>] [--out <.map-index.json>] [--force]   (root defaults to .)
   map locate  <query>  [--kind k] [--file f] [--limit n] [--json]
   map read    <id|query>                                  [--json]
   map grep    <pattern> [--fixed] [-i] [--file f] [--limit n] [--json]
@@ -49,9 +49,7 @@ async function main(): Promise<void> {
 
   switch (cmd) {
     case 'index': {
-      const root = flags.root ? resolvePath(flags.root as string) : undefined;
-      const symbolsPath = (flags.symbols as string) ?? (root ? resolvePath(root, '.audit/symbols.json') : undefined);
-      if (!symbolsPath) die('index needs --symbols or --root (to find <root>/.audit/symbols.json).');
+      const root = resolvePath((flags.root as string) ?? '.');
       const out = (flags.out as string) ?? indexPath;
       // Load the prior index (if any) for incremental reuse; first build has none.
       let previous = null;
@@ -62,7 +60,7 @@ async function main(): Promise<void> {
           previous = null;
         }
       }
-      const report = await buildIndex({ symbolsPath, root, previous, force: !!flags.force });
+      const report = await buildIndex({ root, previous, force: !!flags.force });
       // Nothing changed → leave the existing index untouched.
       if (!report.unchanged) saveIndex(report.index, out);
       if (json) {

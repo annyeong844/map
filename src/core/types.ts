@@ -15,7 +15,7 @@ export interface MapEntry {
   id: string;
   /** Symbol name as written in source. */
   name: string;
-  /** AST node kind, verbatim from the symbol graph (FunctionDeclaration, ClassMethod, ...). */
+  /** AST node kind, verbatim from the parser (FunctionDeclaration, ClassMethod, ...). */
   kind: string;
   /** Source path, POSIX-normalized, relative to the index root. */
   file: string;
@@ -41,13 +41,12 @@ export interface MapEntry {
   visibility?: string;
   static?: boolean;
   /**
-   * How many call sites reference this symbol (from the symbol graph's
-   * fanInByIdentity). A structural count, not interpretation — it breaks
-   * routing ties toward the symbol the codebase actually depends on, e.g.
-   * a canonical definition over a vendored copy.
+   * Cross-module call-site count — a structural ranking tiebreaker (not
+   * interpretation). Reserved: currently always 0 until computed natively
+   * (resolve imports, count cross-file references).
    */
   fanIn?: number;
-  /** Original identifier from the symbol graph, for traceability. */
+  /** Synthesized id `file#kind:start-end`, for traceability. */
   definitionId?: string;
 }
 
@@ -61,12 +60,6 @@ export interface MapIndex {
     builtAtMs: number;
     /** Absolute source root these coordinates resolve against. */
     root: string;
-    /** The symbols.json this was derived from. */
-    source: string;
-    sourceTool: string;
-    sourceSchemaVersion: number;
-    /** Content hash of the symbols.json this index was built from. */
-    sourceToken: string;
     entryCount: number;
   };
   /**
@@ -77,9 +70,8 @@ export interface MapIndex {
   fileTokens: Record<string, string>;
   /**
    * Per-file change signature for incremental rebuilds: filesystem stat
-   * (mtime + size, a read-free change signal) plus srcHash — a hash of the
-   * file's contribution from the symbol graph (its def/method/fan-in slice).
-   * A file is reused verbatim when both still match.
+   * (mtime + size) — a read-free change signal. A file's coordinates depend only
+   * on its own bytes, so an unchanged stat means its entries can be reused as-is.
    */
   fileStats: Record<string, FileStat>;
   entries: MapEntry[];
@@ -88,7 +80,6 @@ export interface MapIndex {
 export interface FileStat {
   mtimeMs: number;
   size: number;
-  srcHash: string;
 }
 
 export interface LocateHit {

@@ -1,0 +1,11 @@
+{
+  "name": "code-oracle-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-language type-aware resolution MCP over a warm LSP session (tsgo for TS/JS, ty for Python) — sibling to code-map. Isolated here so code-map's core stays zero-heavy-dep.",
+  "bin": { "code-oracle-mcp": "./server.ts" },
+  "scripts": { "start": "node server.ts" },
+  "engines": { "node": ">=23.6" },
+  "dependencies": { "@typescript/native-preview": "^7.0.0-dev.20260618.1" }
+}

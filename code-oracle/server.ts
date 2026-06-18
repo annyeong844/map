@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * ts-oracle MCP — type-aware call resolution over a warm LSP session, multi-language:
+ * code-oracle MCP — type-aware call resolution over a warm LSP session, multi-language:
  * tsgo (TypeScript-Go) for TS/JS, ty for Python. Picked per file extension; both speak
  * the same LSP, so the session/cache/query machinery is shared.
  *
  * Sibling to code-map, not part of it: code-map routes to coordinates (instant, light,
- * drift-resistant); ts-oracle answers "who calls this / what implements this / where is
+ * drift-resistant); code-oracle answers "who calls this / what implements this / where is
  * this defined" at CHECKER grade via LSP references/definition/implementation — including
  * calls through interfaces / DI that a structural call graph can't draw. The statefulness
  * (warm LSP sessions, project warmup, file sync, preview churn) is contained HERE behind a
@@ -16,7 +16,8 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -206,26 +207,38 @@ function session(root: string, lang: Lang, spec: { cmd: string; args: string[]; 
 // it and drops the stale answers, which then lazily recompute against the warm LSP. ──
 const CACHE_DIR = join(HERE, '.cache');
 const sha16 = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.cache', 'coverage']);
-const SRC_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', 'out', '.cache', 'coverage',
+  // Python vendored / caches — scanning these (esp. site-packages) made the epoch
+  // scan dominate even cache hits on a big repo (the "ty warm" check surfaced it).
+  'venv', '.venv', 'env', '.env', '__pycache__', 'site-packages', '.tox', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.eggs',
+]);
+const SRC_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|pyi)$/;
+const EPOCH_TTL_MS = Number(process.env.CODE_ORACLE_EPOCH_TTL_MS ?? 2000);
 
 const epochCache = new Map<string, { at: number; epoch: number }>();
-/** Project epoch = max source-file mtime; sampled ≤ once / 2s so repeat queries are O(1). */
-function projectEpoch(root: string): number {
+/** Project epoch = max source-file mtime; sampled ≤ once / EPOCH_TTL so repeat queries
+ * are O(1). The walk + stats run CONCURRENTLY: on a high-latency FS (e.g. /mnt over WSL)
+ * a serial scan of a 1000+ file tree took ~8s and dominated even cache hits; fanning the
+ * readdir/stat out in parallel overlaps the syscall latency. (Also: .py was missing from
+ * SRC_RE, so Python epochs were stuck at 0 — no change detection.) */
+async function projectEpoch(root: string): Promise<number> {
   const c = epochCache.get(root);
-  if (c && Date.now() - c.at < 2000) return c.epoch;
+  if (c && Date.now() - c.at < EPOCH_TTL_MS) return c.epoch;
   let max = 0;
-  const walk = (d: string) => {
+  const walk = async (d: string): Promise<void> => {
     let ents;
-    try { ents = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    try { ents = await readdir(d, { withFileTypes: true }); } catch { return; }
+    const tasks: Promise<unknown>[] = [];
     for (const e of ents) {
       if (SKIP_DIRS.has(e.name)) continue;
       const p = join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (SRC_RE.test(e.name)) { try { const m = statSync(p).mtimeMs; if (m > max) max = m; } catch { /* gone */ } }
+      if (e.isDirectory()) tasks.push(walk(p));
+      else if (SRC_RE.test(e.name)) tasks.push(stat(p).then((s) => { if (s.mtimeMs > max) max = s.mtimeMs; }).catch(() => {}));
     }
+    await Promise.all(tasks);
   };
-  walk(root);
+  await walk(root);
   const epoch = Math.floor(max);
   epochCache.set(root, { at: Date.now(), epoch });
   return epoch;
@@ -272,7 +285,7 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   const lang = langOf(file);
   if (!lang) return { error: `unsupported file type: ${file} (expected TS/JS or Python).` };
   const be = backend(lang);
-  if (!be) return { error: lang === 'ts' ? 'tsgo not found — set TSGO_BIN or `npm install` in ts-oracle/.' : 'ty not found — install ty or uvx, or set TY_CMD.' };
+  if (!be) return { error: lang === 'ts' ? 'tsgo not found — set TSGO_BIN or `npm install` in code-oracle/.' : 'ty not found — install ty or uvx, or set TY_CMD.' };
   const pos = findPosition(file, args.name, args.line, args.character);
   if (!pos) return { error: `could not locate symbol "${args.name}" in ${file}; pass line/character.` };
 
@@ -281,7 +294,7 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   const cacheKey = `${tool}:${relFile}#${args.name ?? `${pos.line}:${pos.character}`}`;
 
   // Cache gate: serve instantly (no LSP warmup) when the project hasn't changed.
-  const epoch = projectEpoch(root);
+  const epoch = await projectEpoch(root);
   const cache = loadCache(root);
   if (cache.epoch === epoch && cache.entries[cacheKey]) {
     return { ...(cache.entries[cacheKey] as object), cached: true };
@@ -303,6 +316,45 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   cache.entries[cacheKey] = result;
   persistCache(root);
   return result;
+}
+
+/** Python dead-code via vulture (a CLI, not LSP) — orthogonal to the LSP tools and
+ * to code-map's structural dead screen. Run fresh (vulture is fast; no warm session). */
+function runVulture(path: string, minConfidence: number): Promise<string> {
+  return new Promise((res) => {
+    const useUvx = !process.env.VULTURE_CMD;
+    const cmd = process.env.VULTURE_CMD ?? 'uvx';
+    const args = (useUvx ? ['vulture'] : []).concat([path, '--min-confidence', String(minConfidence)]);
+    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout!.on('data', (d) => (out += d));
+    p.on('close', () => res(out));
+    p.on('error', () => res(''));
+  });
+}
+
+async function dead(args: Record<string, any>): Promise<unknown> {
+  if (!args.path) return { error: 'dead needs `path` (a Python file or directory).' };
+  const path = isAbsolute(args.path) ? args.path : resolve(args.root ?? process.cwd(), args.path);
+  if (!existsSync(path)) return { error: `path not found: ${path}` };
+  const minConfidence = Number(args.minConfidence ?? 60);
+  const base = args.root ? resolve(args.root) : path;
+  const out = await runVulture(path, minConfidence);
+  const re = /^(.+?):(\d+): unused (\w+(?: \w+)?) '([^']+)'(?: \((\d+)% confidence\))?/;
+  const items: { file: string; line: number; kind: string; name: string; confidence: number | null }[] = [];
+  for (const line of out.split('\n')) {
+    const m = re.exec(line.trim());
+    if (m) items.push({ file: relative(base, m[1]).replace(/\\/g, '/') || m[1], line: Number(m[2]), kind: m[3], name: m[4], confidence: m[5] ? Number(m[5]) : null });
+  }
+  items.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  return {
+    tool: 'dead',
+    path,
+    minConfidence,
+    count: items.length,
+    dead: items,
+    note: "Python dead-code candidates from vulture (confidence >= minConfidence). A SCREEN, not a verdict — vulture flags dynamically-used / framework-wired code too (DI, plugins, __all__). Verify from raw. Complements code-map's structural dead screen.",
+  };
 }
 
 // ── MCP server (newline-delimited JSON-RPC over stdio, like code-map) ──
@@ -335,6 +387,19 @@ const TOOLS = [
     description: 'Implementations of an interface/abstract method — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls). (tsgo for TS/JS, ty for Python.)',
     inputSchema: INPUT,
   },
+  {
+    name: 'dead',
+    description: 'Python dead-code candidates (unused functions/classes/methods/variables/imports) via vulture — a SCREEN, not a verdict (flags dynamically-used / framework-wired code too). Complements code-map\'s structural dead. Python only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'A Python file or directory (absolute, or relative to root/cwd).' },
+        root: { type: 'string', description: 'Optional base for relative output paths.' },
+        minConfidence: { type: 'number', description: 'vulture min confidence 0-100 (default 60).' },
+      },
+      required: ['path'],
+    },
+  },
 ];
 
 function send(msg: unknown): void { process.stdout.write(JSON.stringify(msg) + '\n'); }
@@ -345,12 +410,12 @@ async function handle(req: any): Promise<void> {
   try {
     switch (method) {
       case 'initialize':
-        return send({ jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion ?? PROTOCOL, capabilities: { tools: {} }, serverInfo: { name: 'ts-oracle', version: '0.1.0' } } });
+        return send({ jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion ?? PROTOCOL, capabilities: { tools: {} }, serverInfo: { name: 'code-oracle', version: '0.1.0' } } });
       case 'tools/list':
         return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
       case 'tools/call': {
-        if (!METHOD[params?.name]) throw new Error(`unknown tool: ${params?.name}`);
-        const result = await query(params.name, params.arguments ?? {});
+        const name = params?.name;
+        const result = name === 'dead' ? await dead(params.arguments ?? {}) : METHOD[name] ? await query(name, params.arguments ?? {}) : (() => { throw new Error(`unknown tool: ${name}`); })();
         return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });
       }
       case 'ping':
@@ -367,7 +432,7 @@ async function handle(req: any): Promise<void> {
 }
 
 function main(): void {
-  if (!backend('ts')) process.stderr.write('ts-oracle: tsgo not found — set TSGO_BIN or `npm install` in ts-oracle/. (Python uses ty via uvx / TY_CMD.) Tools error per-language until present.\n');
+  if (!backend('ts')) process.stderr.write('code-oracle: tsgo not found — set TSGO_BIN or `npm install` in code-oracle/. (Python uses ty via uvx / TY_CMD.) Tools error per-language until present.\n');
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     const t = line.trim();

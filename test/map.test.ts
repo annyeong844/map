@@ -418,6 +418,24 @@ test('graph callers lists possible method-dispatch sites (name-matched, unverifi
   assert.equal(graph(index, 'reload', { direction: 'callees' }).possibleCallers, undefined);
 });
 
+test('calls resolve through a multi-hop re-export chain to the true definition', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/def.ts': 'export function deepFn(): number {\n  return 1;\n}\n',
+      'src/mid.ts': "export { deepFn } from './def.js';\n", // barrel 1
+      'src/top.ts': "export { deepFn } from './mid.js';\n", // barrel 2
+      'src/use.ts': "import { deepFn } from './top.js';\nexport function caller(): number {\n  return deepFn();\n}\n",
+    }),
+  });
+  assert.equal(index.entries.find((e) => e.name === 'deepFn')!.file, 'src/def.ts'); // one def, real location
+  const caller = index.entries.find((e) => e.name === 'caller')!.id;
+  const def = index.entries.find((e) => e.name === 'deepFn')!.id;
+  assert.ok(
+    index.callEdges.some(([from, to]) => from === caller && to === def),
+    'caller → def.ts#deepFn, followed through top → mid → def',
+  );
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

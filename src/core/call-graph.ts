@@ -40,7 +40,8 @@ export function computeCallEdges(
         const imp = imports.find((e) => e.name === call.callee && !e.reexport);
         if (imp) {
           const target = resolveRelative(file, imp.source, fileSet);
-          if (target) toId = defByFileName.get(target)?.get(call.callee);
+          // Follow re-export chains (caller → barrel → … → def), not just one hop.
+          if (target) toId = resolveExportedDef(call.callee, target, importsByFile, defByFileName, fileSet, new Set([target]));
         }
       }
       if (!toId || toId === fromId) continue; // unresolved (external/builtin) or self
@@ -48,6 +49,34 @@ export function computeCallEdges(
     }
   }
   return [...edges].map((e) => e.split('\t') as [string, string]);
+}
+
+/**
+ * Resolve `name` to its defining entry id starting at `file`, following re-export
+ * edges (`export { name } from …` and `export * from …`) transitively through
+ * barrels until a real definition is found. Cycle-guarded via `seen`. This is what
+ * lets a call through a multi-hop barrel chain land on the true definition rather
+ * than dead-ending at the first barrel (which holds an edge, not a symbol).
+ */
+function resolveExportedDef(
+  name: string,
+  file: string,
+  importsByFile: Map<string, ImportEdge[]>,
+  defByFileName: Map<string, Map<string, string>>,
+  fileSet: Set<string>,
+  seen: Set<string>,
+): string | undefined {
+  const here = defByFileName.get(file)?.get(name);
+  if (here) return here;
+  for (const e of importsByFile.get(file) ?? []) {
+    if (!e.reexport || (e.name !== name && e.name !== '*')) continue; // re-export of `name`, or `export *`
+    const tgt = resolveRelative(file, e.source, fileSet);
+    if (!tgt || seen.has(tgt)) continue;
+    seen.add(tgt);
+    const r = resolveExportedDef(name, tgt, importsByFile, defByFileName, fileSet, seen);
+    if (r) return r;
+  }
+  return undefined;
 }
 
 export interface GraphResult {

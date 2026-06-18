@@ -143,6 +143,16 @@ export interface ReadResult {
   note?: string;
   /** Candidate locations for ambiguous / grep-fallback statuses. */
   candidates?: { line: number; preview: string }[];
+  /**
+   * Sub-symbol designator: present only when `read` was given a `snippet`. The
+   * LLM designates a target line by quoting it; this resolves it to exact char
+   * range(s) INSIDE the symbol. `ambiguous` = the snippet occurs more than once
+   * in the symbol (another "classroom" in the same building — hold fire).
+   */
+  aim?: {
+    status: 'hit' | 'ambiguous' | 'not-in-symbol';
+    matches: { line: number; charStart: number; charEnd: number }[];
+  };
 }
 
 export interface GrepMatch {

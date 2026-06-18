@@ -33,7 +33,7 @@ const USAGE = `code-map — routes to coordinates, not meaning.
 
   map index   [--root <dir>] [--out <.map-index.json>] [--force]   (root defaults to .)
   map locate  <query>  [--kind k] [--file f] [--limit n] [--json]
-  map read    <id|query>                                  [--json]
+  map read    <id|query> [--snippet "<text>"]              [--json]   (snippet → sub-symbol char range)
   map graph   <id|query> [--callees] [--depth n]           [--json]   (call graph; default callers + floor)
   map grep    <pattern> [--fixed] [-i] [--file f] [--limit n] [--json]
   map dead    [--file f] [--limit n] [--json]   (exported + no cross-file importer)
@@ -104,10 +104,15 @@ async function main(): Promise<void> {
       const ref = _.slice(1).join(' ');
       if (!ref) die('read needs an <id|query>.');
       const idx = loadIndex(indexPath);
-      const r = read(idx, ref);
+      const snippet = typeof flags.snippet === 'string' ? flags.snippet : undefined;
+      const r = read(idx, ref, { snippet });
       if (json) return void console.log(JSON.stringify(r, null, 2));
       console.log(`# ${r.id}  [${r.status}]  ${r.file}:${r.line}${r.endLine ? `-${r.endLine}` : ''}`);
       if (r.note) console.log(`# note: ${r.note}`);
+      if (r.aim) {
+        console.log(`# aim [${r.aim.status}]: ${r.aim.matches.map((m) => `line ${m.line} (char ${m.charStart}-${m.charEnd})`).join(', ') || 'snippet not found in symbol'}`);
+        if (r.aim.status === 'ambiguous') console.log('#   AMBIGUOUS — snippet matches multiple spots in this symbol; narrow it before targeting.');
+      }
       if (r.raw != null) {
         console.log('---');
         console.log(r.raw);

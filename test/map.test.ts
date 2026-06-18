@@ -283,6 +283,25 @@ test('graph: callers depth>1 = transitive blast radius; callees walks outward; f
   assert.ok(graph(index, index.entries.find((e) => e.name === 'mid')!.id, { direction: 'callees' }).nodes.some((n) => nm(n.id) === 'leaf'));
 });
 
+test('read --snippet designates a sub-symbol char range and flags intra-symbol ambiguity', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/f.ts': 'export function f(): number {\n  const x = 1;\n  return x + 1;\n}\nexport function g(): void {\n  a();\n  a();\n}\nfunction a(): void {}\n',
+    }),
+  });
+  const fId = index.entries.find((e) => e.name === 'f')!.id;
+  const hit = read(index, fId, { snippet: 'const x = 1' });
+  assert.equal(hit.aim?.status, 'hit');
+  assert.equal(hit.aim?.matches.length, 1);
+  assert.ok(hit.raw?.includes('const x = 1'), 'still returns the raw too');
+  // snippet that occurs twice inside g → ambiguous (another "classroom" in the building)
+  const amb = read(index, index.entries.find((e) => e.name === 'g')!.id, { snippet: 'a();' });
+  assert.equal(amb.aim?.status, 'ambiguous');
+  assert.equal(amb.aim?.matches.length, 2);
+  // snippet from g must NOT match inside f — search is scoped to the symbol
+  assert.equal(read(index, fId, { snippet: 'a();' }).aim?.status, 'not-in-symbol');
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

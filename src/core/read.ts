@@ -9,15 +9,40 @@ const LINE_ONLY_WINDOW = 80;
 
 /**
  * Hand back the raw bytes at a routed location — the evidence the LLM judges.
- *
- * Flow, in the order the design demands:
- *   1. coordinates valid (file token matches)  -> exact char-offset slice
- *   2. file changed                            -> re-anchor via searchText
- *   3. anchor ambiguous                        -> return the candidate sites
- *   4. anchor gone                             -> grep the name, return matches
- * Nothing here interprets the code. It only decides *where* to cut.
+ * With `opts.snippet`, also act as a sub-symbol designator: resolve the quoted
+ * snippet to exact char range(s) INSIDE the symbol (extending the drift logic —
+ * searchText/indexOfAll — to an arbitrary span), so a fix lands on the bug line,
+ * not the whole function. Folded into `read` rather than a separate tool: the
+ * snippet is just a finer coordinate on the same "give me the bytes here" call.
  */
-export function read(index: MapIndex, ref: string): ReadResult {
+export function read(index: MapIndex, ref: string, opts: { snippet?: string } = {}): ReadResult {
+  const result = readCore(index, ref);
+  if (opts.snippet) {
+    const entry = resolve(index, ref);
+    if (entry) result.aim = computeAim(index, entry, opts.snippet);
+  }
+  return result;
+}
+
+/**
+ * Resolve a snippet to its char range(s) within a symbol. Searches the symbol's
+ * own bytes when coordinates are trustworthy, else the whole file (best-effort).
+ * `ambiguous` when the snippet occurs more than once — a second "classroom" in
+ * the building; the tool flags it and judges nothing.
+ */
+function computeAim(index: MapIndex, entry: MapEntry, snippet: string): ReadResult['aim'] {
+  const text = tryReadFile(join(index.meta.root, entry.file));
+  if (text == null) return { status: 'not-in-symbol', matches: [] };
+  const bounded = token(text) === index.fileTokens[entry.file] && entry.charStart != null && entry.charEnd != null;
+  const lo = bounded ? entry.charStart! : 0;
+  const hi = bounded ? entry.charEnd! : text.length;
+  const local = indexOfAll(text.slice(lo, hi), snippet);
+  if (!local.length) return { status: 'not-in-symbol', matches: [] };
+  const matches = local.map((o) => ({ line: lineAt(text, lo + o), charStart: lo + o, charEnd: lo + o + snippet.length }));
+  return { status: matches.length > 1 ? 'ambiguous' : 'hit', matches };
+}
+
+function readCore(index: MapIndex, ref: string): ReadResult {
   const entry = resolve(index, ref);
   if (!entry) {
     const hits = locate(index, ref, { limit: 8 });

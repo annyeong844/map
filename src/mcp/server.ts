@@ -91,10 +91,13 @@ const TOOLS = [
   {
     name: 'read',
     description:
-      'Return the RAW source at a routed location — the evidence to interpret yourself. Pass an id from locate, or a bare name. If the file changed since indexing, it re-anchors on the signature line and flags the result; if the anchor is lost, it returns grep matches instead. Read the raw and judge it fresh.',
+      'Return the RAW source at a routed location — the evidence to interpret yourself. Pass an id from locate, or a bare name. If the file changed since indexing, it re-anchors on the signature line and flags the result; if the anchor is lost, it returns grep matches instead. Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Read the raw and judge it fresh.',
     inputSchema: {
       type: 'object',
-      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' } },
+      properties: {
+        ref: { type: 'string', description: 'An id from locate, or a symbol name.' },
+        snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s).' },
+      },
       required: ['ref'],
     },
   },
@@ -138,7 +141,7 @@ function callTool(name: string, args: Record<string, any>): string {
     case 'locate':
       return JSON.stringify(locate(index, String(args.query), { kind: args.kind, file: args.file, limit: args.limit }), null, 2);
     case 'read':
-      return JSON.stringify(read(index, String(args.ref)), null, 2);
+      return JSON.stringify(read(index, String(args.ref), { snippet: args.snippet ? String(args.snippet) : undefined }), null, 2);
     case 'grep':
       return JSON.stringify(
         grep(index.meta.root, String(args.pattern), { fixed: !!args.fixed, file: args.file, caseInsensitive: !!args.caseInsensitive, limit: args.limit }),

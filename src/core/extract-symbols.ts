@@ -52,14 +52,17 @@ export interface FileParse {
 }
 
 /**
- * Collect call sites, attributing each to the enclosing top-level symbol — a
- * function declaration, a class method, or a `const fn = () => …`. Direct calls
- * (`foo()`) carry the callee name; member calls (`obj.m()`) are tagged so the
- * resolver can treat them as ambiguous (no type info to pick the method).
- * Iterative, carrying the current caller down the stack.
+ * ONE deep traversal of the AST that does both jobs — was two separate full walks
+ * (identifier tally + call collection), now merged so each node is visited once:
+ *   • `refs`: every Identifier name's occurrence count (for dead-code intraRefs).
+ *   • `calls`: call sites attributed to the enclosing top-level symbol (function,
+ *     class method, or `const fn = () => …`). Direct `foo()` carries the callee
+ *     name; member `obj.m()` is tagged (no type info to pick the method).
+ * Iterative, carrying the current caller down the stack (big files won't overflow).
  */
-function collectCalls(program: unknown): CallSite[] {
-  const out: CallSite[] = [];
+function walkProgram(program: unknown): { refs: Record<string, number>; calls: CallSite[] } {
+  const refs: Record<string, number> = Object.create(null);
+  const calls: CallSite[] = [];
   const stack: { node: any; caller: string }[] = [{ node: program, caller: '<module>' }];
   while (stack.length) {
     const { node, caller } = stack.pop()!;
@@ -68,14 +71,17 @@ function collectCalls(program: unknown): CallSite[] {
       for (const c of node) stack.push({ node: c, caller });
       continue;
     }
+    if (node.type === 'Identifier' && typeof node.name === 'string') {
+      refs[node.name] = (refs[node.name] ?? 0) + 1;
+    }
     let scope = caller;
     if (node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
     else if (node.type === 'MethodDefinition' && node.key?.name) scope = node.key.name;
     else if (node.type === 'VariableDeclarator' && node.id?.name && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) scope = node.id.name;
     if (node.type === 'CallExpression' && node.callee) {
       const c = node.callee;
-      if (c.type === 'Identifier') out.push({ caller: scope, callee: c.name, member: false });
-      else if (c.type === 'MemberExpression' && !c.computed && c.property?.name) out.push({ caller: scope, callee: c.property.name, member: true });
+      if (c.type === 'Identifier') calls.push({ caller: scope, callee: c.name, member: false });
+      else if (c.type === 'MemberExpression' && !c.computed && c.property?.name) calls.push({ caller: scope, callee: c.property.name, member: true });
     }
     for (const k in node) {
       if (k === 'type') continue;
@@ -83,30 +89,7 @@ function collectCalls(program: unknown): CallSite[] {
       if (v && typeof v === 'object') stack.push({ node: v, caller: scope });
     }
   }
-  return out;
-}
-
-/** Count every Identifier name in the AST (iterative — big files won't overflow the stack). */
-function tallyIdentifiers(program: unknown): Record<string, number> {
-  const counts: Record<string, number> = Object.create(null);
-  const stack: unknown[] = [program];
-  while (stack.length) {
-    const node = stack.pop() as any;
-    if (!node || typeof node !== 'object') continue;
-    if (Array.isArray(node)) {
-      for (const c of node) stack.push(c);
-      continue;
-    }
-    if (node.type === 'Identifier' && typeof node.name === 'string') {
-      counts[node.name] = (counts[node.name] ?? 0) + 1;
-    }
-    for (const k in node) {
-      if (k === 'type') continue;
-      const v = node[k];
-      if (v && typeof v === 'object') stack.push(v);
-    }
-  }
-  return counts;
+  return { refs, calls };
 }
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -213,7 +196,8 @@ export function extractSymbols(file: string, text: string): FileParse {
     }
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);
   }
-  return { symbols, imports, refs: tallyIdentifiers(res.program), calls: collectCalls(res.program) };
+  const { refs, calls } = walkProgram(res.program);
+  return { symbols, imports, refs, calls };
 }
 
 function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {

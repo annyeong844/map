@@ -23,7 +23,12 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PROTOCOL = '2025-06-18';
-const WARMUP_MS = Number(process.env.TS_ORACLE_WARMUP_MS ?? 15000);
+// Readiness by quiescence: the project is "loaded" once tsgo stops emitting
+// log/progress messages for QUIET_MS — far better than a fixed sleep. Bounded by
+// MIN_MS (don't trust a momentary pause) and MAX_MS (never hang).
+const QUIET_MS = Number(process.env.TS_ORACLE_QUIET_MS ?? 1500);
+const MIN_MS = Number(process.env.TS_ORACLE_MIN_MS ?? 1500);
+const MAX_MS = Number(process.env.TS_ORACLE_WARMUP_MS ?? 30000);
 const REQ_TIMEOUT_MS = Number(process.env.TS_ORACLE_REQ_TIMEOUT_MS ?? 40000);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +60,7 @@ class TsgoLsp {
   private opened = new Map<string, number>(); // uri -> version
   private initDone: Promise<void>;
   private warmed = false;
+  private lastMsgAt = Date.now();
 
   constructor(bin: string, root: string) {
     this.proc = spawn(process.execPath, [bin, '--lsp', '--stdio'], { stdio: ['pipe', 'pipe', 'ignore'] });
@@ -63,6 +69,7 @@ class TsgoLsp {
   }
 
   private onData(d: Buffer): void {
+    this.lastMsgAt = Date.now(); // bump on any server activity (logs/progress) — drives quiescence readiness
     this.buf = Buffer.concat([this.buf, d]);
     for (;;) {
       const sep = this.buf.indexOf('\r\n\r\n');
@@ -125,20 +132,29 @@ class TsgoLsp {
     return uri;
   }
 
-  /** Caller sites of the symbol at (file, position) — LSP references, declaration excluded. */
-  async references(file: string, line: number, character: number): Promise<{ uri: string; line: number }[]> {
+  /** Wait until the project is loaded — tsgo has gone quiet for QUIET_MS (bounded). */
+  private async waitReady(): Promise<void> {
+    if (this.warmed) return;
+    const start = Date.now();
+    for (;;) {
+      const elapsed = Date.now() - start;
+      if ((Date.now() - this.lastMsgAt > QUIET_MS && elapsed > MIN_MS) || elapsed > MAX_MS) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    this.warmed = true;
+  }
+
+  /** Run an LSP location query (`references` / `definition` / `implementation`) at a
+   * position; return target locations. Handles both Location and LocationLink shapes. */
+  async locate(method: string, file: string, line: number, character: number): Promise<{ uri: string; line: number }[]> {
     await this.initDone;
     const uri = this.syncFile(file);
-    if (!this.warmed) {
-      await new Promise((r) => setTimeout(r, WARMUP_MS)); // one-time project warmup; session stays warm after
-      this.warmed = true;
-    }
-    const r = (await this.request('textDocument/references', {
-      textDocument: { uri },
-      position: { line, character },
-      context: { includeDeclaration: false },
-    })) as { uri: string; range: { start: { line: number } } }[] | null;
-    return (r ?? []).map((l) => ({ uri: l.uri, line: l.range.start.line }));
+    await this.waitReady();
+    const params: Record<string, unknown> = { textDocument: { uri }, position: { line, character } };
+    if (method === 'textDocument/references') params.context = { includeDeclaration: false };
+    const r = (await this.request(method, params)) as any;
+    const arr = Array.isArray(r) ? r : r ? [r] : [];
+    return arr.map((l: any) => ({ uri: l.uri ?? l.targetUri, line: (l.range ?? l.targetRange)?.start?.line ?? 0 })).filter((x: any) => x.uri);
   }
 
   dispose(): void { try { this.proc.kill(); } catch { /* ignore */ } }
@@ -218,10 +234,23 @@ function sourceLine(file: string, line0: number): string {
   return (ls[line0] ?? '').trim().slice(0, 160);
 }
 
-async function callers(args: Record<string, any>): Promise<unknown> {
+const METHOD: Record<string, string> = {
+  callers: 'textDocument/references',
+  definition: 'textDocument/definition',
+  implementations: 'textDocument/implementation',
+};
+const NOTE: Record<string, string> = {
+  callers: 'Type-aware callers via tsgo references (checker grade; resolves through interfaces / standard DI). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) stays invisible — a residual for the agent to read.',
+  definition: 'Type-aware definition(s) via tsgo — where this symbol/expression actually resolves (the precise callee), not a name guess.',
+  implementations: 'Implementations via tsgo (type-aware CHA) — the concrete classes/methods behind an interface/abstract; the over-approximate set that is sound for blast radius.',
+};
+
+/** One query path for all three tools: resolve a position, gate on the cache, else
+ * ask the warm tsgo session (references / definition / implementation), format. */
+async function query(tool: string, args: Record<string, any>): Promise<unknown> {
   const bin = tsgoBin();
   if (!bin) return { error: 'tsgo not found. Set TSGO_BIN to @typescript/native-preview/bin/tsgo.js, or `npm install` in ts-oracle/.' };
-  if (!args.file) return { error: 'callers needs `file` (and `name` or line/character).' };
+  if (!args.file) return { error: `${tool} needs \`file\` (and \`name\` or line/character).` };
   const file = isAbsolute(args.file) ? args.file : resolve(args.root ?? process.cwd(), args.file);
   if (!existsSync(file)) return { error: `file not found: ${file}` };
   const pos = findPosition(file, args.name, args.line, args.character);
@@ -229,7 +258,7 @@ async function callers(args: Record<string, any>): Promise<unknown> {
 
   const root = args.root ? resolve(args.root) : projectRoot(file);
   const relFile = relative(root, file).replace(/\\/g, '/');
-  const cacheKey = `${relFile}#${args.name ?? `${pos.line}:${pos.character}`}`;
+  const cacheKey = `${tool}:${relFile}#${args.name ?? `${pos.line}:${pos.character}`}`;
 
   // Cache gate: serve instantly (no LSP warmup) when the project hasn't changed.
   const epoch = projectEpoch(root);
@@ -238,10 +267,10 @@ async function callers(args: Record<string, any>): Promise<unknown> {
     return { ...(cache.entries[cacheKey] as object), cached: true };
   }
 
-  const refs = await session(root, bin).references(file, pos.line, pos.character);
+  const locs = await session(root, bin).locate(METHOD[tool], file, pos.line, pos.character);
   const seen = new Set<string>();
   const out: { file: string; line: number; preview: string }[] = [];
-  for (const r of refs) {
+  for (const r of locs) {
     const f = fileURLToPath(r.uri);
     const dk = `${f}\t${r.line}`;
     if (seen.has(dk)) continue;
@@ -249,14 +278,7 @@ async function callers(args: Record<string, any>): Promise<unknown> {
     out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line) });
   }
   out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
-  const result = {
-    symbol: { file: relFile, name: args.name ?? null, position: pos },
-    root,
-    callers: out,
-    count: out.length,
-    cached: false,
-    note: 'Type-aware callers via tsgo LSP references (checker grade, resolves through interfaces/DI standard cases). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) is still invisible to the checker — a residual the agent must resolve from raw.',
-  };
+  const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note: NOTE[tool] };
   if (cache.epoch !== epoch) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
   cache.entries[cacheKey] = result;
   persistCache(root);
@@ -264,22 +286,34 @@ async function callers(args: Record<string, any>): Promise<unknown> {
 }
 
 // ── MCP server (newline-delimited JSON-RPC over stdio, like code-map) ──
+const INPUT = {
+  type: 'object',
+  properties: {
+    file: { type: 'string', description: 'Source file (absolute, or relative to root/cwd).' },
+    name: { type: 'string', description: 'Symbol name (its first occurrence in the file is used).' },
+    line: { type: 'number', description: 'Optional 0-based line of the symbol (use with character).' },
+    character: { type: 'number', description: 'Optional 0-based column of the symbol.' },
+    root: { type: 'string', description: 'Optional project root; default = nearest ancestor tsconfig.json.' },
+  },
+  required: ['file'],
+} as const;
+
 const TOOLS = [
   {
     name: 'callers',
     description:
-      'Type-aware callers of a symbol — "who calls this", at TypeScript-checker grade via a warm tsgo LSP session. Resolves calls through interfaces and standard DI (declaration types) that a structural call graph cannot. Pass `file` (abs or relative to `root`) and `name` (the symbol; its first occurrence is used) or explicit `line`/`character` (0-based). Optional `root` (project dir; else the nearest tsconfig.json). First call warms the project (~seconds); the session stays warm after.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        file: { type: 'string', description: 'Source file (absolute, or relative to root/cwd).' },
-        name: { type: 'string', description: 'Symbol name to find callers of (its first occurrence in the file).' },
-        line: { type: 'number', description: 'Optional 0-based line of the symbol (use with character).' },
-        character: { type: 'number', description: 'Optional 0-based column of the symbol.' },
-        root: { type: 'string', description: 'Optional project root; default = nearest ancestor tsconfig.json.' },
-      },
-      required: ['file'],
-    },
+      'Type-aware callers of a symbol — "who calls this", at TypeScript-checker grade via a warm tsgo LSP session. Resolves calls through interfaces and standard DI (declaration types) that a structural call graph cannot. First call warms the project (~seconds); the session stays warm and answers are cached.',
+    inputSchema: INPUT,
+  },
+  {
+    name: 'definition',
+    description: 'Type-aware definition(s) of the symbol/expression at a location — where `obj.m()` actually resolves (the precise callee), via tsgo. Not a name guess.',
+    inputSchema: INPUT,
+  },
+  {
+    name: 'implementations',
+    description: 'Implementations of an interface/abstract method via tsgo — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls).',
+    inputSchema: INPUT,
   },
 ];
 
@@ -295,8 +329,8 @@ async function handle(req: any): Promise<void> {
       case 'tools/list':
         return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
       case 'tools/call': {
-        if (params?.name !== 'callers') throw new Error(`unknown tool: ${params?.name}`);
-        const result = await callers(params.arguments ?? {});
+        if (!METHOD[params?.name]) throw new Error(`unknown tool: ${params?.name}`);
+        const result = await query(params.name, params.arguments ?? {});
         return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });
       }
       case 'ping':
@@ -331,4 +365,4 @@ let isEntry = false;
 try { isEntry = !!process.argv[1] && (await import('node:fs')).realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { /* imported */ }
 if (isEntry) main();
 
-export { callers, TOOLS };
+export { query, TOOLS };

@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
 import { graph } from '../src/core/call-graph.ts';
 import { grep } from '../src/core/grep.ts';
+import { hotspots } from '../src/core/hotspots.ts';
 import { locate } from '../src/core/locate.ts';
 import { stripJsonc } from '../src/core/public-surface.ts';
 import { read } from '../src/core/read.ts';
@@ -300,6 +301,23 @@ test('read --snippet designates a sub-symbol char range and flags intra-symbol a
   assert.equal(amb.aim?.matches.length, 2);
   // snippet from g must NOT match inside f — search is scoped to the symbol
   assert.equal(read(index, fId, { snippet: 'a();' }).aim?.status, 'not-in-symbol');
+});
+
+test('hotspots: static-only mode (no git) ranks by coupling/size, carries evidence, gives no verdict', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/core.ts': `export function bigHub(): number {\n${'  let q = 0;\n'.repeat(40)}  return q;\n}\nexport function tiny(): number { return 1; }\n`,
+      'src/a.ts': "import { bigHub } from './core.js';\nexport function ua(): number { return bigHub(); }\n",
+      'src/b.ts': "import { bigHub } from './core.js';\nexport function ub(): number { return bigHub(); }\n",
+    }),
+  });
+  const r = hotspots(index, { nowMs: 0 }); // a temp dir is not a git repo → static-only
+  assert.equal(r.historyAvailable, false);
+  assert.match(r.note, /STATIC/);
+  const big = r.hotspots.findIndex((h) => h.name === 'bigHub');
+  const tiny = r.hotspots.findIndex((h) => h.name === 'tiny');
+  assert.ok(big !== -1 && (tiny === -1 || big < tiny), 'large, high-fan-in hub outranks the tiny unused fn');
+  assert.ok(r.hotspots[big].evidence.fanIn >= 2 && r.hotspots[big].evidence.fileFixes === 0, 'evidence carries fan-in; no fix data without history');
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

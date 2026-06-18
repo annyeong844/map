@@ -132,9 +132,22 @@ export function extractSymbols(file: string, text: string): FileParse {
   if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {}, calls: [] };
 
   // Local top-level declarations by name, so `export { foo as bar }` can point
-  // at foo's real coordinates rather than the specifier.
+  // at foo's real coordinates rather than the specifier. Also track imported
+  // bindings → their source export, so `import { x }; export { x }` is recognized
+  // as a re-export (an edge to the real definition) rather than a local symbol.
   const locals = new Map<string, any>();
+  const importedFrom = new Map<string, { source: string; name: string }>();
   for (const node of body) {
+    if (node.type === 'ImportDeclaration') {
+      for (const spec of node.specifiers ?? []) {
+        const ln = spec.local?.name;
+        if (!ln || importedFrom.has(ln)) continue;
+        if (spec.type === 'ImportSpecifier' && spec.imported?.name) importedFrom.set(ln, { source: node.source.value, name: spec.imported.name });
+        else if (spec.type === 'ImportDefaultSpecifier') importedFrom.set(ln, { source: node.source.value, name: 'default' });
+        else if (spec.type === 'ImportNamespaceSpecifier') importedFrom.set(ln, { source: node.source.value, name: '*' });
+      }
+      continue;
+    }
     const decl = node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration' ? node.declaration : node;
     if (decl && isDeclNode(decl.type)) {
       if (decl.id?.name && !locals.has(decl.id.name)) locals.set(decl.id.name, decl);
@@ -173,6 +186,13 @@ export function extractSymbols(file: string, text: string): FileParse {
       for (const spec of node.specifiers ?? []) {
         if (spec.type !== 'ExportSpecifier' || !spec.exported?.name) continue;
         const local = spec.local?.name ?? spec.exported.name;
+        const reexp = importedFrom.get(local);
+        if (reexp) {
+          // `import { x } …; export { x }` — re-export of an imported binding. Edge
+          // to the true definition, NOT a local symbol (else this barrel shadows it).
+          imports.push({ source: reexp.source, name: reexp.name, reexport: true });
+          continue;
+        }
         const target = locals.get(local) ?? spec;
         symbols.push({ name: spec.exported.name, kind: 'ExportSpecifier', charStart: target.start, charEnd: target.end, exported: true });
       }

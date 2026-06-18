@@ -381,6 +381,27 @@ test('symbol-level history isolates a helper extracted in the same commit (no cr
   assert.equal(helper?.fixes, 0, 'freshly extracted helper must NOT inherit risky fixes');
 });
 
+test('re-exported imports are not indexed as barrel symbols; calls resolve to the true definition', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/parser.ts': 'export function isResetIntent(): boolean {\n  return true;\n}\n',
+      'src/pipeline.ts': "import { isResetIntent } from './parser.js';\nexport { isResetIntent };\nexport function run(): boolean {\n  return isResetIntent();\n}\n",
+      'src/barrel.ts': "export { isResetIntent } from './parser.js';\n",
+    }),
+  });
+  // isResetIntent has ONE definition — parser.ts. The barrel/re-export sites must
+  // not be indexed as their own symbols (that shadows the real definition).
+  const files = [...new Set(index.entries.filter((e) => e.name === 'isResetIntent').map((e) => e.file))];
+  assert.deepEqual(files, ['src/parser.ts'], 'isResetIntent indexed only at its real definition');
+  // A call follows the import to the real definition, not the local re-export.
+  const run = index.entries.find((e) => e.name === 'run')!.id;
+  const realDef = index.entries.find((e) => e.name === 'isResetIntent' && e.file === 'src/parser.ts')!.id;
+  assert.ok(
+    index.callEdges.some(([from, to]) => from === run && to === realDef),
+    'run() → parser.ts#isResetIntent (not the pipeline.ts re-export)',
+  );
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

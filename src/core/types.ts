@@ -24,9 +24,10 @@ export interface MapEntry {
   /** 1-based end line, when derivable. */
   endLine?: number;
   /**
-   * UTF-16 code-unit offsets into the file text (NOT byte offsets).
-   * Present for top-level definitions; absent for class methods (line-only).
-   * read() slices `fileText.slice(charStart, charEnd)` for an exact extract.
+   * UTF-16 code-unit offsets into the file text (NOT byte offsets) — present for
+   * every symbol oxc extracts, including class methods. read() slices
+   * `fileText.slice(charStart, charEnd)` for an exact extract. (Optional only so
+   * a future line-only source could omit them.)
    */
   charStart?: number;
   charEnd?: number;
@@ -42,8 +43,8 @@ export interface MapEntry {
   static?: boolean;
   /**
    * Cross-module call-site count — a structural ranking tiebreaker (not
-   * interpretation). Reserved: currently always 0 until computed natively
-   * (resolve imports, count cross-file references).
+   * interpretation). Computed natively in fan-in.ts: distinct files that import
+   * this symbol (named/default imports + re-exports, relative specifiers).
    */
   fanIn?: number;
   /**

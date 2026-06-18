@@ -80,7 +80,7 @@ async function main(): Promise<void> {
     }
 
     case 'locate': {
-      const query = _[1];
+      const query = _.slice(1).join(' '); // join so `locate compute the diff` works unquoted
       if (!query) die('locate needs a <query>.');
       const idx = loadIndex(indexPath);
       const hits = locate(idx, query, {
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
     }
 
     case 'grep': {
-      const pattern = _[1];
+      const pattern = _.slice(1).join(' '); // join so a multi-word pattern works unquoted
       if (!pattern) die('grep needs a <pattern>.');
       const idx = loadIndex(indexPath);
       const matches = grep(idx.meta.root, pattern, {

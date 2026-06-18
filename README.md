@@ -127,6 +127,7 @@ and is far cheaper on a native filesystem).
 ```bash
 node src/cli/main.ts locate buildAliasMap --limit 3
 node src/cli/main.ts locate handler --kind method --file routes
+node src/cli/main.ts locate compute the diff                   # multi-word concept (no quotes needed)
 
 node src/cli/main.ts read "_lib/alias-map.mjs#buildAliasMap"   # id from locate
 node src/cli/main.ts read buildAliasMap                        # bare name (errors if ambiguous)
@@ -134,6 +135,7 @@ node src/cli/main.ts read buildAliasMap                        # bare name (erro
 node src/cli/main.ts grep "buildAliasMap(" --fixed --file alias-map
 node src/cli/main.ts grep "export (async )?function \w+" --limit 20
 
+node src/cli/main.ts dead --file src/    # exported + no cross-file importer (dead-code vs dead-export)
 node src/cli/main.ts stats
 ```
 

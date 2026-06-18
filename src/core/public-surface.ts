@@ -97,15 +97,67 @@ function collectStrings(v: unknown, out: string[]): void {
   else if (v && typeof v === 'object') for (const k of Object.keys(v as object)) collectStrings((v as Record<string, unknown>)[k], out);
 }
 
-/** Parse JSON tolerating JSONC (tsconfig comments + trailing commas); null on failure. */
+/**
+ * Strip JSONC comments with a string-aware state machine — a regex can't, since
+ * `//` and `/*` inside a string value ("https://…", "a/*b") are not comments.
+ * (The same technique Lumin uses for TS source; here, zero-dep, for config JSON —
+ * deliberately not pulling in `typescript` just to read outDir/rootDir.)
+ */
+export function stripJsonc(s: string): string {
+  let out = '';
+  let inStr = false;
+  let quote = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    const d = s[i + 1];
+    if (inStr) {
+      out += c;
+      if (c === '\\') {
+        out += d ?? '';
+        i++;
+      } else if (c === quote) {
+        inStr = false;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inStr = true;
+      quote = c;
+      out += c;
+      continue;
+    }
+    if (c === '/' && d === '/') {
+      while (i < s.length && s[i] !== '\n') i++;
+      out += '\n';
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** Parse JSON tolerating JSONC (comments; trailing commas as a fallback); null on failure. */
 function readJsonLoose(path: string): any {
+  let raw: string;
   try {
-    const s = readFileSync(path, 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/(^|[^:"])\/\/.*$/gm, '$1')
-      .replace(/,(\s*[}\]])/g, '$1');
-    return JSON.parse(s);
+    raw = readFileSync(path, 'utf8');
   } catch {
     return null;
+  }
+  const cleaned = stripJsonc(raw);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    try {
+      return JSON.parse(cleaned.replace(/,(\s*[}\]])/g, '$1')); // tolerate trailing commas
+    } catch {
+      return null;
+    }
   }
 }

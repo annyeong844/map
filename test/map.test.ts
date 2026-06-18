@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
 import { grep } from '../src/core/grep.ts';
 import { locate } from '../src/core/locate.ts';
+import { stripJsonc } from '../src/core/public-surface.ts';
 import { read } from '../src/core/read.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
@@ -212,6 +213,14 @@ test('public surface (package.json → tsconfig src map → re-export closure) s
   const deadOne = index.entries.find((e) => e.name === 'deadOne')!;
   assert.equal(deadOne.fanIn, 0);
   assert.ok(!index.publicFiles.includes(deadOne.file));
+});
+
+test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
+  const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
+  const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));
+  assert.equal(parsed.url, 'https://x//y', 'double-slash inside a string is not a comment');
+  assert.equal(parsed.glob, 'a/*b*/c', 'slash-star inside a string is not a comment');
+  assert.equal(parsed.n, 1);
 });
 
 test('grep parses matches on CRLF files', async () => {

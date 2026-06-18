@@ -167,10 +167,12 @@ claude mcp add code-map --scope user -- map-mcp
 { "mcpServers": { "code-map": { "command": "map-mcp" } } }
 ```
 
-Exposes four tools — `locate`, `read`, `grep`, and `graph` (call-graph navigation:
+Exposes five tools — `locate`, `read`, `grep`, `graph` (call-graph navigation:
 `direction` callers/callees, `depth` for transitive; the `callers` result carries a
 `floor` — a lower bound, since `obj.method()` dispatch isn't in the graph, so it's
-never "clear"). The server **auto-detects** the index: it walks up
+never "clear"), and `hotspots` (bug-risk impact points with their evidence — bug-fix
+recurrence + churn + spatial locality + coupling/size; evidence, not a verdict). The
+server **auto-detects** the index: it walks up
 from the working directory for `.map-index.json`, so one global server serves whatever
 project it's launched in — just run `map index` in that project. It **auto-reloads**
 when the index changes (stats it before each tool call), so a rebuild (or the first

@@ -2,10 +2,10 @@
 /**
  * Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0), zero deps.
  *
- * It exposes four tools and nothing else — locate, read, grep, graph — so a
- * model consuming this server gets coordinates, raw bytes, and call-graph
- * navigation, and does the interpreting itself. The server never summarizes; it
- * routes and quotes.
+ * It exposes five tools and nothing else — locate, read, grep, graph, hotspots —
+ * so a model consuming this server gets coordinates, raw bytes, call-graph
+ * navigation, and bug-risk evidence, and does the interpreting itself. The server
+ * never summarizes or judges; it routes, quotes, and hands over evidence.
  *
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
@@ -14,6 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { graph } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
+import { hotspots } from '../core/hotspots.ts';
 import { locate } from '../core/locate.ts';
 import { read } from '../core/read.ts';
 import { loadIndex } from '../core/store.ts';
@@ -130,6 +131,18 @@ const TOOLS = [
       required: ['ref'],
     },
   },
+  {
+    name: 'hotspots',
+    description:
+      'Bug-risk impact points to investigate, each with the EVIDENCE behind it — bug-fix recurrence + churn (from git history), call-graph spatial locality, fan-in coupling, and size. NOT a verdict: it points "look here, and why"; you read the raw and judge whether a bug is real. Strong (process) signals need git history; without it, falls back to static (fan-in/size) — a coarser screen. Optional file-path filter and limit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'Restrict to files whose path contains this substring.' },
+        limit: { type: 'number', description: 'Max hotspots (default 25).' },
+      },
+    },
+  },
 ];
 
 function callTool(name: string, args: Record<string, any>): string {
@@ -153,6 +166,8 @@ function callTool(name: string, args: Record<string, any>): string {
       const g = graph(index, String(args.ref), { direction, depth: args.depth });
       return JSON.stringify(g.symbol ? g : { error: `no symbol matches "${args.ref}"` }, null, 2);
     }
+    case 'hotspots':
+      return JSON.stringify(hotspots(index, { limit: args.limit, nowMs: Date.now(), file: args.file ? String(args.file) : undefined }), null, 2);
     default:
       throw new Error(`unknown tool: ${name}`);
   }

@@ -204,3 +204,34 @@ test/map.test.ts   # extract, exact-slice, methods, relocation, grep-fallback, i
 ```bash
 node --test "test/*.test.ts"
 ```
+
+### `code-oracle/` — the optional type oracle (a sibling, not the core)
+
+The core resolves the call graph *structurally* — direct calls and `this`/`super`,
+instant and light. It deliberately does **not** resolve `obj.method()` dispatch,
+which needs types; `graph`'s `floor` says so honestly (a lower bound, name-matched
+& unverified) and now points here to verify. `code-oracle/` is a **separate MCP**
+that answers *who calls this / what implements this / where is this defined* at
+type-checker grade over a warm LSP session:
+
+- **`callers` · `definition` · `implementations`.** `implementations` is type-aware
+  Class Hierarchy Analysis (interface → every concrete impl) — the over-approximate
+  set that is sound for blast radius, including DI-injected impls a structural graph
+  can't draw. Fan-out can be wide (N impls = N sites); that breadth is the nature of
+  dispatch, biased safely toward over-inclusion.
+- **Multi-language:** tsgo (TypeScript-Go) for TS/JS, `ty` for Python — picked by
+  file extension; both speak LSP, so the warm session, persistent answer-cache, and
+  readiness logic are shared.
+- **Why it's separate.** It has the *opposite* profile to the core: a heavy, pinned
+  preview dependency, seconds of project warmup, a stateful LSP session. Isolating it
+  keeps the core's "one dependency, no machinery" promise intact, and lets the backend
+  be swapped later (LSP today → a stable typed API) without touching the core. The
+  seam is the call-graph `floor` (lower bound) → oracle (checker-confirmed set).
+- **Honest bounds.** tsgo is solid; `ty` (early preview) currently resolves
+  `definition` cross-file but `references`/`implementations` intra-file only, so
+  Python `callers` carry `incomplete: true`. Truly dynamic dispatch (token-only DI,
+  `Proxy`, `obj[k]()`) is invisible to any checker — a residual for the reader.
+
+`code-oracle/` has its own `package.json` (its preview dep is pinned exact) and
+tests (`cd code-oracle && npm test` — the interface-dispatch fixture asserts
+`implementations` returns every concrete impl).

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Multi-language type-aware resolution MCP over a warm LSP session (tsgo for TS/JS, ty for Python) — sibling to code-map. Isolated here so code-map's core stays zero-heavy-dep.",
   "bin": { "code-oracle-mcp": "./server.ts" },
-  "scripts": { "start": "node server.ts" },
+  "scripts": { "start": "node server.ts", "test": "node --test \"test/*.test.ts\"" },
   "engines": { "node": ">=23.6" },
   "_dependencyNote": "tsgo is a daily preview build (preview churn) — pinned EXACT to a known-good day, not a floating caret, so a standalone install reproduces. Bump deliberately. Python uses ty via `uvx ty server` + python3 (no npm pin).",
   "dependencies": { "@typescript/native-preview": "7.0.0-dev.20260618.1" }

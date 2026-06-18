@@ -408,4 +408,11 @@ let isEntry = false;
 try { isEntry = !!process.argv[1] && (await import('node:fs')).realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { /* imported */ }
 if (isEntry) main();
 
+/** Kill every warm LSP session — tests must call this or the live tsgo/ty child
+ * keeps the process alive. */
+export function disposeAll(): void {
+  for (const s of sessions.values()) s.dispose();
+  sessions.clear();
+}
+
 export { query, TOOLS };

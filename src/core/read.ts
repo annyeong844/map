@@ -1,45 +1,8 @@
 import { join } from 'node:path';
 import { grep } from './grep.ts';
 import { locate } from './locate.ts';
-import type { AimResult, MapEntry, MapIndex, ReadResult } from './types.ts';
+import type { MapEntry, MapIndex, ReadResult } from './types.ts';
 import { indexOfAll, lineAt, offsetOfLine, token, tryReadFile } from './util.ts';
-
-/**
- * Aim INSIDE a symbol: resolve an LLM-chosen snippet to its exact char range(s)
- * within the symbol's body — extending read's re-anchor logic to sub-symbol
- * precision so a fix targets the bug line, not the whole function. The LLM
- * supplies meaning (which lines); this only turns the snippet into coordinates,
- * and flags ambiguity if the snippet occurs more than once inside the symbol.
- */
-export function aim(index: MapIndex, ref: string, snippet: string): AimResult {
-  const entry = resolve(index, ref);
-  if (!entry) return { status: 'not-found', id: ref, file: '', matches: [], note: `No symbol matches "${ref}".` };
-  const text = tryReadFile(join(index.meta.root, entry.file));
-  if (text == null) return { status: 'not-found', id: entry.id, file: entry.file, matches: [], note: `File not readable: ${entry.file}` };
-
-  const fresh = token(text) === index.fileTokens[entry.file];
-  const bounded = fresh && entry.charStart != null && entry.charEnd != null;
-  const lo = bounded ? entry.charStart! : 0; // search the symbol's bytes when coords hold, else whole file
-  const hi = bounded ? entry.charEnd! : text.length;
-  const local = indexOfAll(text.slice(lo, hi), snippet);
-  if (!local.length) {
-    return {
-      status: 'not-in-symbol',
-      id: entry.id,
-      file: entry.file,
-      matches: [],
-      note: bounded ? `Snippet not found inside ${entry.id}; pick text that occurs in its body.` : 'File changed since indexing; searched the whole file and found no match.',
-    };
-  }
-  const matches = local.map((o) => ({ line: lineAt(text, lo + o), charStart: lo + o, charEnd: lo + o + snippet.length }));
-  return {
-    status: matches.length > 1 ? 'ambiguous' : 'hit',
-    id: entry.id,
-    file: entry.file,
-    matches,
-    note: matches.length > 1 ? `Snippet matches ${matches.length} places inside this symbol — narrow it.` : !bounded ? 'File changed since indexing; range is best-effort.' : undefined,
-  };
-}
 
 /** Lines of trailing context for line-only symbols with no known sibling boundary. */
 const LINE_ONLY_WINDOW = 80;

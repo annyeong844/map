@@ -150,14 +150,3 @@ export interface GrepMatch {
   line: number;
   text: string;
 }
-
-/** Sub-symbol aim: resolve an LLM-chosen snippet to exact char ranges INSIDE a
- * symbol — so a fix lands on the bug line, not the whole function. Ambiguous when
- * the snippet occurs more than once inside the symbol. */
-export interface AimResult {
-  status: 'hit' | 'ambiguous' | 'not-in-symbol' | 'not-found';
-  id: string;
-  file: string;
-  matches: { line: number; charStart: number; charEnd: number }[];
-  note?: string;
-}

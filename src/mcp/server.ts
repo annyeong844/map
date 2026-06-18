@@ -2,20 +2,20 @@
 /**
  * Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0), zero deps.
  *
- * It exposes the three primitives and nothing else — locate, read, grep — so a
- * model consuming this server gets coordinates and raw bytes, and does the
- * interpreting itself. The server never summarizes; it routes and quotes.
+ * It exposes four tools and nothing else — locate, read, grep, graph — so a
+ * model consuming this server gets coordinates, raw bytes, and call-graph
+ * navigation, and does the interpreting itself. The server never summarizes; it
+ * routes and quotes.
  *
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { blastRadiusBrief } from '../core/brief.ts';
-import { callNeighbors, impactSet, possibleMemberCallers } from '../core/call-graph.ts';
+import { graph } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
 import { locate } from '../core/locate.ts';
-import { aim, read } from '../core/read.ts';
+import { read } from '../core/read.ts';
 import { loadIndex } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
 
@@ -114,51 +114,17 @@ const TOOLS = [
     },
   },
   {
-    name: 'callees',
+    name: 'graph',
     description:
-      'Direct functions/methods that this symbol calls — follow the thread outward (what it depends on / orchestrates). Resolves ref to one symbol, then walks the call graph. Direct calls only; `obj.method()` dispatch is not resolved.',
+      'Walk the call graph from a symbol. direction="callers" (default) = who depends on it — the blast radius; "callees" = what it calls. depth=1 (default) is direct neighbours, depth>1 is transitive. For callers the result includes a `floor`: a LOWER BOUND, because `obj.method()` dispatch is not in the graph — never treat a small/empty result as "safe".',
     inputSchema: {
       type: 'object',
-      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' } },
+      properties: {
+        ref: { type: 'string', description: 'An id from locate, or a symbol name.' },
+        direction: { type: 'string', enum: ['callers', 'callees'], description: 'callers (default) or callees.' },
+        depth: { type: 'number', description: 'Traversal depth; 1 = direct (default), >1 = transitive.' },
+      },
       required: ['ref'],
-    },
-  },
-  {
-    name: 'callers',
-    description:
-      'Direct call sites of this symbol — who depends on it (blast radius; entry points that reach it). Resolves ref to one symbol, then walks the call graph. Direct calls only; `obj.method()` dispatch is not resolved.',
-    inputSchema: {
-      type: 'object',
-      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' } },
-      required: ['ref'],
-    },
-  },
-  {
-    name: 'brief',
-    description:
-      'Blast-radius brief BEFORE changing a symbol: its raw, what it calls, who calls it, the transitive impact set, and OTHER definitions of the same name (vendored copies/overloads — the tool never picks which is "the" one; you judge from the raw). The `floor` field is a LOWER BOUND — method-dispatch callers are uncounted, so it is never "no impact". Read it before you touch anything.',
-    inputSchema: {
-      type: 'object',
-      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' }, depth: { type: 'number', description: 'Max transitive-caller depth (default 6).' } },
-      required: ['ref'],
-    },
-  },
-  {
-    name: 'impact',
-    description: 'Transitive callers of a symbol (reverse call-graph BFS) — everything affected if you change it. Returns a LOWER BOUND: callers via method dispatch are not counted, so never treat an empty/small result as "safe".',
-    inputSchema: {
-      type: 'object',
-      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' }, depth: { type: 'number', description: 'Max depth (default 6).' } },
-      required: ['ref'],
-    },
-  },
-  {
-    name: 'aim',
-    description: 'Resolve an exact char range INSIDE a symbol for a chosen snippet — so a fix targets the bug line, not the whole function. Flags ambiguity if the snippet occurs more than once in the symbol.',
-    inputSchema: {
-      type: 'object',
-      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' }, snippet: { type: 'string', description: 'Verbatim text from inside the symbol.' } },
-      required: ['ref', 'snippet'],
     },
   },
 ];
@@ -179,24 +145,11 @@ function callTool(name: string, args: Record<string, any>): string {
         null,
         2,
       );
-    case 'callers':
-    case 'callees': {
-      const { symbol, entries } = callNeighbors(index, String(args.ref), name);
-      return JSON.stringify(symbol ? { symbol, [name]: entries } : { error: `no symbol matches "${args.ref}"` }, null, 2);
+    case 'graph': {
+      const direction = args.direction === 'callees' ? 'callees' : 'callers';
+      const g = graph(index, String(args.ref), { direction, depth: args.depth });
+      return JSON.stringify(g.symbol ? g : { error: `no symbol matches "${args.ref}"` }, null, 2);
     }
-    case 'brief':
-      return JSON.stringify(blastRadiusBrief(index, String(args.ref), { depth: args.depth }), null, 2);
-    case 'impact': {
-      const targetId = index.entries.find((e) => e.id === args.ref)?.id ?? locate(index, String(args.ref), { limit: 1 })[0]?.id;
-      if (!targetId) return JSON.stringify({ error: `no symbol matches "${args.ref}"` }, null, 2);
-      const set = impactSet(index, targetId, args.depth ?? 6);
-      const byId = new Map(index.entries.map((e) => [e.id, e]));
-      const name2 = byId.get(targetId)!.name;
-      const members = possibleMemberCallers(index, name2);
-      return JSON.stringify({ symbol: targetId, impact: set.map((s) => ({ ...byId.get(s.id), depth: s.depth })), possibleMemberCallers: members, floor: `>= ${set.length} affected; ${members.length} method-dispatch callers uncounted — lower bound.` }, null, 2);
-    }
-    case 'aim':
-      return JSON.stringify(aim(index, String(args.ref), String(args.snippet)), null, 2);
     default:
       throw new Error(`unknown tool: ${name}`);
   }

@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 import { resolve as resolvePath } from 'node:path';
-import { blastRadiusBrief } from '../core/brief.ts';
 import { buildIndex, type BuildReport } from '../core/build-index.ts';
-import { callNeighbors, impactSet, possibleMemberCallers } from '../core/call-graph.ts';
+import { graph } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
 import { locate } from '../core/locate.ts';
-import { aim, read } from '../core/read.ts';
+import { read } from '../core/read.ts';
 import { DEFAULT_INDEX_PATH, loadIndex, saveIndex } from '../core/store.ts';
 
 function parseArgs(argv: string[]): { _: string[]; flags: Record<string, string | boolean> } {
@@ -35,10 +34,7 @@ const USAGE = `code-map — routes to coordinates, not meaning.
   map index   [--root <dir>] [--out <.map-index.json>] [--force]   (root defaults to .)
   map locate  <query>  [--kind k] [--file f] [--limit n] [--json]
   map read    <id|query>                                  [--json]
-  map callers <id|query>     map callees <id|query>       [--json]   (direct-call graph)
-  map brief   <id|query>                                  [--json]   (blast-radius brief)
-  map impact  <id|query> [--depth n]                       [--json]   (transitive callers, floor)
-  map aim     <id> <snippet>                               [--json]   (sub-symbol char range)
+  map graph   <id|query> [--callees] [--depth n]           [--json]   (call graph; default callers + floor)
   map grep    <pattern> [--fixed] [-i] [--file f] [--limit n] [--json]
   map dead    [--file f] [--limit n] [--json]   (exported + no cross-file importer)
   map stats
@@ -123,76 +119,18 @@ async function main(): Promise<void> {
       return;
     }
 
-    case 'callers':
-    case 'callees': {
+    case 'graph': {
       const ref = _.slice(1).join(' ');
-      if (!ref) die(`${cmd} needs an <id|query>.`);
+      if (!ref) die('graph needs an <id|query>.');
       const idx = loadIndex(indexPath);
-      const { symbol, entries } = callNeighbors(idx, ref, cmd as 'callers' | 'callees');
-      if (!symbol) return void console.log(`no match for "${ref}"`);
-      if (json) return void console.log(JSON.stringify({ symbol, [cmd]: entries }, null, 2));
-      console.log(`# ${cmd} of ${symbol}: ${entries.length}`);
-      for (const e of entries) console.log(`  ${e.kind.padEnd(18)} ${e.id}  (${e.file}:${e.line})`);
-      if (!entries.length) console.log('  (none — note: direct calls only; method dispatch is not edged)');
-      return;
-    }
-
-    case 'brief': {
-      const ref = _.slice(1).join(' ');
-      if (!ref) die('brief needs an <id|query>.');
-      const idx = loadIndex(indexPath);
-      const b = blastRadiusBrief(idx, ref);
-      if (json) return void console.log(JSON.stringify(b, null, 2));
-      if (!b.target) return void console.log(b.floor);
-      const t = b.target;
-      console.log(`# brief: ${t.id}  [${t.kind}]  ${t.file}:${t.line}${t.endLine ? `-${t.endLine}` : ''}`);
-      console.log(`\nFLOOR: ${b.floor}`);
-      if (b.siblings.length) {
-        console.log(`\nsame-name elsewhere (confirm which is yours — the tool won't pick):`);
-        for (const e of b.siblings) console.log(`  ${e.file}:${e.line}  fan-in ${e.fanIn}  | ${e.signature}`);
-      }
-      console.log(`\ncalls (${b.callees.length}): ${b.callees.map((e) => e.name).join(', ') || '—'}`);
-      console.log(`direct callers (${b.callers.length}): ${b.callers.map((e) => e.name).join(', ') || '—'}`);
-      console.log(`transitive impact (${b.impact.length}): ${b.impact.slice(0, 10).map((e) => `${e.name}@${e.depth}`).join(', ')}${b.impact.length > 10 ? ' …' : ''}`);
-      if (b.possibleMemberCallers.length) console.log(`possible method-dispatch callers (uncounted): ${b.possibleMemberCallers.length}`);
-      if (t.raw != null) {
-        console.log('--- raw ---');
-        console.log(t.raw);
-      }
-      return;
-    }
-
-    case 'impact': {
-      const ref = _.slice(1).join(' ');
-      if (!ref) die('impact needs an <id|query>.');
-      const idx = loadIndex(indexPath);
-      const targetId = idx.entries.find((e) => e.id === ref)?.id ?? locate(idx, ref, { limit: 1 })[0]?.id;
-      if (!targetId) return void console.log(`no match for "${ref}"`);
-      const depth = flags.depth ? Number(flags.depth) : 6;
-      const set = impactSet(idx, targetId, depth);
-      const byId = new Map(idx.entries.map((e) => [e.id, e]));
-      const name = byId.get(targetId)!.name;
-      const members = possibleMemberCallers(idx, name);
-      if (json) return void console.log(JSON.stringify({ symbol: targetId, impact: set, possibleMemberCallers: members }, null, 2));
-      console.log(`# impact (transitive callers) of ${targetId}: ${set.length}`);
-      for (const { id, depth: d } of set) {
-        const e = byId.get(id);
-        if (e) console.log(`  d${d}  ${e.kind.padEnd(18)} ${e.id}  (${e.file}:${e.line})`);
-      }
-      console.log(`\nFLOOR: ≥ ${set.length} affected (direct calls). ${members.length} possible caller(s) via obj.${name}() NOT counted — lower bound, never "clear".`);
-      return;
-    }
-
-    case 'aim': {
-      const ref = _[1];
-      const snippet = _.slice(2).join(' ');
-      if (!ref || !snippet) die('aim needs <id> <snippet>.');
-      const idx = loadIndex(indexPath);
-      const r = aim(idx, ref, snippet);
-      if (json) return void console.log(JSON.stringify(r, null, 2));
-      console.log(`# aim ${r.id}  [${r.status}]  ${r.file}`);
-      if (r.note) console.log(`# note: ${r.note}`);
-      for (const m of r.matches) console.log(`  line ${m.line}  char ${m.charStart}-${m.charEnd}`);
+      const direction = flags.callees ? 'callees' : 'callers'; // default: callers (blast radius)
+      const depth = flags.depth ? Number(flags.depth) : 1;
+      const g = graph(idx, ref, { direction, depth });
+      if (json) return void console.log(JSON.stringify(g, null, 2));
+      if (!g.symbol) return void console.log(`no match for "${ref}"`);
+      console.log(`# ${direction} of ${g.symbol} (depth ${depth}): ${g.nodes.length}`);
+      for (const n of g.nodes) console.log(`  ${depth > 1 ? `d${n.depth}  ` : ''}${n.kind.padEnd(18)} ${n.id}  (${n.file}:${n.line})`);
+      if (g.floor) console.log(`\nFLOOR: ${g.floor}`);
       return;
     }
 

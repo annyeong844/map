@@ -135,6 +135,10 @@ node src/cli/main.ts read buildAliasMap                        # bare name (erro
 node src/cli/main.ts grep "buildAliasMap(" --fixed --file alias-map
 node src/cli/main.ts grep "export (async )?function \w+" --limit 20
 
+node src/cli/main.ts graph buildAliasMap                # who calls it (+ floor); default callers
+node src/cli/main.ts graph computeDiff --callees        # what it calls
+node src/cli/main.ts graph parseProject --depth 3       # transitive blast radius
+
 node src/cli/main.ts dead --file src/    # exported + no cross-file importer (dead-code vs dead-export)
 node src/cli/main.ts stats
 ```
@@ -145,7 +149,7 @@ Add `--json` to any command for machine-readable output. Queries accept a bare n
 
 ### As an MCP server
 
-A model consumes the same three primitives over stdio (newline-delimited JSON-RPC).
+A model consumes the same primitives over stdio (newline-delimited JSON-RPC).
 Install once so it's on `PATH` (no absolute paths in any config):
 
 ```bash
@@ -163,7 +167,10 @@ claude mcp add code-map --scope user -- map-mcp
 { "mcpServers": { "code-map": { "command": "map-mcp" } } }
 ```
 
-Exposes `locate`, `read`, `grep`. The server **auto-detects** the index: it walks up
+Exposes four tools — `locate`, `read`, `grep`, and `graph` (call-graph navigation:
+`direction` callers/callees, `depth` for transitive; the `callers` result carries a
+`floor` — a lower bound, since `obj.method()` dispatch isn't in the graph, so it's
+never "clear"). The server **auto-detects** the index: it walks up
 from the working directory for `.map-index.json`, so one global server serves whatever
 project it's launched in — just run `map index` in that project. It **auto-reloads**
 when the index changes (stats it before each tool call), so a rebuild (or the first

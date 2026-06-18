@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
-import { impactSet, possibleMemberCallers } from '../src/core/call-graph.ts';
+import { graph } from '../src/core/call-graph.ts';
 import { grep } from '../src/core/grep.ts';
 import { locate } from '../src/core/locate.ts';
 import { stripJsonc } from '../src/core/public-surface.ts';
-import { aim, read } from '../src/core/read.ts';
+import { read } from '../src/core/read.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
 function repo(files: Record<string, string>): string {
@@ -255,7 +255,7 @@ test('call graph: direct calls become caller→callee edges; method dispatch is 
   assert.ok(!index.callEdges.some(([f]) => f === viaMethod), 'method dispatch not edged');
 });
 
-test('impact = transitive callers; member-call sites surface as the uncounted floor', async () => {
+test('graph: callers depth>1 = transitive blast radius; callees walks outward; floor confesses uncounted dispatch', async () => {
   const { index } = await buildIndex({
     root: repo({
       'src/a.ts': "import { mid } from './b.js';\nexport function top(): number { return mid(); }\n",
@@ -264,28 +264,23 @@ test('impact = transitive callers; member-call sites surface as the uncounted fl
       'src/d.ts': 'export function viaDispatch(o: { leaf(): number }): number { return o.leaf(); }\n',
     }),
   });
+  const nm = (id: string) => index.entries.find((e) => e.id === id)!.name;
   const leafId = index.entries.find((e) => e.name === 'leaf')!.id;
-  const names = new Set(impactSet(index, leafId).map((s) => index.entries.find((e) => e.id === s.id)!.name));
-  assert.ok(names.has('mid') && names.has('top'), 'transitive callers of leaf = mid (d1) + top (d2)');
-  // o.leaf() is a member call — not in the graph, but surfaced as the floor.
-  assert.ok(
-    possibleMemberCallers(index, 'leaf').some((m) => m.caller === 'viaDispatch'),
-    'method-dispatch caller surfaces as a possible (uncounted) caller',
-  );
-});
 
-test('aim resolves a snippet to a char range inside a symbol; flags ambiguity', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/f.ts': 'export function f(): number {\n  const x = 1;\n  return x + 1;\n}\nexport function g(): void {\n  a();\n  a();\n}\nfunction a(): void {}\n',
-    }),
-  });
-  const hit = aim(index, index.entries.find((e) => e.name === 'f')!.id, 'const x = 1');
-  assert.equal(hit.status, 'hit');
-  assert.equal(hit.matches.length, 1);
-  const amb = aim(index, index.entries.find((e) => e.name === 'g')!.id, 'a();');
-  assert.equal(amb.status, 'ambiguous');
-  assert.equal(amb.matches.length, 2);
+  const transitive = graph(index, leafId, { direction: 'callers', depth: 6 });
+  const callerNames = new Set(transitive.nodes.map((n) => nm(n.id)));
+  assert.ok(callerNames.has('mid') && callerNames.has('top'), 'transitive callers of leaf = mid (d1) + top (d2)');
+  // floor surfaces the o.leaf() method-dispatch caller it cannot resolve, and refuses "clear".
+  assert.match(transitive.floor!, /1 possible caller/);
+  assert.match(transitive.floor!, /never "clear"/);
+
+  // depth 1 = direct neighbours only.
+  assert.deepEqual(
+    graph(index, leafId, { direction: 'callers', depth: 1 }).nodes.map((n) => nm(n.id)),
+    ['mid'],
+  );
+  // callees walks the other way.
+  assert.ok(graph(index, index.entries.find((e) => e.name === 'mid')!.id, { direction: 'callees' }).nodes.some((n) => nm(n.id) === 'leaf'));
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

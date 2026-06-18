@@ -38,6 +38,16 @@ why retrieval collapses to roughly `grep + grep + read_file`.
    ("somewhere in this file"), the LLM burns context reading the whole file and the
    map added nothing. So all the effort goes where it's verifiable — the coordinate
    — and none goes where it isn't — the meaning.
+3. **No embeddings — routing is purely lexical + structural.** `locate` matches
+   tokens and structure, not concepts. *"Where is auth handled?"* only routes if an
+   `auth` / `authenticate` token actually appears in the code; a query whose words
+   aren't in the source won't find it. Usually fine — an LLM consumer can phrase good
+   lexical queries — but it is the **ceiling** of this approach, and a deliberate
+   non-goal (concept search is what embeddings are for; this stays unmeasured).
+4. **fan-in is honest about its scope.** It counts named/default references through
+   *resolved* import edges; namespace imports (`import * as x`), `export *`, and
+   re-aliased specifiers are **not** attributed. On barrel-heavy codebases the
+   cross-module count — and so the ranking tiebreak — is therefore blunter.
 
 ---
 
@@ -55,6 +65,14 @@ artifact. It only ever **reads** the source.
    declaration — exported **or** module-private — and every class method is recorded
    with its exact **char-offset range** (e.g. `lib/alias-map.mjs#FunctionDeclaration:...`).
    `locate` routes to an internal helper just as well as to the public API.
+
+   **Python** (`.py` / `.pyi`) is parsed by a stdlib-`ast` backend (`src/py/extract.py`),
+   auto-detected by extension. It emits the *same* per-file primitives the oxc path
+   does, so build-index runs Python through the identical pipeline — stable ids,
+   exact reads (char offsets + content token match), native fan-in, and the Level-1
+   call graph (direct + from-import + `self.m()`). The only requirement is `python3`
+   on `PATH` (override with `CODE_MAP_PYTHON`); absent, Python files are skipped. The
+   optional type oracle on top is `ty` (see *code-oracle*), as tsgo is for TS.
 
 > oxc returns **UTF-16 char offsets**, not bytes — exactly what `read` slices by
 > (`fileText.slice(charStart, charEnd)`), so a multibyte-heavy file stays exact.
@@ -191,14 +209,17 @@ src/
     files.ts          # enumerate source files (git ls-files, else walk)
     extract-symbols.ts# oxc parse → top-level defs (exported/private) + methods + import edges
     fan-in.ts         # resolve relative imports → cross-file reference counts
-    build-index.ts    # walk + parse + coordinates + fan-in → index (incremental, drift-aware)
+    build-index.ts    # walk + parse + coordinates + fan-in → index (TS via oxc, Python via the
+                      #   ast backend; incremental, drift-aware)
     locate.ts         # tiered ranked routing  ← the one thing that must be precise
     read.ts           # exact slice + token check + searchText re-anchoring
     grep.ts           # ripgrep wrapper, JS fallback
     store.ts          # load/save .map-index.json
+  py/extract.py    # Python backend: stdlib `ast` → the same per-file primitives oxc emits
   cli/main.ts      # CLI adapter
   mcp/server.ts    # MCP stdio adapter (auto-reloads on index change)
 test/map.test.ts   # extract, exact-slice, methods, relocation, grep-fallback, incremental, CRLF
+test/python.test.ts# Python: symbols, exact read, fan-in, from-import + self.m() edges
 ```
 
 ```bash

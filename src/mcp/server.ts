@@ -140,6 +140,7 @@ const TOOLS = [
       properties: {
         file: { type: 'string', description: 'Restrict to files whose path contains this substring.' },
         limit: { type: 'number', description: 'Max hotspots (default 25).' },
+        precise: { type: 'boolean', description: 'Refine the top shortlist to SYMBOL-level churn/fixes (per-symbol git log -L). More precise but slow — opt in when narrowing on a real candidate.' },
       },
     },
   },
@@ -167,7 +168,7 @@ function callTool(name: string, args: Record<string, any>): string {
       return JSON.stringify(g.symbol ? g : { error: `no symbol matches "${args.ref}"` }, null, 2);
     }
     case 'hotspots':
-      return JSON.stringify(hotspots(index, { limit: args.limit, nowMs: Date.now(), file: args.file ? String(args.file) : undefined }), null, 2);
+      return JSON.stringify(hotspots(index, { limit: args.limit, nowMs: Date.now(), file: args.file ? String(args.file) : undefined, precise: !!args.precise }), null, 2);
     default:
       throw new Error(`unknown tool: ${name}`);
   }

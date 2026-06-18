@@ -1,4 +1,4 @@
-import { computeHistory } from './git-history.ts';
+import { computeHistory, computeSymbolHistory } from './git-history.ts';
 import type { MapIndex } from './types.ts';
 
 /** A candidate impact point with the EVIDENCE behind it — never a verdict. The
@@ -15,10 +15,13 @@ export interface Hotspot {
   evidence: {
     fanIn: number; // coupling / blast radius (static)
     sizeChars: number; // size as a complexity proxy (static)
-    fileCommits: number; // churn — Nagappan-Ball / Moser (process)
-    fileFixes: number; // bug-fix recurrence — FixCache (process; the validated signal)
+    commits: number; // churn — Nagappan-Ball / Moser (process)
+    fixes: number; // bug-fix recurrence — FixCache (process; the validated signal)
     lastTouchedDays: number | null; // recency (process)
     fixNeighbors: number; // call-graph neighbours in fix-touched files — FixCache spatial locality
+    /** `file` = churn/fixes are the whole file's (cheap); `symbol` = this symbol's
+     * own line range via `git log -L` (precise mode). */
+    scope: 'file' | 'symbol';
   };
 }
 
@@ -31,15 +34,32 @@ export interface HotspotReport {
 /** Type-only declarations — runtime bugs rarely live here, so they're excluded. */
 const NON_CODE = new Set(['TSInterfaceDeclaration', 'TSTypeAliasDeclaration', 'TSEnumDeclaration', 'TSModuleDeclaration', 'ExportSpecifier']);
 
+function scoreOf(commits: number, fixes: number, fixNeighbors: number, fanIn: number, sizeChars: number, lastTouchedDays: number | null): number {
+  const recencyBoost = lastTouchedDays != null && lastTouchedDays < 90 ? 1 : 0;
+  return (
+    3 * fixes + // validated process signal leads
+    1.5 * fixNeighbors + // spatial locality
+    Math.log(commits + 1) + // churn
+    recencyBoost +
+    0.4 * Math.log(fanIn + 1) + // static coupling (fallback)
+    0.25 * Math.min(sizeChars / 1000, 20) // static size (fallback)
+  );
+}
+
 /**
  * Rank impact points by defect-prediction evidence. Process signals (churn, bug-fix
  * recurrence, recency) lead when git history is present — the literature found them
- * stronger than static metrics — with call-graph spatial locality (a neighbour of a
- * fix-touched symbol) and static coupling/size folded in. Degrades to static-only
- * (a coarse screen) when there's no history. The `score` is just a convenience order;
- * the `evidence` columns are the truth, and the tool decides nothing.
+ * stronger than static metrics — with call-graph spatial locality and static
+ * coupling/size folded in. Degrades to static-only when there's no history.
+ *
+ * `precise` lowers process evidence from file → symbol (`git log -L` per symbol):
+ * since a symbol's churn ≤ its file's, the cheap file-level pass is an upper bound,
+ * so we only refine a bounded shortlist of the top candidates (one git query each —
+ * EXPENSIVE; opt-in). The `score` is a convenience order; the `evidence` is the truth,
+ * and the tool decides nothing.
  */
-export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number; file?: string }): HotspotReport {
+export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number; file?: string; precise?: boolean }): HotspotReport {
+  const limit = opts.limit ?? 25;
   const history = computeHistory(index.meta.root, opts.nowMs);
   const historyAvailable = history.size > 0;
 
@@ -62,8 +82,8 @@ export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number;
     if (fileNeedle && !e.file.toLowerCase().includes(fileNeedle)) continue;
 
     const h = history.get(e.file);
-    const fileCommits = h?.commits ?? 0;
-    const fileFixes = h?.fixes ?? 0;
+    const commits = h?.commits ?? 0;
+    const fixes = h?.fixes ?? 0;
     const lastTouchedDays = h ? Math.round(h.lastTouchedDays) : null;
     const sizeChars = (e.charEnd ?? 0) - (e.charStart ?? 0);
     const fanIn = e.fanIn ?? 0;
@@ -74,23 +94,45 @@ export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number;
       if (ne && (history.get(ne.file)?.fixes ?? 0) > 0) fixNeighbors++;
     }
 
-    const recencyBoost = lastTouchedDays != null && lastTouchedDays < 90 ? 1 : 0;
-    const score =
-      3 * fileFixes + // validated process signal leads
-      1.5 * fixNeighbors + // spatial locality
-      Math.log(fileCommits + 1) + // churn
-      recencyBoost +
-      0.4 * Math.log(fanIn + 1) + // static coupling (fallback)
-      0.25 * Math.min(sizeChars / 1000, 20); // static size (fallback)
-
-    out.push({ id: e.id, name: e.name, kind: e.kind, file: e.file, line: e.line, score, evidence: { fanIn, sizeChars, fileCommits, fileFixes, lastTouchedDays, fixNeighbors } });
+    out.push({
+      id: e.id,
+      name: e.name,
+      kind: e.kind,
+      file: e.file,
+      line: e.line,
+      score: scoreOf(commits, fixes, fixNeighbors, fanIn, sizeChars, lastTouchedDays),
+      evidence: { fanIn, sizeChars, commits, fixes, lastTouchedDays, fixNeighbors, scope: 'file' },
+    });
   }
-
   out.sort((a, b) => b.score - a.score || b.evidence.fanIn - a.evidence.fanIn || a.file.localeCompare(b.file) || a.line - b.line);
 
+  // Precise mode: refine the top shortlist with per-symbol git history, then re-rank.
+  if (opts.precise && historyAvailable) {
+    const k = Math.min(limit * 3, 50);
+    const shortlist = out.slice(0, k);
+    let refined = 0;
+    for (const hs of shortlist) {
+      const e = byId.get(hs.id);
+      const sh = e ? computeSymbolHistory(index.meta.root, hs.file, hs.line, e.endLine ?? hs.line, opts.nowMs) : null;
+      if (!sh) continue;
+      hs.evidence.commits = sh.commits;
+      hs.evidence.fixes = sh.fixes;
+      hs.evidence.lastTouchedDays = Number.isFinite(sh.lastTouchedDays) ? Math.round(sh.lastTouchedDays) : null;
+      hs.evidence.scope = 'symbol';
+      hs.score = scoreOf(sh.commits, sh.fixes, hs.evidence.fixNeighbors, hs.evidence.fanIn, hs.evidence.sizeChars, sh.lastTouchedDays);
+      refined++;
+    }
+    shortlist.sort((a, b) => b.score - a.score || b.evidence.fanIn - a.evidence.fanIn || a.file.localeCompare(b.file) || a.line - b.line);
+    return {
+      hotspots: shortlist.slice(0, limit),
+      historyAvailable,
+      note: `Precise (symbol-level): refined ${refined} of the top ${shortlist.length} candidates with per-symbol git history (churn/fixes now scope:"symbol"). EVIDENCE, not a verdict — read the raw and judge.`,
+    };
+  }
+
   const note = historyAvailable
-    ? 'Ranked by bug-fix recurrence + churn + call-graph spatial locality + static coupling/size. EVIDENCE, not a verdict — read the raw and judge. Process evidence is file-level (a hot file lifts all its symbols; static + spatial discriminate within it).'
+    ? 'Ranked by bug-fix recurrence + churn + call-graph spatial locality + static coupling/size. EVIDENCE, not a verdict — read the raw and judge. Process evidence is FILE-level (scope:"file") — pass precise for symbol-level.'
     : 'No git history at this root — STATIC evidence only (fan-in, size). Weaker per the literature; a coarse screen, not a verdict.';
 
-  return { hotspots: out.slice(0, opts.limit ?? 30), historyAvailable, note };
+  return { hotspots: out.slice(0, limit), historyAvailable, note };
 }

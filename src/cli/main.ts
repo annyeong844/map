@@ -36,7 +36,7 @@ const USAGE = `code-map — routes to coordinates, not meaning.
   map locate  <query>  [--kind k] [--file f] [--limit n] [--json]
   map read    <id|query> [--snippet "<text>"]              [--json]   (snippet → sub-symbol char range)
   map graph   <id|query> [--callees] [--depth n]           [--json]   (call graph; default callers + floor)
-  map hotspots [--file <frag>] [--limit n]                 [--json]   (bug-risk impact points + evidence)
+  map hotspots [--file <frag>] [--limit n] [--precise]     [--json]   (bug-risk impact points + evidence; --precise = symbol-level git, slow)
   map grep    <pattern> [--fixed] [-i] [--file f] [--limit n] [--json]
   map dead    [--file f] [--limit n] [--json]   (exported + no cross-file importer)
   map stats
@@ -129,13 +129,13 @@ async function main(): Promise<void> {
     case 'hotspots': {
       const idx = loadIndex(indexPath);
       const limit = flags.limit ? Number(flags.limit) : 25;
-      const r = hotspots(idx, { limit, nowMs: Date.now(), file: typeof flags.file === 'string' ? flags.file : undefined });
+      const r = hotspots(idx, { limit, nowMs: Date.now(), file: typeof flags.file === 'string' ? flags.file : undefined, precise: !!flags.precise });
       if (json) return void console.log(JSON.stringify(r, null, 2));
       console.log(`# hotspots (${r.historyAvailable ? 'history+static' : 'static-only'}): ${r.hotspots.length}`);
       console.log(`# ${r.note}`);
       for (const h of r.hotspots) {
         const e = h.evidence;
-        const ev = `fixes ${e.fileFixes} · churn ${e.fileCommits} · fanIn ${e.fanIn} · ${Math.round(e.sizeChars / 100) / 10}k · fixNbr ${e.fixNeighbors}${e.lastTouchedDays != null ? ` · ${e.lastTouchedDays}d` : ''}`;
+        const ev = `fixes ${e.fixes} · churn ${e.commits} · fanIn ${e.fanIn} · ${Math.round(e.sizeChars / 100) / 10}k · fixNbr ${e.fixNeighbors}${e.lastTouchedDays != null ? ` · ${e.lastTouchedDays}d` : ''} [${e.scope}]`;
         console.log(`  ${h.score.toFixed(1).padStart(6)}  ${h.id}  (${h.file}:${h.line})`);
         console.log(`          ${ev}`);
       }

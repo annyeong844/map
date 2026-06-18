@@ -54,3 +54,33 @@ export function computeHistory(root: string, nowMs: number): Map<string, FileHis
   }
   return out;
 }
+
+/**
+ * Symbol-level churn/fix history via `git log -L<start>,<end>:<file>` — follows the
+ * exact line range back through history (handling line drift), so it answers
+ * "which ROOM in the building churns", not just the file. One git query per symbol
+ * and EXPENSIVE (~hundreds of ms each), so callers must restrict it to a shortlist.
+ * Returns null when unavailable (no range / not a git repo / error).
+ */
+export function computeSymbolHistory(root: string, file: string, startLine: number, endLine: number, nowMs: number): FileHistory | null {
+  if (!startLine || !endLine || endLine < startLine) return null;
+  let log: string;
+  try {
+    log = execFileSync('git', ['-C', root, 'log', '-L', `${startLine},${endLine}:${file}`, '-s', '--format=%ct%x09%s'], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  } catch {
+    return null;
+  }
+  let commits = 0;
+  let fixes = 0;
+  let lastTouchedDays = Infinity;
+  for (const line of log.split('\n')) {
+    if (!line.trim()) continue;
+    const tab = line.indexOf('\t');
+    const ts = Number(line.slice(0, tab)) * 1000;
+    if (FIX_RE.test(line.slice(tab + 1))) fixes++;
+    commits++;
+    const ageDays = (nowMs - ts) / 86_400_000;
+    if (ageDays < lastTouchedDays) lastTouchedDays = ageDays;
+  }
+  return { commits, fixes, lastTouchedDays };
+}

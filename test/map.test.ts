@@ -317,7 +317,7 @@ test('hotspots: static-only mode (no git) ranks by coupling/size, carries eviden
   const big = r.hotspots.findIndex((h) => h.name === 'bigHub');
   const tiny = r.hotspots.findIndex((h) => h.name === 'tiny');
   assert.ok(big !== -1 && (tiny === -1 || big < tiny), 'large, high-fan-in hub outranks the tiny unused fn');
-  assert.ok(r.hotspots[big].evidence.fanIn >= 2 && r.hotspots[big].evidence.fileFixes === 0, 'evidence carries fan-in; no fix data without history');
+  assert.ok(r.hotspots[big].evidence.fanIn >= 2 && r.hotspots[big].evidence.fixes === 0 && r.hotspots[big].evidence.scope === 'file', 'evidence carries fan-in; no fix data and file-scope without history');
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

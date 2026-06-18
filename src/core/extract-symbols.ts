@@ -136,7 +136,10 @@ export function extractSymbols(file: string, text: string): FileParse {
     }
     if (node.type === 'ExportDefaultDeclaration') {
       const t = node.declaration ?? node;
-      symbols.push({ name: 'default', kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
+      // Keep the real name for `export default function foo`/`class Bar` so locate
+      // can find it by name; only anonymous defaults fall back to 'default'.
+      const name = typeof t?.id?.name === 'string' ? t.id.name : 'default';
+      symbols.push({ name, kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
       continue;
     }
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);

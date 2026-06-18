@@ -215,6 +215,15 @@ test('public surface (package.json → tsconfig src map → re-export closure) s
   assert.ok(!index.publicFiles.includes(deadOne.file));
 });
 
+test('named default export is locatable by its real name', async () => {
+  const { index } = await buildIndex({ root: repo({ 'src/w.ts': 'export default function widget(): number { return 1; }\n' }) });
+  const hits = locate(index, 'widget');
+  assert.ok(
+    hits.some((h) => h.name === 'widget' && h.kind === 'default'),
+    'export default function widget → locatable as widget',
+  );
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

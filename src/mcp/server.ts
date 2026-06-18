@@ -37,6 +37,7 @@ const indexPath = process.env.MAP_INDEX ?? argIndex() ?? findUp('.map-index.json
 
 let index: MapIndex | null = null;
 let indexMtimeMs = 0;
+let indexSize = -1;
 
 /**
  * (Re)load the index when its file appears or changes. Called before every tool
@@ -46,15 +47,20 @@ let indexMtimeMs = 0;
  */
 function ensureFresh(): void {
   let mtimeMs: number;
+  let size: number;
   try {
-    mtimeMs = statSync(indexPath).mtimeMs;
+    const s = statSync(indexPath);
+    mtimeMs = s.mtimeMs;
+    size = s.size;
   } catch {
     return; // no index yet (or mid-write) — keep whatever we have (possibly none)
   }
-  if (index && mtimeMs === indexMtimeMs) return;
+  // mtime can be coarse on some mounts; size almost always shifts too, so check both.
+  if (index && mtimeMs === indexMtimeMs && size === indexSize) return;
   try {
     index = loadIndex(indexPath);
     indexMtimeMs = mtimeMs;
+    indexSize = size;
     process.stderr.write(`code-map MCP: loaded index (${index.meta.entryCount} symbols) from ${indexPath}\n`);
   } catch {
     // half-written index — keep the prior good copy, retry on the next call

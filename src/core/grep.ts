@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { SKIP_DIRS } from './files.ts';
 import type { GrepMatch } from './types.ts';
 import { posix } from './util.ts';
 
@@ -58,7 +59,7 @@ function jsGrep(root: string, pattern: string, opts: GrepOptions, limit: number)
     : new RegExp(pattern, opts.caseInsensitive ? 'i' : '');
   const fileNeedle = (opts.file ?? '').toLowerCase();
   const out: GrepMatch[] = [];
-  const skip = new Set(['node_modules', '.git', 'dist', '.audit']);
+  const skip = SKIP_DIRS;
 
   const walk = (dir: string): void => {
     if (out.length >= limit) return;

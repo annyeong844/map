@@ -182,16 +182,23 @@ async function main(): Promise<void> {
       const fileNeedle = (flags.file as string)?.toLowerCase();
       const limit = flags.limit ? Number(flags.limit) : 40;
       const publicFiles = new Set(idx.publicFiles ?? []);
+      const isPy = (f: string): boolean => /\.pyi?$/.test(f);
       // Screen: exported, not a method, no cross-file importer — and not reachable
       // as public API / an entry point (those legitimately have no internal importer).
+      // Python is EXCLUDED: it has no explicit `export` (every top-level name is
+      // importable) and reachability is largely dynamic (argparse string dispatch,
+      // pyproject entry_points, __all__) — so "dead export" misfires (it flagged
+      // ~120 live CLI handlers). Re-enable per-file once a Python public surface
+      // (entry_points / __all__ / __init__ re-exports + import closure) exists.
+      const pySkipped = idx.entries.filter((e) => isPy(e.file) && e.visibility !== 'module-private' && e.kind !== 'ClassMethod' && (e.fanIn ?? 0) === 0).length;
       const all = idx.entries.filter(
-        (e) => e.visibility !== 'module-private' && e.kind !== 'ClassMethod' && (e.fanIn ?? 0) === 0 && (!fileNeedle || e.file.toLowerCase().includes(fileNeedle)),
+        (e) => !isPy(e.file) && e.visibility !== 'module-private' && e.kind !== 'ClassMethod' && (e.fanIn ?? 0) === 0 && (!fileNeedle || e.file.toLowerCase().includes(fileNeedle)),
       );
       const sparedPublic = all.filter((e) => publicFiles.has(e.file));
       const cands = all.filter((e) => !publicFiles.has(e.file));
       const deadCode = cands.filter((e) => (e.intraRefs ?? 0) <= 1); // unused in its own file too → removable
       const deadExport = cands.filter((e) => (e.intraRefs ?? 0) > 1); // used intra-file → only the `export` is dead
-      if (json) return void console.log(JSON.stringify({ deadCode, deadExport }, null, 2));
+      if (json) return void console.log(JSON.stringify({ deadCode, deadExport, pythonExcluded: pySkipped }, null, 2));
       const show = (label: string, list: typeof cands) => {
         console.log(`\n${label}: ${list.length}`);
         for (const e of list.slice(0, limit)) console.log(`  ${e.kind.padEnd(20)} ${e.name.padEnd(28)} ${e.file}:${e.line}`);
@@ -199,6 +206,7 @@ async function main(): Promise<void> {
       };
       console.log(`Dead-export screen (exported, no cross-file importer, not public API):`);
       console.log(`  spared as public API / entry point: ${sparedPublic.length} (${publicFiles.size} public files)`);
+      if (pySkipped) console.log(`  Python NOT screened: ${pySkipped} top-level symbols (no \`export\` concept; argparse / entry_points dispatch is dynamic — would misfire)`);
       show('DEAD CODE — removable (also unused in its own file)', deadCode);
       show('DEAD EXPORT — code used intra-file, only the `export` is unused', deadExport);
       console.log(`\nnote: a screen, not a verdict — dynamic dispatch and framework-convention routes`);

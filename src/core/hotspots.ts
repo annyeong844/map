@@ -132,7 +132,7 @@ export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number;
   }
 
   const note = historyAvailable
-    ? 'Ranked by bug-fix recurrence + churn + call-graph spatial locality + static coupling/size. EVIDENCE, not a verdict — read the raw and judge. Process evidence is FILE-level (scope:"file") — pass precise for symbol-level.'
+    ? 'Ranked by bug-fix recurrence + churn + call-graph spatial locality + static coupling/size. EVIDENCE, not a verdict — read the raw and judge. Process evidence is FILE-level (scope:"file"): every symbol in a file inherits that file\'s churn, so a high score reads as "this FILE is hot", NOT "this exact symbol" — in a monolith one hot file makes all its symbols look scary. Pass precise for per-symbol git blame (costlier).'
     : 'No git history at this root — STATIC evidence only (fan-in, size). Weaker per the literature; a coarse screen, not a verdict.';
 
   return { hotspots: out.slice(0, limit), historyAvailable, note };

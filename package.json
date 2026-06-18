@@ -10,7 +10,8 @@
   "scripts": {
     "map": "node src/cli/main.ts",
     "mcp": "node src/mcp/server.ts",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test \"test/*.test.ts\"",
+    "lint": "npx --yes oxlint src test"
   },
   "engines": {
     "node": ">=23.6"

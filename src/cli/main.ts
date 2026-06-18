@@ -33,6 +33,7 @@ const USAGE = `code-map — routes to coordinates, not meaning.
   map index   [--root <dir>] [--out <.map-index.json>] [--force]   (root defaults to .)
   map locate  <query>  [--kind k] [--file f] [--limit n] [--json]
   map read    <id|query>                                  [--json]
+  map callers <id|query>     map callees <id|query>       [--json]   (direct-call graph)
   map grep    <pattern> [--fixed] [-i] [--file f] [--limit n] [--json]
   map dead    [--file f] [--limit n] [--json]   (exported + no cross-file importer)
   map stats
@@ -114,6 +115,29 @@ async function main(): Promise<void> {
         console.log('candidates:');
         for (const c of r.candidates) console.log(`  ${String(c.line).padStart(6)}  ${c.preview}`);
       }
+      return;
+    }
+
+    case 'callers':
+    case 'callees': {
+      const ref = _.slice(1).join(' ');
+      if (!ref) die(`${cmd} needs an <id|query>.`);
+      const idx = loadIndex(indexPath);
+      const byId = new Map(idx.entries.map((e) => [e.id, e]));
+      // Resolve the query to one symbol: exact id, else locate's top hit.
+      let targetId = idx.entries.find((e) => e.id === ref)?.id;
+      if (!targetId) targetId = locate(idx, ref, { limit: 1 })[0]?.id;
+      if (!targetId) return void console.log(`no match for "${ref}"`);
+      const edges = idx.callEdges ?? [];
+      const neighbours = cmd === 'callers' ? edges.filter(([, to]) => to === targetId).map(([from]) => from) : edges.filter(([from]) => from === targetId).map(([, to]) => to);
+      const uniq = [...new Set(neighbours)];
+      if (json) return void console.log(JSON.stringify({ symbol: targetId, [cmd]: uniq.map((id) => byId.get(id)) }, null, 2));
+      console.log(`# ${cmd} of ${targetId}: ${uniq.length}`);
+      for (const id of uniq) {
+        const e = byId.get(id);
+        if (e) console.log(`  ${e.kind.padEnd(18)} ${e.id}  (${e.file}:${e.line})`);
+      }
+      if (!uniq.length) console.log('  (none — note: direct calls only; method dispatch is not edged)');
       return;
     }
 

@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { extractSymbols, type ImportEdge } from './extract-symbols.ts';
+import { computeCallEdges } from './call-graph.ts';
+import { type CallSite, extractSymbols, type ImportEdge } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
 import { listSourceFiles } from './files.ts';
 import { computePublicSurface } from './public-surface.ts';
@@ -8,7 +9,7 @@ import type { FileStat, MapEntry, MapIndex } from './types.ts';
 import { firstLine, lineAt, token } from './util.ts';
 
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 5;
+const INDEX_VERSION = 6;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -88,6 +89,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const fileTokens: Record<string, string> = {};
   const fileStats: Record<string, FileStat> = {};
   const fileImports: Record<string, ImportEdge[]> = {};
+  const fileCalls: Record<string, CallSite[]> = {};
   const filesMissing: string[] = [];
   const usedIds = new Map<string, number>();
 
@@ -125,6 +127,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       fileTokens[file] = prev!.fileTokens[file];
       fileStats[file] = pv!;
       fileImports[file] = prev!.fileImports?.[file] ?? [];
+      fileCalls[file] = prev!.fileCalls?.[file] ?? [];
       reused++;
     } else {
       changedFiles.push(file);
@@ -144,6 +147,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size };
     const parsed = extractSymbols(file, src);
     fileImports[file] = parsed.imports;
+    fileCalls[file] = parsed.calls;
     for (const rec of parsed.symbols) {
       const line = lineAt(src, rec.charStart);
       entries.push({
@@ -182,6 +186,9 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   }
   const publicSurface = computePublicSurface(root, files, reexportsByFile);
 
+  // Call graph: resolve direct call sites into caller→callee edges (Level 1).
+  const callEdges = computeCallEdges(entries, importsByFile, new Map(Object.entries(fileCalls)), files);
+
   entries.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.name.localeCompare(b.name));
 
   let methods = 0;
@@ -206,6 +213,8 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     fileStats,
     fileImports,
     publicFiles: [...publicSurface.files].sort(),
+    fileCalls,
+    callEdges,
     entries,
   };
 

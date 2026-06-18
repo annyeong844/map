@@ -31,15 +31,59 @@ export interface ImportEdge {
   reexport?: boolean;
 }
 
+/** A call site: the enclosing top-level symbol (`caller`) calls `callee`.
+ * `member` marks `obj.m()` (name-only — not type-resolved, so ambiguous). */
+export interface CallSite {
+  caller: string;
+  callee: string;
+  member: boolean;
+}
+
 export interface FileParse {
   symbols: SymbolRec[];
   imports: ImportEdge[];
+  calls: CallSite[];
   /** Identifier-name → occurrence count across the whole file AST (incl. the
    * declaration itself). Lets dead-code classification ask "is this symbol used
    * anywhere in its own file?" — AST-based, so comments/strings never inflate it.
    * Deliberately broad (counts member props / keys too) so it errs toward "used"
    * — a false "alive" is safe; a false "dead" is not. */
   refs: Record<string, number>;
+}
+
+/**
+ * Collect call sites, attributing each to the enclosing top-level symbol — a
+ * function declaration, a class method, or a `const fn = () => …`. Direct calls
+ * (`foo()`) carry the callee name; member calls (`obj.m()`) are tagged so the
+ * resolver can treat them as ambiguous (no type info to pick the method).
+ * Iterative, carrying the current caller down the stack.
+ */
+function collectCalls(program: unknown): CallSite[] {
+  const out: CallSite[] = [];
+  const stack: { node: any; caller: string }[] = [{ node: program, caller: '<module>' }];
+  while (stack.length) {
+    const { node, caller } = stack.pop()!;
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const c of node) stack.push({ node: c, caller });
+      continue;
+    }
+    let scope = caller;
+    if (node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
+    else if (node.type === 'MethodDefinition' && node.key?.name) scope = node.key.name;
+    else if (node.type === 'VariableDeclarator' && node.id?.name && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) scope = node.id.name;
+    if (node.type === 'CallExpression' && node.callee) {
+      const c = node.callee;
+      if (c.type === 'Identifier') out.push({ caller: scope, callee: c.name, member: false });
+      else if (c.type === 'MemberExpression' && !c.computed && c.property?.name) out.push({ caller: scope, callee: c.property.name, member: true });
+    }
+    for (const k in node) {
+      if (k === 'type') continue;
+      const v = node[k];
+      if (v && typeof v === 'object') stack.push({ node: v, caller: scope });
+    }
+  }
+  return out;
 }
 
 /** Count every Identifier name in the AST (iterative — big files won't overflow the stack). */
@@ -82,10 +126,10 @@ export function extractSymbols(file: string, text: string): FileParse {
   try {
     res = parseSync(file, text);
   } catch {
-    return { symbols: [], imports: [], refs: {} };
+    return { symbols: [], imports: [], refs: {}, calls: [] };
   }
   const body = res?.program?.body;
-  if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {} };
+  if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {}, calls: [] };
 
   // Local top-level declarations by name, so `export { foo as bar }` can point
   // at foo's real coordinates rather than the specifier.
@@ -149,7 +193,7 @@ export function extractSymbols(file: string, text: string): FileParse {
     }
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);
   }
-  return { symbols, imports, refs: tallyIdentifiers(res.program) };
+  return { symbols, imports, refs: tallyIdentifiers(res.program), calls: collectCalls(res.program) };
 }
 
 function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {

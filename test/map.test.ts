@@ -233,6 +233,27 @@ test('default-exported function/class keeps real kind; default class methods are
   assert.ok(index.entries.some((e) => e.name === 'default' && e.kind === 'default'));
 });
 
+test('call graph: direct calls become caller→callee edges; method dispatch is omitted', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/util.ts': 'export function helper(): number { return 1; }\n',
+      'src/main.ts': [
+        "import { helper } from './util.js';",
+        'export function run(): number { return helper() + same(); }', // imported + same-file calls
+        'function same(): number { return 2; }',
+        'export function viaMethod(o: { go(): number }): number { return o.go(); }', // member call
+      ].join('\n') + '\n',
+    }),
+  });
+  const id = (name: string, file: string) => index.entries.find((e) => e.name === name && e.file === file)!.id;
+  const has = (from: string, to: string) => index.callEdges.some(([f, t]) => f === from && t === to);
+  assert.ok(has(id('run', 'src/main.ts'), id('helper', 'src/util.ts')), 'run → helper (cross-file import)');
+  assert.ok(has(id('run', 'src/main.ts'), id('same', 'src/main.ts')), 'run → same (same file)');
+  // o.go() is a member call — not type-resolvable, so no edge.
+  const viaMethod = id('viaMethod', 'src/main.ts');
+  assert.ok(!index.callEdges.some(([f]) => f === viaMethod), 'method dispatch not edged');
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

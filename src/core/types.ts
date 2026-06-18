@@ -93,6 +93,12 @@ export interface MapIndex {
    * dead even with zero internal importers.
    */
   publicFiles: string[];
+  /** Per-file raw call sites, cached so incremental rebuilds recompute the call
+   * graph without re-reading unchanged files. */
+  fileCalls: Record<string, { caller: string; callee: string; member: boolean }[]>;
+  /** Resolved caller→callee edges as `[fromEntryId, toEntryId]` (direct calls
+   * only — `obj.m()` method dispatch needs type info and is omitted). */
+  callEdges: [string, string][];
   entries: MapEntry[];
 }
 

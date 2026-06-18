@@ -196,7 +196,8 @@ export function graph(index: MapIndex, ref: string, opts: { direction: 'callers'
     possibleCallers = members.slice(0, POSSIBLE_CALLERS_CAP);
     floor =
       `>= ${nodes.length} caller(s) (direct calls only). ${members.length} possible caller(s) reach "${name}" via obj.${name}() — name-matched & UNVERIFIED (no types), NOT in the graph. LOWER BOUND, never "clear".` +
-      (members.length > possibleCallers.length ? ` (listing first ${possibleCallers.length})` : '');
+      (members.length > possibleCallers.length ? ` (listing first ${possibleCallers.length})` : '') +
+      (members.length ? ` To VERIFY these (resolve obj.${name}() by type), run code-oracle's \`callers\` on this symbol — the type oracle promotes name-matches to a checker-confirmed set.` : '');
   }
   return { symbol: targetId, direction: dir, nodes, floor, possibleCallers };
 }

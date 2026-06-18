@@ -7,5 +7,6 @@
   "bin": { "code-oracle-mcp": "./server.ts" },
   "scripts": { "start": "node server.ts" },
   "engines": { "node": ">=23.6" },
-  "dependencies": { "@typescript/native-preview": "^7.0.0-dev.20260618.1" }
+  "_dependencyNote": "tsgo is a daily preview build (preview churn) — pinned EXACT to a known-good day, not a floating caret, so a standalone install reproduces. Bump deliberately. Python uses ty via `uvx ty server` + python3 (no npm pin).",
+  "dependencies": { "@typescript/native-preview": "7.0.0-dev.20260618.1" }
 }

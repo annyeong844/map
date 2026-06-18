@@ -148,6 +148,24 @@ test('fan-in resolves TS ESM .js→.ts specifiers', async () => {
   assert.equal(shared.fanIn, 2, "'./dep.js' and '../dep.js' both resolve to dep.ts");
 });
 
+test('concept query ranks the acting function over a same-keyword type', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/diff.ts': [
+        'export interface DiffResult { changed: boolean; }',
+        'export interface DiffSymbol { name: string; }',
+        'export function computeDiff(a: string, b: string): DiffResult { return { changed: a !== b }; }',
+      ].join('\n') + '\n',
+    }),
+  });
+  // Multi-word concept: "compute diff" covers both subwords of computeDiff;
+  // the verb "compute" prefers the function over the DiffResult/DiffSymbol types.
+  const hits = locate(index, 'compute the diff');
+  assert.equal(hits[0].name, 'computeDiff');
+  // A bare single keyword stays ambiguous — both types and the fn match "diff".
+  assert.ok(locate(index, 'diff').length >= 3);
+});
+
 test('grep parses matches on CRLF files', async () => {
   const root = repo({ 'src/m.ts': SRC.replace(/\n/g, '\r\n') });
   const matches = grep(root, 'function alpha', { fixed: true });

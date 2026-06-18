@@ -311,50 +311,20 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
     out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line) });
   }
   out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
-  const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note: NOTE[tool] };
+  // Honest guard (regression-verified 2026-06): ty 0.0.50's find-references is INTRA-FILE
+  // ONLY — cross-file callers are NOT found (heavily-imported functions returned 0, while
+  // grep/`definition` confirm they're used across many files). So for Python, callers/
+  // implementations are a LOWER BOUND, not the cross-file blast radius. (ty `definition`
+  // DOES resolve cross-file, so it's trustworthy.)
+  const pyRefsCaveat = lang === 'py' && (tool === 'callers' || tool === 'implementations');
+  const note = pyRefsCaveat
+    ? NOTE[tool] + ' ⚠ Python (ty 0.0.50): find-references is INTRA-FILE ONLY here — cross-file callers are NOT found (verified). Treat as a LOWER BOUND / intra-file screen, NOT a complete blast radius. `definition` does resolve cross-file.'
+    : NOTE[tool];
+  const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note, ...(pyRefsCaveat ? { incomplete: true } : {}) };
   if (cache.epoch !== epoch) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
   cache.entries[cacheKey] = result;
   persistCache(root);
   return result;
-}
-
-/** Python dead-code via vulture (a CLI, not LSP) — orthogonal to the LSP tools and
- * to code-map's structural dead screen. Run fresh (vulture is fast; no warm session). */
-function runVulture(path: string, minConfidence: number): Promise<string> {
-  return new Promise((res) => {
-    const useUvx = !process.env.VULTURE_CMD;
-    const cmd = process.env.VULTURE_CMD ?? 'uvx';
-    const args = (useUvx ? ['vulture'] : []).concat([path, '--min-confidence', String(minConfidence)]);
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
-    let out = '';
-    p.stdout!.on('data', (d) => (out += d));
-    p.on('close', () => res(out));
-    p.on('error', () => res(''));
-  });
-}
-
-async function dead(args: Record<string, any>): Promise<unknown> {
-  if (!args.path) return { error: 'dead needs `path` (a Python file or directory).' };
-  const path = isAbsolute(args.path) ? args.path : resolve(args.root ?? process.cwd(), args.path);
-  if (!existsSync(path)) return { error: `path not found: ${path}` };
-  const minConfidence = Number(args.minConfidence ?? 60);
-  const base = args.root ? resolve(args.root) : path;
-  const out = await runVulture(path, minConfidence);
-  const re = /^(.+?):(\d+): unused (\w+(?: \w+)?) '([^']+)'(?: \((\d+)% confidence\))?/;
-  const items: { file: string; line: number; kind: string; name: string; confidence: number | null }[] = [];
-  for (const line of out.split('\n')) {
-    const m = re.exec(line.trim());
-    if (m) items.push({ file: relative(base, m[1]).replace(/\\/g, '/') || m[1], line: Number(m[2]), kind: m[3], name: m[4], confidence: m[5] ? Number(m[5]) : null });
-  }
-  items.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
-  return {
-    tool: 'dead',
-    path,
-    minConfidence,
-    count: items.length,
-    dead: items,
-    note: "Python dead-code candidates from vulture (confidence >= minConfidence). A SCREEN, not a verdict — vulture flags dynamically-used / framework-wired code too (DI, plugins, __all__). Verify from raw. Complements code-map's structural dead screen.",
-  };
 }
 
 // ── MCP server (newline-delimited JSON-RPC over stdio, like code-map) ──
@@ -384,21 +354,8 @@ const TOOLS = [
   },
   {
     name: 'implementations',
-    description: 'Implementations of an interface/abstract method — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls). (tsgo for TS/JS, ty for Python.)',
+    description: 'Implementations of an interface/abstract method — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls); fan-out can be wide (an interface with N impls = N sites) — that breadth is the nature of dispatch, biased safely toward over-inclusion. (tsgo for TS/JS, ty for Python.)',
     inputSchema: INPUT,
-  },
-  {
-    name: 'dead',
-    description: 'Python dead-code candidates (unused functions/classes/methods/variables/imports) via vulture — a SCREEN, not a verdict (flags dynamically-used / framework-wired code too). Complements code-map\'s structural dead. Python only.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'A Python file or directory (absolute, or relative to root/cwd).' },
-        root: { type: 'string', description: 'Optional base for relative output paths.' },
-        minConfidence: { type: 'number', description: 'vulture min confidence 0-100 (default 60).' },
-      },
-      required: ['path'],
-    },
   },
 ];
 
@@ -415,7 +372,8 @@ async function handle(req: any): Promise<void> {
         return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
       case 'tools/call': {
         const name = params?.name;
-        const result = name === 'dead' ? await dead(params.arguments ?? {}) : METHOD[name] ? await query(name, params.arguments ?? {}) : (() => { throw new Error(`unknown tool: ${name}`); })();
+        if (!METHOD[name]) throw new Error(`unknown tool: ${name}`);
+        const result = await query(name, params.arguments ?? {});
         return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });
       }
       case 'ping':

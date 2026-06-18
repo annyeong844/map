@@ -55,30 +55,51 @@ export function computeHistory(root: string, nowMs: number): Map<string, FileHis
   return out;
 }
 
+const NOT_COMMITTED = '0'.repeat(40);
+
 /**
- * Symbol-level churn/fix history via `git log -L<start>,<end>:<file>` — follows the
- * exact line range back through history (handling line drift), so it answers
- * "which ROOM in the building churns", not just the file. One git query per symbol
- * and EXPENSIVE (~hundreds of ms each), so callers must restrict it to a shortlist.
- * Returns null when unavailable (no range / not a git repo / error).
+ * Symbol-level churn/fix history via `git blame -L<start>,<end>` — the COMMITS that
+ * actually authored the symbol's CURRENT lines, so it answers "which ROOM churns",
+ * not just the file. Blame-based (not `git log -L`) on purpose: `git log -L` follows
+ * a line range backward and, when a commit both edits a neighbour and adds the range
+ * (e.g. extract-function), bleeds the neighbour's history into freshly-added code —
+ * over-counting churn on exactly the new symbols. Blame attributes only commits that
+ * touched the lines that exist now, so it cannot bleed. The trade: it sees each line's
+ * LAST touch, not the full edit history (some depth is lost for correctness). One git
+ * query per symbol, EXPENSIVE — callers must restrict it to a shortlist. Null when
+ * unavailable (no range / not a git repo / error).
  */
 export function computeSymbolHistory(root: string, file: string, startLine: number, endLine: number, nowMs: number): FileHistory | null {
   if (!startLine || !endLine || endLine < startLine) return null;
-  let log: string;
+  let out: string;
   try {
-    log = execFileSync('git', ['-C', root, 'log', '-L', `${startLine},${endLine}:${file}`, '-s', '--format=%ct%x09%s'], { encoding: 'utf8', maxBuffer: 1 << 26 });
+    out = execFileSync('git', ['-C', root, 'blame', `-L${startLine},${endLine}`, '--line-porcelain', '--', file], { encoding: 'utf8', maxBuffer: 1 << 26 });
   } catch {
     return null;
   }
+  // Porcelain: each line emits a `<sha> <orig> <final> [n]` header, then fields
+  // (committer-time, summary, …). Dedup by sha → distinct commits behind the range.
+  const byCommit = new Map<string, { ts: number; fix: boolean }>();
+  let sha = '';
+  for (const line of out.split('\n')) {
+    if (/^[0-9a-f]{40} /.test(line)) {
+      sha = line.slice(0, 40);
+      if (sha !== NOT_COMMITTED && !byCommit.has(sha)) byCommit.set(sha, { ts: 0, fix: false });
+    } else if (line.startsWith('committer-time ')) {
+      const c = byCommit.get(sha);
+      if (c) c.ts = Number(line.slice(15)) * 1000;
+    } else if (line.startsWith('summary ')) {
+      const c = byCommit.get(sha);
+      if (c) c.fix = FIX_RE.test(line.slice(8));
+    }
+  }
+  if (byCommit.size === 0) return null;
   let commits = 0;
   let fixes = 0;
   let lastTouchedDays = Infinity;
-  for (const line of log.split('\n')) {
-    if (!line.trim()) continue;
-    const tab = line.indexOf('\t');
-    const ts = Number(line.slice(0, tab)) * 1000;
-    if (FIX_RE.test(line.slice(tab + 1))) fixes++;
+  for (const { ts, fix } of byCommit.values()) {
     commits++;
+    if (fix) fixes++;
     const ageDays = (nowMs - ts) / 86_400_000;
     if (ageDays < lastTouchedDays) lastTouchedDays = ageDays;
   }

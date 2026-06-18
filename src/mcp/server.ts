@@ -138,7 +138,7 @@ export const TOOLS = [
       properties: {
         file: { type: 'string', description: 'Restrict to files whose path contains this substring.' },
         limit: { type: 'number', description: 'Max hotspots (default 25).' },
-        precise: { type: 'boolean', description: 'Refine the top shortlist to SYMBOL-level churn/fixes (per-symbol git log -L). More precise but slow — opt in when narrowing on a real candidate.' },
+        precise: { type: 'boolean', description: 'Refine the top shortlist to SYMBOL-level churn/fixes (per-symbol git blame). More precise but slow — opt in when narrowing on a real candidate.' },
       },
     },
   },

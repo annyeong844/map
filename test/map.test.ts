@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { computeSymbolHistory } from '../src/core/git-history.ts';
 import { buildIndex } from '../src/core/build-index.ts';
 import { graph } from '../src/core/call-graph.ts';
 import { grep } from '../src/core/grep.ts';
@@ -348,6 +350,35 @@ test('mcp server: tool list is the five primitives; dispatch routes each over a 
   assert.ok(g.nodes.some((n: { id: string }) => n.id.includes('run')) && typeof g.floor === 'string');
   assert.ok(Array.isArray(JSON.parse(dispatch(index, 'hotspots', { limit: 3 })).hotspots));
   assert.throws(() => dispatch(index, 'nope', {}), /unknown tool/);
+});
+
+test('symbol-level history isolates a helper extracted in the same commit (no cross-symbol bleed)', () => {
+  // The realistic extract-function shape: one commit BOTH edits the churned `risky`
+  // AND adds a fresh `helper`. The new helper must NOT inherit risky's fix history.
+  const root = mkdtempSync(join(tmpdir(), 'cm-git-'));
+  const f = join(root, 'hot.ts');
+  const g = (...a: string[]) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
+  g('init', '-q', '-b', 'main');
+  g('config', 'user.email', 't@t');
+  g('config', 'user.name', 't');
+  g('config', 'commit.gpgsign', 'false');
+  const commit = (content: string, msg: string) => {
+    writeFileSync(f, content);
+    g('add', 'hot.ts');
+    g('commit', '-q', '-m', msg);
+  };
+  commit('export function risky(): number {\n  const a = base();\n  return a;\n}\n', 'init risky');
+  commit('export function risky(): number {\n  const a = base() + 1;\n  return a;\n}\n', 'fix risky base');
+  commit('export function risky(): number {\n  const a = base() + 1;\n  return a + 5;\n}\n', 'fix risky scaling');
+  // extract: edit risky's body AND append a helper with NOVEL logic, in ONE non-fix
+  // commit. `git log -L` bleeds risky's history onto the new lines here; blame won't.
+  commit('export function risky(): number {\n  const a = base() + 1;\n  return wrap(a);\n}\nexport function helper(a: number): number {\n  return a - 99;\n}\n', 'extract helper from risky');
+
+  const risky = computeSymbolHistory(root, 'hot.ts', 1, 3, Date.now());
+  const helper = computeSymbolHistory(root, 'hot.ts', 5, 6, Date.now()); // signature + novel body (skip the shared `}`)
+  assert.ok(risky && risky.commits >= 2 && risky.fixes >= 1, 'risky retains its multi-commit fix history');
+  assert.equal(helper?.commits, 1, 'helper is touched by exactly its extract commit — no bleed');
+  assert.equal(helper?.fixes, 0, 'freshly extracted helper must NOT inherit risky fixes');
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

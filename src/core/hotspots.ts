@@ -21,7 +21,7 @@ export interface Hotspot {
     lastTouchedDays: number | null; // recency (process)
     fixNeighbors: number; // call-graph neighbours in fix-touched files — FixCache spatial locality
     /** `file` = churn/fixes are the whole file's (cheap); `symbol` = this symbol's
-     * own line range via `git log -L` (precise mode). */
+     * own line range via `git blame` (precise mode). */
     scope: 'file' | 'symbol';
   };
 }
@@ -53,7 +53,7 @@ function scoreOf(commits: number, fixes: number, fixNeighbors: number, fanIn: nu
  * stronger than static metrics — with call-graph spatial locality and static
  * coupling/size folded in. Degrades to static-only when there's no history.
  *
- * `precise` lowers process evidence from file → symbol (`git log -L` per symbol):
+ * `precise` lowers process evidence from file → symbol (`git blame` per symbol):
  * since a symbol's churn ≤ its file's, the cheap file-level pass is an upper bound,
  * so we only refine a bounded shortlist of the top candidates (one git query each —
  * EXPENSIVE; opt-in). The `score` is a convenience order; the `evidence` is the truth,

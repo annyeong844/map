@@ -46,6 +46,13 @@ export interface MapEntry {
    * (resolve imports, count cross-file references).
    */
   fanIn?: number;
+  /**
+   * Occurrences of this name within its own file (AST identifier count, incl.
+   * the declaration). `intraRefs <= 1` ⇒ used nowhere in its own file. Combined
+   * with `fanIn`: exported + fanIn 0 + intraRefs>1 = dead *export* (code alive);
+   * exported + fanIn 0 + intraRefs<=1 = dead *code* (removable).
+   */
+  intraRefs?: number;
   /** Synthesized id `file#kind:start-end`, for traceability. */
   definitionId?: string;
 }

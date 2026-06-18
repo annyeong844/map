@@ -34,6 +34,7 @@ const USAGE = `code-map — routes to coordinates, not meaning.
   map locate  <query>  [--kind k] [--file f] [--limit n] [--json]
   map read    <id|query>                                  [--json]
   map grep    <pattern> [--fixed] [-i] [--file f] [--limit n] [--json]
+  map dead    [--file f] [--limit n] [--json]   (exported + no cross-file importer)
   map stats
 
   Global: --index <path>   (default ./.map-index.json)
@@ -129,6 +130,30 @@ async function main(): Promise<void> {
       if (json) return void console.log(JSON.stringify(matches, null, 2));
       for (const m of matches) console.log(`${m.file}:${m.line}: ${m.text.trim()}`);
       if (!matches.length) console.log('no matches');
+      return;
+    }
+
+    case 'dead': {
+      const idx = loadIndex(indexPath);
+      const fileNeedle = (flags.file as string)?.toLowerCase();
+      const limit = flags.limit ? Number(flags.limit) : 40;
+      // Screen: exported (not module-private), not a method, no cross-file importer.
+      const cands = idx.entries.filter(
+        (e) => e.visibility !== 'module-private' && e.kind !== 'ClassMethod' && (e.fanIn ?? 0) === 0 && (!fileNeedle || e.file.toLowerCase().includes(fileNeedle)),
+      );
+      const deadCode = cands.filter((e) => (e.intraRefs ?? 0) <= 1); // unused in its own file too → removable
+      const deadExport = cands.filter((e) => (e.intraRefs ?? 0) > 1); // used intra-file → only the `export` is dead
+      if (json) return void console.log(JSON.stringify({ deadCode, deadExport }, null, 2));
+      const show = (label: string, list: typeof cands) => {
+        console.log(`\n${label}: ${list.length}`);
+        for (const e of list.slice(0, limit)) console.log(`  ${e.kind.padEnd(20)} ${e.name.padEnd(28)} ${e.file}:${e.line}`);
+        if (list.length > limit) console.log(`  … +${list.length - limit} more`);
+      };
+      console.log(`Dead-export screen (exported, no cross-file importer):`);
+      show('DEAD CODE — removable (also unused in its own file)', deadCode);
+      show('DEAD EXPORT — code used intra-file, only the `export` is unused', deadExport);
+      console.log(`\nnote: a screen, not a verdict — entry points, dynamic dispatch, and external/public API`);
+      console.log(`also have no cross-file importer. fanIn = resolved relative imports; intraRefs = AST identifier count.`);
       return;
     }
 

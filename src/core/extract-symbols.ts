@@ -31,6 +31,35 @@ export interface ImportEdge {
 export interface FileParse {
   symbols: SymbolRec[];
   imports: ImportEdge[];
+  /** Identifier-name → occurrence count across the whole file AST (incl. the
+   * declaration itself). Lets dead-code classification ask "is this symbol used
+   * anywhere in its own file?" — AST-based, so comments/strings never inflate it.
+   * Deliberately broad (counts member props / keys too) so it errs toward "used"
+   * — a false "alive" is safe; a false "dead" is not. */
+  refs: Record<string, number>;
+}
+
+/** Count every Identifier name in the AST (iterative — big files won't overflow the stack). */
+function tallyIdentifiers(program: unknown): Record<string, number> {
+  const counts: Record<string, number> = Object.create(null);
+  const stack: unknown[] = [program];
+  while (stack.length) {
+    const node = stack.pop() as any;
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const c of node) stack.push(c);
+      continue;
+    }
+    if (node.type === 'Identifier' && typeof node.name === 'string') {
+      counts[node.name] = (counts[node.name] ?? 0) + 1;
+    }
+    for (const k in node) {
+      if (k === 'type') continue;
+      const v = node[k];
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return counts;
 }
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -50,10 +79,10 @@ export function extractSymbols(file: string, text: string): FileParse {
   try {
     res = parseSync(file, text);
   } catch {
-    return { symbols: [], imports: [] };
+    return { symbols: [], imports: [], refs: {} };
   }
   const body = res?.program?.body;
-  if (!Array.isArray(body)) return { symbols: [], imports: [] };
+  if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {} };
 
   // Local top-level declarations by name, so `export { foo as bar }` can point
   // at foo's real coordinates rather than the specifier.
@@ -104,7 +133,7 @@ export function extractSymbols(file: string, text: string): FileParse {
     }
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);
   }
-  return { symbols, imports };
+  return { symbols, imports, refs: tallyIdentifiers(res.program) };
 }
 
 function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {

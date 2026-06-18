@@ -166,6 +166,29 @@ test('concept query ranks the acting function over a same-keyword type', async (
   assert.ok(locate(index, 'diff').length >= 3);
 });
 
+test('intraRefs distinguishes dead code from a merely-dead export', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/m.ts': [
+        'export function impl(x: number): number { return x * 2; }', // exported, used intra-file, not imported
+        'export const api = { run: impl };', // api references impl
+        'export function reallyDead(): void {}', // exported, referenced nowhere at all
+      ].join('\n') + '\n',
+      'src/use.ts': "import { api } from './m.js';\nexport function u() { return api.run(2); }\n",
+    }),
+  });
+  const impl = index.entries.find((e) => e.name === 'impl')!;
+  const reallyDead = index.entries.find((e) => e.name === 'reallyDead')!;
+  const api = index.entries.find((e) => e.name === 'api')!;
+  assert.equal(api.fanIn, 1, 'api is imported by use.ts → alive');
+  // dead EXPORT: nobody imports impl, but it is used in its own file → code alive.
+  assert.equal(impl.fanIn, 0);
+  assert.ok((impl.intraRefs ?? 0) >= 2, 'impl referenced intra-file');
+  // dead CODE: no importer AND no intra-file use → removable.
+  assert.equal(reallyDead.fanIn, 0);
+  assert.ok((reallyDead.intraRefs ?? 0) <= 1, 'reallyDead used nowhere');
+});
+
 test('grep parses matches on CRLF files', async () => {
   const root = repo({ 'src/m.ts': SRC.replace(/\n/g, '\r\n') });
   const matches = grep(root, 'function alpha', { fixed: true });

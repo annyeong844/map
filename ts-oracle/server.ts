@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 /**
- * ts-oracle MCP — type-aware call resolution over a warm tsgo (TypeScript-Go) LSP session.
+ * ts-oracle MCP — type-aware call resolution over a warm LSP session, multi-language:
+ * tsgo (TypeScript-Go) for TS/JS, ty for Python. Picked per file extension; both speak
+ * the same LSP, so the session/cache/query machinery is shared.
  *
  * Sibling to code-map, not part of it: code-map routes to coordinates (instant, light,
- * drift-resistant); ts-oracle answers "who calls this" at CHECKER grade via LSP
- * `references` — including calls through interfaces / DI that code-map's structural
- * call graph cannot draw. The statefulness (a warm LSP session, project warmup, file
- * sync, preview churn) is contained HERE behind a stateless MCP tool surface, so
- * code-map stays clean and the backend is swappable (LSP today → @typescript/api at TS 7.1).
+ * drift-resistant); ts-oracle answers "who calls this / what implements this / where is
+ * this defined" at CHECKER grade via LSP references/definition/implementation — including
+ * calls through interfaces / DI that a structural call graph can't draw. The statefulness
+ * (warm LSP sessions, project warmup, file sync, preview churn) is contained HERE behind a
+ * stateless MCP tool surface, so code-map stays clean and the backend is swappable.
  *
- * One tool — `callers` — done end-to-end (a vertical slice): resolve a symbol to a
- * position, ask tsgo for its references, return the caller sites with previews.
- *
- * Needs the tsgo binary: `TSGO_BIN=/path/to/@typescript/native-preview/bin/tsgo.js`,
- * else it resolves the copy installed in this package.
+ * Backends: TS via the tsgo binary (`TSGO_BIN`, else the copy installed in this package);
+ * Python via ty's language server (`TY_CMD`, else `uvx ty server`).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -33,26 +32,42 @@ const REQ_TIMEOUT_MS = Number(process.env.TS_ORACLE_REQ_TIMEOUT_MS ?? 40000);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-function tsgoBin(): string | null {
-  if (process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN)) return process.env.TSGO_BIN;
-  const local = join(HERE, 'node_modules/@typescript/native-preview/bin/tsgo.js');
-  return existsSync(local) ? local : null;
+type Lang = 'ts' | 'py';
+function langOf(file: string): Lang | null {
+  if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(file)) return 'ts';
+  if (/\.(py|pyi)$/.test(file)) return 'py';
+  return null;
 }
 
-/** Nearest ancestor dir containing tsconfig.json — the LSP project root for a file. */
-function projectRoot(file: string): string {
+/** The LSP backend for a language: how to spawn it + the LSP `languageId`. tsgo
+ * for TS/JS, ty for Python — both speak the same LSP, so everything downstream
+ * (framing, readiness, references/definition/implementation, cache) is shared. */
+function backend(lang: Lang): { cmd: string; args: string[]; languageId: string } | null {
+  if (lang === 'ts') {
+    const bin = process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN) ? process.env.TSGO_BIN : join(HERE, 'node_modules/@typescript/native-preview/bin/tsgo.js');
+    return existsSync(bin) ? { cmd: process.execPath, args: [bin, '--lsp', '--stdio'], languageId: 'typescript' } : null;
+  }
+  // Python via ty's language server. TY_CMD overrides (e.g. an absolute `ty`); default runs via uvx.
+  return process.env.TY_CMD ? { cmd: process.env.TY_CMD, args: ['server'], languageId: 'python' } : { cmd: 'uvx', args: ['ty', 'server'], languageId: 'python' };
+}
+
+const ROOT_MARKERS: Record<Lang, string[]> = { ts: ['tsconfig.json'], py: ['pyproject.toml', 'setup.py', 'setup.cfg'] };
+/** Nearest ancestor dir with a project marker — the LSP project root for a file. */
+function projectRoot(file: string, lang: Lang): string {
+  const markers = ROOT_MARKERS[lang];
   let dir = dirname(resolve(file));
   for (;;) {
-    if (existsSync(join(dir, 'tsconfig.json'))) return dir;
+    if (markers.some((m) => existsSync(join(dir, m)))) return dir;
     const parent = dirname(dir);
     if (parent === dir) return dirname(resolve(file));
     dir = parent;
   }
 }
 
-/** A warm tsgo LSP session: Content-Length framed JSON-RPC, server-request replies,
- * one-time project warmup, live file sync. */
-class TsgoLsp {
+/** A warm LSP session (tsgo or ty): Content-Length framed JSON-RPC, server-request
+ * replies, quiescence warmup, live file sync. Language-agnostic — the backend just
+ * supplies the spawn command and the LSP `languageId`. */
+class LspSession {
   private proc: ChildProcess;
   private buf = Buffer.alloc(0);
   private pending = new Map<number, (r: unknown) => void>();
@@ -61,9 +76,11 @@ class TsgoLsp {
   private initDone: Promise<void>;
   private warmed = false;
   private lastMsgAt = Date.now();
+  private languageId: string;
 
-  constructor(bin: string, root: string) {
-    this.proc = spawn(process.execPath, [bin, '--lsp', '--stdio'], { stdio: ['pipe', 'pipe', 'ignore'] });
+  constructor(spec: { cmd: string; args: string[]; languageId: string }, root: string) {
+    this.languageId = spec.languageId;
+    this.proc = spawn(spec.cmd, spec.args, { stdio: ['pipe', 'pipe', 'ignore'] });
     this.proc.stdout!.on('data', (d: Buffer) => this.onData(d));
     this.initDone = this.initialize(root);
   }
@@ -127,7 +144,7 @@ class TsgoLsp {
     const text = readFileSync(file, 'utf8');
     const version = (this.opened.get(uri) ?? 0) + 1;
     this.opened.set(uri, version);
-    if (version === 1) this.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'typescript', version, text } });
+    if (version === 1) this.notify('textDocument/didOpen', { textDocument: { uri, languageId: this.languageId, version, text } });
     else this.notify('textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text }] });
     return uri;
   }
@@ -173,11 +190,12 @@ function findPosition(file: string, name?: string, line?: number, character?: nu
   return null;
 }
 
-// ── one warm session per project root (lazy — only spun up on a cache MISS) ──
-const sessions = new Map<string, TsgoLsp>();
-function session(root: string, bin: string): TsgoLsp {
-  let s = sessions.get(root);
-  if (!s) sessions.set(root, (s = new TsgoLsp(bin, root)));
+// ── one warm session per (language, project root); lazy — only on a cache MISS ──
+const sessions = new Map<string, LspSession>();
+function session(root: string, lang: Lang, spec: { cmd: string; args: string[]; languageId: string }): LspSession {
+  const key = `${lang}::${root}`;
+  let s = sessions.get(key);
+  if (!s) sessions.set(key, (s = new LspSession(spec, root)));
   return s;
 }
 
@@ -248,15 +266,17 @@ const NOTE: Record<string, string> = {
 /** One query path for all three tools: resolve a position, gate on the cache, else
  * ask the warm tsgo session (references / definition / implementation), format. */
 async function query(tool: string, args: Record<string, any>): Promise<unknown> {
-  const bin = tsgoBin();
-  if (!bin) return { error: 'tsgo not found. Set TSGO_BIN to @typescript/native-preview/bin/tsgo.js, or `npm install` in ts-oracle/.' };
   if (!args.file) return { error: `${tool} needs \`file\` (and \`name\` or line/character).` };
   const file = isAbsolute(args.file) ? args.file : resolve(args.root ?? process.cwd(), args.file);
   if (!existsSync(file)) return { error: `file not found: ${file}` };
+  const lang = langOf(file);
+  if (!lang) return { error: `unsupported file type: ${file} (expected TS/JS or Python).` };
+  const be = backend(lang);
+  if (!be) return { error: lang === 'ts' ? 'tsgo not found — set TSGO_BIN or `npm install` in ts-oracle/.' : 'ty not found — install ty or uvx, or set TY_CMD.' };
   const pos = findPosition(file, args.name, args.line, args.character);
   if (!pos) return { error: `could not locate symbol "${args.name}" in ${file}; pass line/character.` };
 
-  const root = args.root ? resolve(args.root) : projectRoot(file);
+  const root = args.root ? resolve(args.root) : projectRoot(file, lang);
   const relFile = relative(root, file).replace(/\\/g, '/');
   const cacheKey = `${tool}:${relFile}#${args.name ?? `${pos.line}:${pos.character}`}`;
 
@@ -267,7 +287,7 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
     return { ...(cache.entries[cacheKey] as object), cached: true };
   }
 
-  const locs = await session(root, bin).locate(METHOD[tool], file, pos.line, pos.character);
+  const locs = await session(root, lang, be).locate(METHOD[tool], file, pos.line, pos.character);
   const seen = new Set<string>();
   const out: { file: string; line: number; preview: string }[] = [];
   for (const r of locs) {
@@ -302,17 +322,17 @@ const TOOLS = [
   {
     name: 'callers',
     description:
-      'Type-aware callers of a symbol — "who calls this", at TypeScript-checker grade via a warm tsgo LSP session. Resolves calls through interfaces and standard DI (declaration types) that a structural call graph cannot. First call warms the project (~seconds); the session stays warm and answers are cached.',
+      'Type-aware callers of a symbol — "who calls this", at checker grade via a warm LSP session (tsgo for TS/JS, ty for Python; picked by file extension). Resolves calls through interfaces and standard DI (declaration types) that a structural call graph cannot. First call per project warms it (~seconds); the session stays warm and answers are cached.',
     inputSchema: INPUT,
   },
   {
     name: 'definition',
-    description: 'Type-aware definition(s) of the symbol/expression at a location — where `obj.m()` actually resolves (the precise callee), via tsgo. Not a name guess.',
+    description: 'Type-aware definition(s) of the symbol/expression at a location — where `obj.m()` actually resolves (the precise callee). Not a name guess. (tsgo for TS/JS, ty for Python.)',
     inputSchema: INPUT,
   },
   {
     name: 'implementations',
-    description: 'Implementations of an interface/abstract method via tsgo — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls).',
+    description: 'Implementations of an interface/abstract method — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls). (tsgo for TS/JS, ty for Python.)',
     inputSchema: INPUT,
   },
 ];
@@ -347,7 +367,7 @@ async function handle(req: any): Promise<void> {
 }
 
 function main(): void {
-  if (!tsgoBin()) process.stderr.write('ts-oracle: tsgo not found — set TSGO_BIN or `npm install` in ts-oracle/. Tools will error until then.\n');
+  if (!backend('ts')) process.stderr.write('ts-oracle: tsgo not found — set TSGO_BIN or `npm install` in ts-oracle/. (Python uses ty via uvx / TY_CMD.) Tools error per-language until present.\n');
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     const t = line.trim();

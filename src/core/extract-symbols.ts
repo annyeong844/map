@@ -106,9 +106,15 @@ function walkProgram(program: unknown): { refs: Record<string, number>; calls: C
 }
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const PY = /\.(py|pyi)$/;
+
+/** Python files are parsed by the stdlib-ast backend (src/py/extract.py), not oxc. */
+export function isPython(file: string): boolean {
+  return PY.test(file);
+}
 
 export function isParseable(file: string): boolean {
-  return JS_TS.test(file);
+  return JS_TS.test(file) || PY.test(file);
 }
 
 const TYPE_DECL = new Set(['TSInterfaceDeclaration', 'TSTypeAliasDeclaration', 'TSEnumDeclaration', 'TSModuleDeclaration']);

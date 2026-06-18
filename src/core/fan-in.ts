@@ -19,6 +19,10 @@ const JS_TO_TS: Record<string, readonly string[]> = {
  * module resolver's job, deliberately out of scope here.
  */
 export function resolveRelative(fromFile: string, source: string, fileSet: Set<string>): string | null {
+  // The Python backend emits an already-resolved repo-relative path ('pkg/mod.py');
+  // a source that is itself an indexed file needs no further resolution. (TS bare
+  // specifiers like 'react' never match a file path, so this is a no-op for TS.)
+  if (fileSet.has(source)) return source;
   if (!source.startsWith('./') && !source.startsWith('../')) return null;
   const base = pp.join(pp.dirname(fromFile), source);
 

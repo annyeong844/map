@@ -1,15 +1,36 @@
+import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { computeCallEdges } from './call-graph.ts';
-import { type CallSite, extractSymbols, type ImportEdge } from './extract-symbols.ts';
+import { type CallSite, extractSymbols, type ImportEdge, isPython, type SymbolRec } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
 import { listSourceFiles } from './files.ts';
 import { computePublicSurface } from './public-surface.ts';
 import type { FileStat, MapEntry, MapIndex } from './types.ts';
 import { firstLine, lineAt, token } from './util.ts';
 
+/** Python parse backend: the stdlib-ast extractor, shelled out once per build.
+ * The whole tree is walked for import resolution; only `targets` are parsed
+ * (incremental). Returns the same per-file primitives the oxc path does, so the
+ * shared entry/fan-in/call-graph pipeline runs over Python unchanged. Returns null
+ * if Python isn't available — Python files then just don't appear (honest skip). */
+const PY_BACKEND = fileURLToPath(new URL('../py/extract.py', import.meta.url));
+interface PyParse { entries: (SymbolRec & { file: string })[]; fileImports: Record<string, ImportEdge[]>; fileCalls: Record<string, CallSite[]> }
+function runPyBackend(root: string, targets: string[]): Promise<PyParse | null> {
+  return new Promise((res) => {
+    const cmd = process.env.CODE_MAP_PYTHON ?? 'python3';
+    const p = spawn(cmd, [PY_BACKEND, root], { stdio: ['pipe', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.on('error', () => res(null)); // python not found → skip Python gracefully
+    p.on('close', () => { try { res(JSON.parse(out)); } catch { res(null); } });
+    p.stdin.end(targets.join('\n'));
+  });
+}
+
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 7;
+const INDEX_VERSION = 8;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -136,6 +157,28 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
 
   // Read & re-parse only the changed/new files — the build's real cost.
   const text = await readAll(root, changedFiles);
+
+  // Python files go through the stdlib-ast backend (one batched subprocess, the
+  // whole tree walked for import resolution); TS/JS through oxc. Both return the
+  // same per-file primitives, so the entry build below — stable ids, fan-in, the
+  // Level-1 call graph — is identical regardless of language.
+  const pyChanged = changedFiles.filter(isPython);
+  const pyByFile = new Map<string, SymbolRec[]>();
+  let pyImports: Record<string, ImportEdge[]> = {};
+  let pyCalls: Record<string, CallSite[]> = {};
+  if (pyChanged.length) {
+    const py = await runPyBackend(root, pyChanged);
+    if (py) {
+      for (const rec of py.entries) {
+        const a = pyByFile.get(rec.file);
+        if (a) a.push(rec);
+        else pyByFile.set(rec.file, [rec]);
+      }
+      pyImports = py.fileImports ?? {};
+      pyCalls = py.fileCalls ?? {};
+    }
+  }
+
   for (const file of changedFiles) {
     const src = text.get(file) ?? null;
     const st = stats.get(file) ?? null;
@@ -145,10 +188,24 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     }
     fileTokens[file] = token(src);
     if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size };
-    const parsed = extractSymbols(file, src);
-    fileImports[file] = parsed.imports;
-    fileCalls[file] = parsed.calls;
-    for (const rec of parsed.symbols) {
+    let symbols: SymbolRec[];
+    let imports: ImportEdge[];
+    let calls: CallSite[];
+    let refs: Record<string, number> = {};
+    if (isPython(file)) {
+      symbols = pyByFile.get(file) ?? [];
+      imports = pyImports[file] ?? [];
+      calls = pyCalls[file] ?? [];
+    } else {
+      const parsed = extractSymbols(file, src);
+      symbols = parsed.symbols;
+      imports = parsed.imports;
+      calls = parsed.calls;
+      refs = parsed.refs;
+    }
+    fileImports[file] = imports;
+    fileCalls[file] = calls;
+    for (const rec of symbols) {
       const line = lineAt(src, rec.charStart);
       entries.push({
         id: mkId(file, rec.name, rec.kind, line),
@@ -165,7 +222,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         visibility: rec.visibility,
         static: rec.static,
         fanIn: 0,
-        intraRefs: parsed.refs[rec.name] ?? 0,
+        intraRefs: refs[rec.name] ?? 0,
         definitionId: `${file}#${rec.kind}:${rec.charStart}-${rec.charEnd}`,
       });
     }

@@ -215,13 +215,22 @@ test('public surface (package.json → tsconfig src map → re-export closure) s
   assert.ok(!index.publicFiles.includes(deadOne.file));
 });
 
-test('named default export is locatable by its real name', async () => {
-  const { index } = await buildIndex({ root: repo({ 'src/w.ts': 'export default function widget(): number { return 1; }\n' }) });
-  const hits = locate(index, 'widget');
-  assert.ok(
-    hits.some((h) => h.name === 'widget' && h.kind === 'default'),
-    'export default function widget → locatable as widget',
-  );
+test('default-exported function/class keeps real kind; default class methods are indexed', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/w.ts': 'export default function widget(): number { return 1; }\n',
+      'src/c.ts': 'export default class Bar {\n  greet(): string { return "hi"; }\n}\n',
+      'src/anon.ts': 'export default function (): void {}\n',
+    }),
+  });
+  // #2: real AST kind, not 'default' (so --kind filters work); locatable by name.
+  assert.equal(index.entries.find((e) => e.name === 'widget')?.kind, 'FunctionDeclaration');
+  assert.equal(index.entries.find((e) => e.name === 'Bar')?.kind, 'ClassDeclaration');
+  // #1: methods of a default-exported class are extracted.
+  const greet = index.entries.find((e) => e.name === 'greet');
+  assert.ok(greet && greet.className === 'Bar', 'default class method indexed');
+  // Anonymous default still recorded as 'default'.
+  assert.ok(index.entries.some((e) => e.name === 'default' && e.kind === 'default'));
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

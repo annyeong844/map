@@ -135,11 +135,16 @@ export function extractSymbols(file: string, text: string): FileParse {
       continue;
     }
     if (node.type === 'ExportDefaultDeclaration') {
-      const t = node.declaration ?? node;
-      // Keep the real name for `export default function foo`/`class Bar` so locate
-      // can find it by name; only anonymous defaults fall back to 'default'.
-      const name = typeof t?.id?.name === 'string' ? t.id.name : 'default';
-      symbols.push({ name, kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
+      const decl = node.declaration;
+      // Named `export default function foo` / `class Bar`: index it like any
+      // declaration — real kind, and (for a class) its methods too.
+      if (decl && (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration') && decl.id?.name) {
+        pushDecl(decl, true, symbols);
+        continue;
+      }
+      // Anonymous default (or an expression): a single 'default' entry.
+      const t = decl ?? node;
+      symbols.push({ name: 'default', kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
       continue;
     }
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);

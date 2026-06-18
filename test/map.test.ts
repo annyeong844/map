@@ -436,6 +436,20 @@ test('calls resolve through a multi-hop re-export chain to the true definition',
   );
 });
 
+test('this.method() / super.method() resolve to the class method without a type checker', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/svc.ts':
+        ['class Base {', '  init(): void {}', '}', 'export class Svc extends Base {', '  run(): void {', '    this.step();', '    this.init();', '  }', '  step(): void {', '    super.init();', '  }', '}'].join('\n') + '\n',
+    }),
+  });
+  const id = (name: string) => index.entries.find((e) => e.kind === 'ClassMethod' && e.name === name)!.id;
+  const has = (from: string, to: string) => index.callEdges.some(([f, t]) => f === from && t === to);
+  assert.ok(has(id('run'), id('step')), 'run → this.step() (same class)');
+  assert.ok(has(id('run'), id('init')), 'run → this.init() (inherited from Base via extends)');
+  assert.ok(has(id('step'), id('init')), 'step → super.init() (superclass)');
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

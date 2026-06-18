@@ -26,22 +26,53 @@ export function computeCallEdges(
     if (!m.has(e.name)) m.set(e.name, e.id);
   }
 
+  // (file, class, method) → id, and class → superclass, for resolving this/super.
+  const methodsByClass = new Map<string, Map<string, Map<string, string>>>();
+  const classExtends = new Map<string, Map<string, string>>();
+  for (const e of entries) {
+    if (e.kind === 'ClassMethod' && e.className) {
+      let byCls = methodsByClass.get(e.file);
+      if (!byCls) methodsByClass.set(e.file, (byCls = new Map()));
+      let byName = byCls.get(e.className);
+      if (!byName) byCls.set(e.className, (byName = new Map()));
+      if (!byName.has(e.name)) byName.set(e.name, e.id);
+    } else if (e.kind === 'ClassDeclaration' && e.extends) {
+      let m = classExtends.get(e.file);
+      if (!m) classExtends.set(e.file, (m = new Map()));
+      if (!m.has(e.name)) m.set(e.name, e.extends);
+    }
+  }
+
   const edges = new Set<string>(); // "fromId\ttoId"
   for (const [file, calls] of callsByFile) {
     const local = defByFileName.get(file);
     if (!local) continue;
     const imports = importsByFile.get(file) ?? [];
     for (const call of calls) {
-      if (call.member) continue; // method dispatch — needs type info; omitted
-      const fromId = local.get(call.caller);
+      // Caller id: exact via its class when known (a method), else by name.
+      const fromId = (call.callerClass && methodsByClass.get(file)?.get(call.callerClass)?.get(call.caller)) || local.get(call.caller);
       if (!fromId) continue; // call from module-init or an unindexed scope
-      let toId = local.get(call.callee); // same-file definition
-      if (!toId) {
-        const imp = imports.find((e) => e.name === call.callee && !e.reexport);
-        if (imp) {
-          const target = resolveRelative(file, imp.source, fileSet);
-          // Follow re-export chains (caller → barrel → … → def), not just one hop.
-          if (target) toId = resolveExportedDef(call.callee, target, importsByFile, defByFileName, fileSet, new Set([target]));
+
+      let toId: string | undefined;
+      if (call.member) {
+        // `this.m()` / `super.m()` resolve to the enclosing class's method (walking
+        // the same-file extends chain) — deterministic, no type checker. `obj.m()`
+        // (recv 'other') still needs types, so it's left to the possibleCallers floor.
+        if (call.recv === 'this' && call.callerClass) {
+          toId = resolveMethodInClass(file, call.callerClass, call.callee, methodsByClass, classExtends);
+        } else if (call.recv === 'super' && call.callerClass) {
+          const sup = classExtends.get(file)?.get(call.callerClass);
+          if (sup) toId = resolveMethodInClass(file, sup, call.callee, methodsByClass, classExtends);
+        }
+      } else {
+        toId = local.get(call.callee); // same-file definition
+        if (!toId) {
+          const imp = imports.find((e) => e.name === call.callee && !e.reexport);
+          if (imp) {
+            const target = resolveRelative(file, imp.source, fileSet);
+            // Follow re-export chains (caller → barrel → … → def), not just one hop.
+            if (target) toId = resolveExportedDef(call.callee, target, importsByFile, defByFileName, fileSet, new Set([target]));
+          }
         }
       }
       if (!toId || toId === fromId) continue; // unresolved (external/builtin) or self
@@ -49,6 +80,26 @@ export function computeCallEdges(
     }
   }
   return [...edges].map((e) => e.split('\t') as [string, string]);
+}
+
+/** Resolve `method` on `className`, walking the same-file extends chain (cycle-guarded).
+ * Lets `this.m()` reach an inherited method without a type checker. */
+function resolveMethodInClass(
+  file: string,
+  className: string,
+  method: string,
+  methodsByClass: Map<string, Map<string, Map<string, string>>>,
+  classExtends: Map<string, Map<string, string>>,
+): string | undefined {
+  const seen = new Set<string>();
+  let cls: string | undefined = className;
+  while (cls && !seen.has(cls)) {
+    seen.add(cls);
+    const id = methodsByClass.get(file)?.get(cls)?.get(method);
+    if (id) return id;
+    cls = classExtends.get(file)?.get(cls);
+  }
+  return undefined;
 }
 
 /**

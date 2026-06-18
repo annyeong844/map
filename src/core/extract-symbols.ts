@@ -19,6 +19,9 @@ export interface SymbolRec {
   className?: string;
   static?: boolean;
   visibility?: string;
+  /** Superclass name for a ClassDeclaration (`class C extends B` → 'B'), used to
+   * resolve inherited `this.m()` / `super.m()` calls without a type checker. */
+  extends?: string;
 }
 
 /** A named symbol pulled from another module: `{ source, name }`. `name` is the
@@ -32,11 +35,16 @@ export interface ImportEdge {
 }
 
 /** A call site: the enclosing top-level symbol (`caller`) calls `callee`.
- * `member` marks `obj.m()` (name-only — not type-resolved, so ambiguous). */
+ * `member` marks a `x.m()` call; `recv` says what `x` is — `this`/`super` (the
+ * enclosing class, deterministically resolvable) vs `other` (`obj.m()`, needs
+ * types). `callerClass` is the class enclosing the call, so `this.m()` resolves
+ * to the right class's method. */
 export interface CallSite {
   caller: string;
   callee: string;
   member: boolean;
+  recv?: 'this' | 'super' | 'other';
+  callerClass?: string;
 }
 
 export interface FileParse {
@@ -63,30 +71,35 @@ export interface FileParse {
 function walkProgram(program: unknown): { refs: Record<string, number>; calls: CallSite[] } {
   const refs: Record<string, number> = Object.create(null);
   const calls: CallSite[] = [];
-  const stack: { node: any; caller: string }[] = [{ node: program, caller: '<module>' }];
+  const stack: { node: any; caller: string; klass: string }[] = [{ node: program, caller: '<module>', klass: '' }];
   while (stack.length) {
-    const { node, caller } = stack.pop()!;
+    const { node, caller, klass } = stack.pop()!;
     if (!node || typeof node !== 'object') continue;
     if (Array.isArray(node)) {
-      for (const c of node) stack.push({ node: c, caller });
+      for (const c of node) stack.push({ node: c, caller, klass });
       continue;
     }
     if (node.type === 'Identifier' && typeof node.name === 'string') {
       refs[node.name] = (refs[node.name] ?? 0) + 1;
     }
     let scope = caller;
-    if (node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
+    let cls = klass;
+    if (node.type === 'ClassDeclaration' && node.id?.name) cls = node.id.name;
+    else if (node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
     else if (node.type === 'MethodDefinition' && node.key?.name) scope = node.key.name;
     else if (node.type === 'VariableDeclarator' && node.id?.name && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) scope = node.id.name;
     if (node.type === 'CallExpression' && node.callee) {
       const c = node.callee;
       if (c.type === 'Identifier') calls.push({ caller: scope, callee: c.name, member: false });
-      else if (c.type === 'MemberExpression' && !c.computed && c.property?.name) calls.push({ caller: scope, callee: c.property.name, member: true });
+      else if (c.type === 'MemberExpression' && !c.computed && c.property?.name) {
+        const recv = c.object?.type === 'ThisExpression' ? 'this' : c.object?.type === 'Super' ? 'super' : 'other';
+        calls.push({ caller: scope, callee: c.property.name, member: true, recv, callerClass: cls || undefined });
+      }
     }
     for (const k in node) {
       if (k === 'type') continue;
       const v = node[k];
-      if (v && typeof v === 'object') stack.push({ node: v, caller: scope });
+      if (v && typeof v === 'object') stack.push({ node: v, caller: scope, klass: cls });
     }
   }
   return { refs, calls };
@@ -208,7 +221,8 @@ function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {
   }
   if (decl.type === 'ClassDeclaration') {
     if (!decl.id?.name) return;
-    out.push({ name: decl.id.name, kind: 'ClassDeclaration', charStart: decl.start, charEnd: decl.end, exported, visibility });
+    const superName = decl.superClass?.type === 'Identifier' ? decl.superClass.name : undefined;
+    out.push({ name: decl.id.name, kind: 'ClassDeclaration', charStart: decl.start, charEnd: decl.end, exported, visibility, extends: superName });
     for (const m of decl.body?.body ?? []) {
       if (m.type !== 'MethodDefinition' || !m.key) continue;
       const name = m.key.name ?? (m.key.type === 'Literal' ? String(m.key.value) : null);

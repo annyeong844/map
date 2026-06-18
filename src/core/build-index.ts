@@ -9,7 +9,7 @@ import type { FileStat, MapEntry, MapIndex } from './types.ts';
 import { firstLine, lineAt, token } from './util.ts';
 
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 6;
+const INDEX_VERSION = 7;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -161,6 +161,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         charEnd: rec.charEnd,
         searchText: firstLine(src, rec.charStart) || rec.name,
         className: rec.className,
+        extends: rec.extends,
         visibility: rec.visibility,
         static: rec.static,
         fanIn: 0,

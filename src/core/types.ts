@@ -39,6 +39,9 @@ export interface MapEntry {
   searchText: string;
   /** Class context for methods. */
   className?: string;
+  /** Superclass name for a ClassDeclaration — lets the call graph resolve
+   * inherited `this.m()` / `super.m()` up the (same-file) extends chain. */
+  extends?: string;
   visibility?: string;
   static?: boolean;
   /**
@@ -95,7 +98,7 @@ export interface MapIndex {
   publicFiles: string[];
   /** Per-file raw call sites, cached so incremental rebuilds recompute the call
    * graph without re-reading unchanged files. */
-  fileCalls: Record<string, { caller: string; callee: string; member: boolean }[]>;
+  fileCalls: Record<string, { caller: string; callee: string; member: boolean; recv?: 'this' | 'super' | 'other'; callerClass?: string }[]>;
   /** Resolved caller→callee edges as `[fromEntryId, toEntryId]` (direct calls
    * only — `obj.m()` method dispatch needs type info and is omitted). */
   callEdges: [string, string][];

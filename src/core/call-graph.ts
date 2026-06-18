@@ -1,6 +1,7 @@
 import type { CallSite, ImportEdge } from './extract-symbols.ts';
 import { resolveRelative } from './fan-in.ts';
-import type { MapEntry } from './types.ts';
+import { locate } from './locate.ts';
+import type { MapEntry, MapIndex } from './types.ts';
 
 /**
  * Resolve call sites into caller→callee edges between indexed symbols — Lumin's
@@ -47,4 +48,19 @@ export function computeCallEdges(
     }
   }
   return [...edges].map((e) => e.split('\t') as [string, string]);
+}
+
+/**
+ * Direct callers/callees of a symbol. Resolves `ref` to one symbol (exact id, else
+ * locate's top hit) and walks `callEdges`. Shared by the CLI and the MCP server so
+ * both expose the same graph.
+ */
+export function callNeighbors(index: MapIndex, ref: string, dir: 'callers' | 'callees'): { symbol: string | null; entries: MapEntry[] } {
+  const targetId = index.entries.find((e) => e.id === ref)?.id ?? locate(index, ref, { limit: 1 })[0]?.id ?? null;
+  if (!targetId) return { symbol: null, entries: [] };
+  const byId = new Map(index.entries.map((e) => [e.id, e]));
+  const edges = index.callEdges ?? [];
+  const ids = dir === 'callers' ? edges.filter(([, to]) => to === targetId).map(([from]) => from) : edges.filter(([from]) => from === targetId).map(([, to]) => to);
+  const entries = [...new Set(ids)].map((id) => byId.get(id)).filter((e): e is MapEntry => !!e);
+  return { symbol: targetId, entries };
 }

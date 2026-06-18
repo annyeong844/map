@@ -11,6 +11,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { callNeighbors } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
 import { locate } from '../core/locate.ts';
 import { read } from '../core/read.ts';
@@ -111,6 +112,26 @@ const TOOLS = [
       required: ['pattern'],
     },
   },
+  {
+    name: 'callees',
+    description:
+      'Direct functions/methods that this symbol calls — follow the thread outward (what it depends on / orchestrates). Resolves ref to one symbol, then walks the call graph. Direct calls only; `obj.method()` dispatch is not resolved.',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' } },
+      required: ['ref'],
+    },
+  },
+  {
+    name: 'callers',
+    description:
+      'Direct call sites of this symbol — who depends on it (blast radius; entry points that reach it). Resolves ref to one symbol, then walks the call graph. Direct calls only; `obj.method()` dispatch is not resolved.',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' } },
+      required: ['ref'],
+    },
+  },
 ];
 
 function callTool(name: string, args: Record<string, any>): string {
@@ -129,6 +150,11 @@ function callTool(name: string, args: Record<string, any>): string {
         null,
         2,
       );
+    case 'callers':
+    case 'callees': {
+      const { symbol, entries } = callNeighbors(index, String(args.ref), name);
+      return JSON.stringify(symbol ? { symbol, [name]: entries } : { error: `no symbol matches "${args.ref}"` }, null, 2);
+    }
     default:
       throw new Error(`unknown tool: ${name}`);
   }

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { resolve as resolvePath } from 'node:path';
 import { buildIndex, type BuildReport } from '../core/build-index.ts';
+import { callNeighbors } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
 import { locate } from '../core/locate.ts';
 import { read } from '../core/read.ts';
@@ -123,21 +124,12 @@ async function main(): Promise<void> {
       const ref = _.slice(1).join(' ');
       if (!ref) die(`${cmd} needs an <id|query>.`);
       const idx = loadIndex(indexPath);
-      const byId = new Map(idx.entries.map((e) => [e.id, e]));
-      // Resolve the query to one symbol: exact id, else locate's top hit.
-      let targetId = idx.entries.find((e) => e.id === ref)?.id;
-      if (!targetId) targetId = locate(idx, ref, { limit: 1 })[0]?.id;
-      if (!targetId) return void console.log(`no match for "${ref}"`);
-      const edges = idx.callEdges ?? [];
-      const neighbours = cmd === 'callers' ? edges.filter(([, to]) => to === targetId).map(([from]) => from) : edges.filter(([from]) => from === targetId).map(([, to]) => to);
-      const uniq = [...new Set(neighbours)];
-      if (json) return void console.log(JSON.stringify({ symbol: targetId, [cmd]: uniq.map((id) => byId.get(id)) }, null, 2));
-      console.log(`# ${cmd} of ${targetId}: ${uniq.length}`);
-      for (const id of uniq) {
-        const e = byId.get(id);
-        if (e) console.log(`  ${e.kind.padEnd(18)} ${e.id}  (${e.file}:${e.line})`);
-      }
-      if (!uniq.length) console.log('  (none — note: direct calls only; method dispatch is not edged)');
+      const { symbol, entries } = callNeighbors(idx, ref, cmd as 'callers' | 'callees');
+      if (!symbol) return void console.log(`no match for "${ref}"`);
+      if (json) return void console.log(JSON.stringify({ symbol, [cmd]: entries }, null, 2));
+      console.log(`# ${cmd} of ${symbol}: ${entries.length}`);
+      for (const e of entries) console.log(`  ${e.kind.padEnd(18)} ${e.id}  (${e.file}:${e.line})`);
+      if (!entries.length) console.log('  (none — note: direct calls only; method dispatch is not edged)');
       return;
     }
 

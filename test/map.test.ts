@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
+import { impactSet, possibleMemberCallers } from '../src/core/call-graph.ts';
 import { grep } from '../src/core/grep.ts';
 import { locate } from '../src/core/locate.ts';
 import { stripJsonc } from '../src/core/public-surface.ts';
-import { read } from '../src/core/read.ts';
+import { aim, read } from '../src/core/read.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
 function repo(files: Record<string, string>): string {
@@ -252,6 +253,39 @@ test('call graph: direct calls become caller→callee edges; method dispatch is 
   // o.go() is a member call — not type-resolvable, so no edge.
   const viaMethod = id('viaMethod', 'src/main.ts');
   assert.ok(!index.callEdges.some(([f]) => f === viaMethod), 'method dispatch not edged');
+});
+
+test('impact = transitive callers; member-call sites surface as the uncounted floor', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/a.ts': "import { mid } from './b.js';\nexport function top(): number { return mid(); }\n",
+      'src/b.ts': "import { leaf } from './c.js';\nexport function mid(): number { return leaf(); }\n",
+      'src/c.ts': 'export function leaf(): number { return 1; }\n',
+      'src/d.ts': 'export function viaDispatch(o: { leaf(): number }): number { return o.leaf(); }\n',
+    }),
+  });
+  const leafId = index.entries.find((e) => e.name === 'leaf')!.id;
+  const names = new Set(impactSet(index, leafId).map((s) => index.entries.find((e) => e.id === s.id)!.name));
+  assert.ok(names.has('mid') && names.has('top'), 'transitive callers of leaf = mid (d1) + top (d2)');
+  // o.leaf() is a member call — not in the graph, but surfaced as the floor.
+  assert.ok(
+    possibleMemberCallers(index, 'leaf').some((m) => m.caller === 'viaDispatch'),
+    'method-dispatch caller surfaces as a possible (uncounted) caller',
+  );
+});
+
+test('aim resolves a snippet to a char range inside a symbol; flags ambiguity', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/f.ts': 'export function f(): number {\n  const x = 1;\n  return x + 1;\n}\nexport function g(): void {\n  a();\n  a();\n}\nfunction a(): void {}\n',
+    }),
+  });
+  const hit = aim(index, index.entries.find((e) => e.name === 'f')!.id, 'const x = 1');
+  assert.equal(hit.status, 'hit');
+  assert.equal(hit.matches.length, 1);
+  const amb = aim(index, index.entries.find((e) => e.name === 'g')!.id, 'a();');
+  assert.equal(amb.status, 'ambiguous');
+  assert.equal(amb.matches.length, 2);
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

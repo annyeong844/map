@@ -11,10 +11,11 @@
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { callNeighbors } from '../core/call-graph.ts';
+import { blastRadiusBrief } from '../core/brief.ts';
+import { callNeighbors, impactSet, possibleMemberCallers } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
 import { locate } from '../core/locate.ts';
-import { read } from '../core/read.ts';
+import { aim, read } from '../core/read.ts';
 import { loadIndex } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
 
@@ -132,6 +133,34 @@ const TOOLS = [
       required: ['ref'],
     },
   },
+  {
+    name: 'brief',
+    description:
+      'Blast-radius brief BEFORE changing a symbol: its raw, what it calls, who calls it, the transitive impact set, and OTHER definitions of the same name (vendored copies/overloads — the tool never picks which is "the" one; you judge from the raw). The `floor` field is a LOWER BOUND — method-dispatch callers are uncounted, so it is never "no impact". Read it before you touch anything.',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' }, depth: { type: 'number', description: 'Max transitive-caller depth (default 6).' } },
+      required: ['ref'],
+    },
+  },
+  {
+    name: 'impact',
+    description: 'Transitive callers of a symbol (reverse call-graph BFS) — everything affected if you change it. Returns a LOWER BOUND: callers via method dispatch are not counted, so never treat an empty/small result as "safe".',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' }, depth: { type: 'number', description: 'Max depth (default 6).' } },
+      required: ['ref'],
+    },
+  },
+  {
+    name: 'aim',
+    description: 'Resolve an exact char range INSIDE a symbol for a chosen snippet — so a fix targets the bug line, not the whole function. Flags ambiguity if the snippet occurs more than once in the symbol.',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'string', description: 'An id from locate, or a symbol name.' }, snippet: { type: 'string', description: 'Verbatim text from inside the symbol.' } },
+      required: ['ref', 'snippet'],
+    },
+  },
 ];
 
 function callTool(name: string, args: Record<string, any>): string {
@@ -155,6 +184,19 @@ function callTool(name: string, args: Record<string, any>): string {
       const { symbol, entries } = callNeighbors(index, String(args.ref), name);
       return JSON.stringify(symbol ? { symbol, [name]: entries } : { error: `no symbol matches "${args.ref}"` }, null, 2);
     }
+    case 'brief':
+      return JSON.stringify(blastRadiusBrief(index, String(args.ref), { depth: args.depth }), null, 2);
+    case 'impact': {
+      const targetId = index.entries.find((e) => e.id === args.ref)?.id ?? locate(index, String(args.ref), { limit: 1 })[0]?.id;
+      if (!targetId) return JSON.stringify({ error: `no symbol matches "${args.ref}"` }, null, 2);
+      const set = impactSet(index, targetId, args.depth ?? 6);
+      const byId = new Map(index.entries.map((e) => [e.id, e]));
+      const name2 = byId.get(targetId)!.name;
+      const members = possibleMemberCallers(index, name2);
+      return JSON.stringify({ symbol: targetId, impact: set.map((s) => ({ ...byId.get(s.id), depth: s.depth })), possibleMemberCallers: members, floor: `>= ${set.length} affected; ${members.length} method-dispatch callers uncounted — lower bound.` }, null, 2);
+    }
+    case 'aim':
+      return JSON.stringify(aim(index, String(args.ref), String(args.snippet)), null, 2);
     default:
       throw new Error(`unknown tool: ${name}`);
   }

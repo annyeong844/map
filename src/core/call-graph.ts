@@ -64,3 +64,48 @@ export function callNeighbors(index: MapIndex, ref: string, dir: 'callers' | 'ca
   const entries = [...new Set(ids)].map((id) => byId.get(id)).filter((e): e is MapEntry => !!e);
   return { symbol: targetId, entries };
 }
+
+/** Transitive callers (reverse-BFS over callEdges, depth-bounded) — the real blast
+ * radius: every symbol that transitively reaches the target. Excludes the target. */
+export function impactSet(index: MapIndex, startId: string, maxDepth = 6): { id: string; depth: number }[] {
+  const rev = new Map<string, string[]>(); // callee → its direct callers
+  for (const [from, to] of index.callEdges ?? []) {
+    const arr = rev.get(to);
+    if (arr) arr.push(from);
+    else rev.set(to, [from]);
+  }
+  const seen = new Map<string, number>();
+  let frontier = [startId];
+  for (let depth = 1; depth <= maxDepth && frontier.length; depth++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const caller of rev.get(id) ?? []) {
+        if (caller !== startId && !seen.has(caller)) {
+          seen.set(caller, depth);
+          next.push(caller);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return [...seen].map(([id, depth]) => ({ id, depth })).sort((a, b) => a.depth - b.depth);
+}
+
+/** `obj.method()` call sites whose property name matches — POSSIBLE callers the
+ * graph can't confirm (method dispatch isn't type-resolved). The blast-radius
+ * floor: these are why an impact set is a lower bound, never "clear". */
+export function possibleMemberCallers(index: MapIndex, name: string): { file: string; caller: string }[] {
+  const out: { file: string; caller: string }[] = [];
+  for (const [file, calls] of Object.entries(index.fileCalls ?? {})) {
+    for (const c of calls) if (c.member && c.callee === name) out.push({ file, caller: c.caller });
+  }
+  return out;
+}
+
+/** Other definitions sharing the target's name — vendored copies / overloads.
+ * The tool never picks which is "the" one; it surfaces them for the LLM to judge. */
+export function sameNameSiblings(index: MapIndex, id: string): MapEntry[] {
+  const self = index.entries.find((e) => e.id === id);
+  if (!self) return [];
+  return index.entries.filter((e) => e.name === self.name && e.file !== self.file);
+}

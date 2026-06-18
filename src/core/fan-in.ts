@@ -18,7 +18,7 @@ const JS_TO_TS: Record<string, readonly string[]> = {
  * tsconfig paths) are external and return null; resolving those fully is a whole
  * module resolver's job, deliberately out of scope here.
  */
-function resolveRelative(fromFile: string, source: string, fileSet: Set<string>): string | null {
+export function resolveRelative(fromFile: string, source: string, fileSet: Set<string>): string | null {
   if (!source.startsWith('./') && !source.startsWith('../')) return null;
   const base = pp.join(pp.dirname(fromFile), source);
 

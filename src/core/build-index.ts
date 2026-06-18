@@ -3,11 +3,12 @@ import { join, resolve } from 'node:path';
 import { extractSymbols, type ImportEdge } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
 import { listSourceFiles } from './files.ts';
+import { computePublicSurface } from './public-surface.ts';
 import type { FileStat, MapEntry, MapIndex } from './types.ts';
 import { firstLine, lineAt, token } from './util.ts';
 
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 4;
+const INDEX_VERSION = 5;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -172,6 +173,15 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const fanIn = computeFanIn(files, importsByFile);
   for (const e of entries) e.fanIn = fanIn.get(`${e.file}::${e.name}`) ?? 0;
 
+  // Public surface: entry/exported files (package.json → tsconfig source map →
+  // re-export closure), so the dead-export screen can spare them.
+  const reexportsByFile = new Map<string, ImportEdge[]>();
+  for (const [f, edges] of importsByFile) {
+    const re = edges.filter((e) => e.reexport);
+    if (re.length) reexportsByFile.set(f, re);
+  }
+  const publicSurface = computePublicSurface(root, files, reexportsByFile);
+
   entries.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.name.localeCompare(b.name));
 
   let methods = 0;
@@ -195,6 +205,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     fileTokens,
     fileStats,
     fileImports,
+    publicFiles: [...publicSurface.files].sort(),
     entries,
   };
 

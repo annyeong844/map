@@ -85,7 +85,13 @@ export interface MapIndex {
    * Per-file import/re-export edges (`{ source, name }`), cached so incremental
    * rebuilds can recompute global fan-in without re-reading unchanged files.
    */
-  fileImports: Record<string, { source: string; name: string }[]>;
+  fileImports: Record<string, { source: string; name: string; reexport?: boolean }[]>;
+  /**
+   * Source files reachable as public API / entry points (package.json public
+   * fields → tsconfig source map → re-export closure). Their exports are not
+   * dead even with zero internal importers.
+   */
+  publicFiles: string[];
   entries: MapEntry[];
 }
 

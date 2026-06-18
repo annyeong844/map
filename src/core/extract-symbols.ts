@@ -22,10 +22,13 @@ export interface SymbolRec {
 }
 
 /** A named symbol pulled from another module: `{ source, name }`. `name` is the
- * name in the *target* module ('default' for default imports). */
+ * name in the *target* module ('default' for default imports, '*' for `export *`).
+ * `reexport` marks an `export … from` edge — these (not plain imports) propagate
+ * public-API reachability from an entry file. */
 export interface ImportEdge {
   source: string;
   name: string;
+  reexport?: boolean;
 }
 
 export interface FileParse {
@@ -109,11 +112,16 @@ export function extractSymbols(file: string, text: string): FileParse {
       }
       continue;
     }
+    if (node.type === 'ExportAllDeclaration' && node.source) {
+      // `export * from './y'` — re-exports y's whole surface (name unknown).
+      imports.push({ source: node.source.value, name: '*', reexport: true });
+      continue;
+    }
     if (node.type === 'ExportNamedDeclaration') {
       if (node.source) {
         // Re-export `export { x } from './y'`: an edge to y::x, not a local def.
         for (const spec of node.specifiers ?? []) {
-          if (spec.type === 'ExportSpecifier' && spec.local?.name) imports.push({ source: node.source.value, name: spec.local.name });
+          if (spec.type === 'ExportSpecifier' && spec.local?.name) imports.push({ source: node.source.value, name: spec.local.name, reexport: true });
         }
         continue;
       }

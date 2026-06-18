@@ -137,10 +137,14 @@ async function main(): Promise<void> {
       const idx = loadIndex(indexPath);
       const fileNeedle = (flags.file as string)?.toLowerCase();
       const limit = flags.limit ? Number(flags.limit) : 40;
-      // Screen: exported (not module-private), not a method, no cross-file importer.
-      const cands = idx.entries.filter(
+      const publicFiles = new Set(idx.publicFiles ?? []);
+      // Screen: exported, not a method, no cross-file importer — and not reachable
+      // as public API / an entry point (those legitimately have no internal importer).
+      const all = idx.entries.filter(
         (e) => e.visibility !== 'module-private' && e.kind !== 'ClassMethod' && (e.fanIn ?? 0) === 0 && (!fileNeedle || e.file.toLowerCase().includes(fileNeedle)),
       );
+      const sparedPublic = all.filter((e) => publicFiles.has(e.file));
+      const cands = all.filter((e) => !publicFiles.has(e.file));
       const deadCode = cands.filter((e) => (e.intraRefs ?? 0) <= 1); // unused in its own file too → removable
       const deadExport = cands.filter((e) => (e.intraRefs ?? 0) > 1); // used intra-file → only the `export` is dead
       if (json) return void console.log(JSON.stringify({ deadCode, deadExport }, null, 2));
@@ -149,11 +153,12 @@ async function main(): Promise<void> {
         for (const e of list.slice(0, limit)) console.log(`  ${e.kind.padEnd(20)} ${e.name.padEnd(28)} ${e.file}:${e.line}`);
         if (list.length > limit) console.log(`  … +${list.length - limit} more`);
       };
-      console.log(`Dead-export screen (exported, no cross-file importer):`);
+      console.log(`Dead-export screen (exported, no cross-file importer, not public API):`);
+      console.log(`  spared as public API / entry point: ${sparedPublic.length} (${publicFiles.size} public files)`);
       show('DEAD CODE — removable (also unused in its own file)', deadCode);
       show('DEAD EXPORT — code used intra-file, only the `export` is unused', deadExport);
-      console.log(`\nnote: a screen, not a verdict — entry points, dynamic dispatch, and external/public API`);
-      console.log(`also have no cross-file importer. fanIn = resolved relative imports; intraRefs = AST identifier count.`);
+      console.log(`\nnote: a screen, not a verdict — dynamic dispatch and framework-convention routes`);
+      console.log(`still have no static importer. fanIn = resolved relative imports; intraRefs = AST identifier count.`);
       return;
     }
 

@@ -189,6 +189,31 @@ test('intraRefs distinguishes dead code from a merely-dead export', async () => 
   assert.ok((reallyDead.intraRefs ?? 0) <= 1, 'reallyDead used nowhere');
 });
 
+test('public surface (package.json → tsconfig src map → re-export closure) spares entry exports', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'package.json': JSON.stringify({ name: 'pkg', exports: { '.': './dist/index.js' }, bin: { pkg: 'dist/index.js' } }),
+      'tsconfig.json': JSON.stringify({ compilerOptions: { outDir: 'dist', rootDir: 'src' } }),
+      // The entry file's OWN export: no internal importer, only public-surface saves it.
+      'src/index.ts': "export function main(): void {}\nexport { publicThing } from './api.js';\n",
+      'src/api.ts': 'export function publicThing(): number { return 1; }\n',
+      'src/internal.ts': 'export function deadOne(): void {}\n', // not on the public surface
+    }),
+  });
+  // dist/index.js → src/index.ts (via tsconfig), then re-export closure → src/api.ts.
+  assert.ok(index.publicFiles.includes('src/index.ts'), 'entry mapped from package.json');
+  assert.ok(index.publicFiles.includes('src/api.ts'), 're-export closure');
+  assert.ok(!index.publicFiles.includes('src/internal.ts'));
+  // `main` has zero importers but lives in the public entry file → spared (not dead).
+  const main = index.entries.find((e) => e.name === 'main')!;
+  assert.equal(main.fanIn, 0);
+  assert.ok(index.publicFiles.includes(main.file), 'main spared by public surface despite fan-in 0');
+  // deadOne is genuinely dead (not public, no importer).
+  const deadOne = index.entries.find((e) => e.name === 'deadOne')!;
+  assert.equal(deadOne.fanIn, 0);
+  assert.ok(!index.publicFiles.includes(deadOne.file));
+});
+
 test('grep parses matches on CRLF files', async () => {
   const root = repo({ 'src/m.ts': SRC.replace(/\n/g, '\r\n') });
   const matches = grep(root, 'function alpha', { fixed: true });

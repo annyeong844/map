@@ -4,11 +4,11 @@ import { locate } from './locate.ts';
 import type { MapEntry, MapIndex } from './types.ts';
 
 /**
- * Resolve call sites into caller→callee edges between indexed symbols — Lumin's
- * Level 1 (structural), reproduced without the type checker. A direct call
- * `foo()` resolves to a same-file top-level `foo`, else to an imported `foo`'s
+ * Resolve call sites into caller→callee edges between indexed symbols — the
+ * structural level (name + import resolution), without a type checker. A direct
+ * call `foo()` resolves to a same-file top-level `foo`, else to an imported `foo`'s
  * definition. Member calls (`obj.m()`) are NOT resolved: picking the right `m`
- * needs type info (Lumin's Level 2 uses tsc), deliberately out of scope here, so
+ * needs type info (a type checker), deliberately out of scope here, so
  * they are omitted rather than guessed. Returns deduped `[fromId, toId]` pairs.
  */
 export function computeCallEdges(

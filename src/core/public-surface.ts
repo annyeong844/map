@@ -100,8 +100,9 @@ function collectStrings(v: unknown, out: string[]): void {
 /**
  * Strip JSONC comments with a string-aware state machine — a regex can't, since
  * `//` and `/*` inside a string value ("https://…", "a/*b") are not comments.
- * (The same technique Lumin uses for TS source; here, zero-dep, for config JSON —
- * deliberately not pulling in `typescript` just to read outDir/rootDir.)
+ * (A string-aware scan — the standard way to strip comments from code; here
+ * zero-dep, for config JSON — deliberately not pulling in `typescript` just to
+ * read outDir/rootDir.)
  */
 export function stripJsonc(s: string): string {
   let out = '';

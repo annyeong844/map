@@ -10,6 +10,7 @@ import { hotspots } from '../src/core/hotspots.ts';
 import { locate } from '../src/core/locate.ts';
 import { stripJsonc } from '../src/core/public-surface.ts';
 import { read } from '../src/core/read.ts';
+import { dispatch, TOOLS } from '../src/mcp/server.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
 function repo(files: Record<string, string>): string {
@@ -318,6 +319,35 @@ test('hotspots: static-only mode (no git) ranks by coupling/size, carries eviden
   const tiny = r.hotspots.findIndex((h) => h.name === 'tiny');
   assert.ok(big !== -1 && (tiny === -1 || big < tiny), 'large, high-fan-in hub outranks the tiny unused fn');
   assert.ok(r.hotspots[big].evidence.fanIn >= 2 && r.hotspots[big].evidence.fixes === 0 && r.hotspots[big].evidence.scope === 'file', 'evidence carries fan-in; no fix data and file-scope without history');
+});
+
+test('read flags ambiguous relocation when the signature anchor matches multiple sites', async () => {
+  const root = repo({ 'src/m.ts': 'export function widget(): number {\n  return 1;\n}\n' });
+  const { index } = await buildIndex({ root });
+  const widget = index.entries.find((e) => e.name === 'widget')!;
+  // Change the file (token differs → re-anchor path) AND make the signature line
+  // occur twice, so the anchor is ambiguous.
+  writeFileSync(join(root, 'src/m.ts'), '// export function widget(): number {   (old, duplicated)\nexport function widget(): number {\n  return 2;\n}\n');
+  const r = read(index, widget.id);
+  assert.equal(r.status, 'ambiguous');
+  assert.ok((r.candidates ?? []).length >= 2, 'returns the multiple candidate anchor sites');
+});
+
+test('mcp server: tool list is the five primitives; dispatch routes each over a given index', async () => {
+  assert.deepEqual(TOOLS.map((t) => t.name).sort(), ['graph', 'grep', 'hotspots', 'locate', 'read']);
+  const { index } = await buildIndex({
+    root: repo({
+      'src/u.ts': 'export function helper(): number { return 1; }\n',
+      'src/m.ts': "import { helper } from './u.js';\nexport function run(): number { return helper(); }\n",
+    }),
+  });
+  const loc = JSON.parse(dispatch(index, 'locate', { query: 'helper' }));
+  assert.ok(Array.isArray(loc) && loc.some((h: { name: string }) => h.name === 'helper'));
+  assert.match(JSON.parse(dispatch(index, 'read', { ref: 'helper' })).raw ?? '', /function helper/);
+  const g = JSON.parse(dispatch(index, 'graph', { ref: 'helper', direction: 'callers' }));
+  assert.ok(g.nodes.some((n: { id: string }) => n.id.includes('run')) && typeof g.floor === 'string');
+  assert.ok(Array.isArray(JSON.parse(dispatch(index, 'hotspots', { limit: 3 })).hotspots));
+  assert.throws(() => dispatch(index, 'nope', {}), /unknown tool/);
 });
 
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {

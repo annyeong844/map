@@ -3,8 +3,9 @@ import type { MapIndex } from './types.ts';
 
 /** A candidate impact point with the EVIDENCE behind it — never a verdict. The
  * tool points "look here, and here's why"; the LLM reads the raw and judges
- * whether there's actually a bug. (Lumin's evidence-advisory pattern; code-map's
- * thesis — coordinates + evidence, meaning stays the LLM's.) */
+ * whether there's actually a bug. (An evidence-advisory pattern — surface the
+ * evidence, never the verdict; the map stays coordinates + evidence, meaning is
+ * the LLM's.) */
 export interface Hotspot {
   id: string;
   name: string;

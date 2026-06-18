@@ -9,9 +9,10 @@
  *
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { graph } from '../core/call-graph.ts';
 import { grep } from '../core/grep.ts';
 import { hotspots } from '../core/hotspots.ts';
@@ -70,10 +71,7 @@ function ensureFresh(): void {
   }
 }
 
-ensureFresh();
-if (!index) process.stderr.write(`code-map MCP: no index at ${indexPath} yet — run \`map index\`; tools will pick it up on the next call.\n`);
-
-const TOOLS = [
+export const TOOLS = [
   {
     name: 'locate',
     description:
@@ -151,6 +149,12 @@ function callTool(name: string, args: Record<string, any>): string {
   if (!index) {
     return JSON.stringify({ error: `No code-map index found at ${indexPath}. Run \`map index --root <repo>\` to build one; it will be picked up automatically.` }, null, 2);
   }
+  return dispatch(index, name, args);
+}
+
+/** Pure tool dispatch over a given index — exported so the protocol layer can be
+ * exercised in tests without a live stdio process. */
+export function dispatch(index: MapIndex, name: string, args: Record<string, any>): string {
   switch (name) {
     case 'locate':
       return JSON.stringify(locate(index, String(args.query), { kind: args.kind, file: args.file, limit: args.limit }), null, 2);
@@ -212,18 +216,32 @@ function handle(req: any): void {
   }
 }
 
-const rl = createInterface({ input: process.stdin });
-rl.on('line', (line) => {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  let req: any;
-  try {
-    req = JSON.parse(trimmed);
-  } catch {
-    return;
-  }
-  handle(req);
-});
+/** Start the stdio JSON-RPC loop — only when run as the entry point, so importing
+ * this module (e.g. from tests) never consumes stdin or eagerly loads an index. */
+function main(): void {
+  ensureFresh();
+  if (!index) process.stderr.write(`code-map MCP: no index at ${indexPath} yet — run \`map index\`; tools will pick it up on the next call.\n`);
+  const rl = createInterface({ input: process.stdin });
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let req: any;
+    try {
+      req = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    handle(req);
+  });
+}
+
+let isEntry = false;
+try {
+  isEntry = !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+} catch {
+  /* not resolvable (e.g. imported) — stay dormant */
+}
+if (isEntry) main();
 
 function argIndex(): string | undefined {
   const i = process.argv.indexOf('--index');

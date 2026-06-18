@@ -1,0 +1,11 @@
+{
+  "name": "ts-oracle-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Type-aware call resolution MCP over a warm tsgo (TypeScript-Go) LSP session — sibling to code-map. Isolated here so code-map's core stays zero-heavy-dep.",
+  "bin": { "ts-oracle-mcp": "./server.ts" },
+  "scripts": { "start": "node server.ts" },
+  "engines": { "node": ">=23.6" },
+  "dependencies": { "@typescript/native-preview": "^7.0.0-dev.20260618.1" }
+}

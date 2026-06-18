@@ -135,6 +135,19 @@ test('native fan-in counts cross-file importers and breaks ranking ties', async 
   assert.equal(hits[0].fanIn, 2);
 });
 
+test('fan-in resolves TS ESM .js→.ts specifiers', async () => {
+  // Modern TS writes the .js extension on the import; the file on disk is .ts.
+  const { index } = await buildIndex({
+    root: repo({
+      'src/dep.ts': 'export function shared(): number { return 1; }\n',
+      'src/a.ts': "import { shared } from './dep.js';\nexport function a() { return shared(); }\n",
+      'src/sub/b.mts': "import { shared } from '../dep.js';\nexport function b() { return shared(); }\n",
+    }),
+  });
+  const shared = index.entries.find((e) => e.name === 'shared' && e.file === 'src/dep.ts')!;
+  assert.equal(shared.fanIn, 2, "'./dep.js' and '../dep.js' both resolve to dep.ts");
+});
+
 test('grep parses matches on CRLF files', async () => {
   const root = repo({ 'src/m.ts': SRC.replace(/\n/g, '\r\n') });
   const matches = grep(root, 'function alpha', { fixed: true });

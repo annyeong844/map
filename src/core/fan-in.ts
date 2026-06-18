@@ -1,7 +1,16 @@
 import { posix as pp } from 'node:path';
 import type { ImportEdge } from './extract-symbols.ts';
 
-const EXTS = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+// Extensions tried for an extensionless specifier, in order.
+const APPEND_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+// TS ESM / NodeNext writes a JS-family extension on the specifier, but the file
+// on disk is its TS counterpart (`import './x.js'` resolves to `x.ts`). Map back.
+const JS_TO_TS: Record<string, readonly string[]> = {
+  '.js': ['.ts', '.tsx'],
+  '.jsx': ['.tsx'],
+  '.mjs': ['.mts'],
+  '.cjs': ['.cts'],
+};
 
 /**
  * Resolve a relative import specifier against the known file set — no filesystem
@@ -12,8 +21,22 @@ const EXTS = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 function resolveRelative(fromFile: string, source: string, fileSet: Set<string>): string | null {
   if (!source.startsWith('./') && !source.startsWith('../')) return null;
   const base = pp.join(pp.dirname(fromFile), source);
-  for (const e of EXTS) if (fileSet.has(base + e)) return base + e;
-  for (const e of EXTS.slice(1)) if (fileSet.has(`${base}/index${e}`)) return `${base}/index${e}`;
+
+  // 1. The specifier as written points at a real file (e.g. a genuine .js).
+  if (fileSet.has(base)) return base;
+
+  // 2. A JS-family extension that, by the TS ESM convention, names a .ts file.
+  for (const [js, tsList] of Object.entries(JS_TO_TS)) {
+    if (base.endsWith(js)) {
+      const stem = base.slice(0, -js.length);
+      for (const ts of tsList) if (fileSet.has(stem + ts)) return stem + ts;
+      return null; // had an explicit extension — don't fall through to appends
+    }
+  }
+
+  // 3. Extensionless specifier → append an extension, then try a directory index.
+  for (const e of APPEND_EXTS) if (fileSet.has(base + e)) return base + e;
+  for (const e of APPEND_EXTS) if (fileSet.has(`${base}/index${e}`)) return `${base}/index${e}`;
   return null;
 }
 

@@ -118,7 +118,7 @@ export const TOOLS = [
   {
     name: 'graph',
     description:
-      'Walk the call graph from a symbol. direction="callers" (default) = who depends on it — the blast radius; "callees" = what it calls. depth=1 (default) is direct neighbours, depth>1 is transitive. For callers the result includes a `floor`: a LOWER BOUND, because `obj.method()` dispatch is not in the graph — never treat a small/empty result as "safe".',
+      'Walk the call graph from a symbol. direction="callers" (default) = who depends on it — the blast radius; "callees" = what it calls. depth=1 (default) is direct neighbours, depth>1 is transitive. For callers the result includes a `floor` (LOWER BOUND — `obj.method()` dispatch is not in the graph, never treat a small result as "safe") and `possibleCallers`: the `obj.<name>()` sites that MIGHT reach it via dispatch — name-matched & UNVERIFIED (reliable for distinctive names, noisy for generic ones like run/get), to inspect for "what might my change touch".',
     inputSchema: {
       type: 'object',
       properties: {

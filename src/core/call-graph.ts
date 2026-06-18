@@ -57,7 +57,14 @@ export interface GraphResult {
   /** Present for `callers`: the blast-radius lower bound — method-dispatch callers
    * are NOT in the graph, so this is never "clear". */
   floor?: string;
+  /** Present for `callers`: `obj.<name>()` sites — POSSIBLE callers reached via
+   * method dispatch. Name-matched & UNVERIFIED (the resolver can't pick the class
+   * without types), so reliable for distinctive names, noisy for generic ones.
+   * Capped; `floor` carries the true count. */
+  possibleCallers?: { file: string; caller: string }[];
 }
+
+const POSSIBLE_CALLERS_CAP = 40;
 
 /**
  * Walk the call graph from a symbol — the one navigation primitive. `callers`
@@ -102,20 +109,32 @@ export function graph(index: MapIndex, ref: string, opts: { direction: 'callers'
     .sort((a, b) => a.depth - b.depth || a.file.localeCompare(b.file));
 
   let floor: string | undefined;
+  let possibleCallers: { file: string; caller: string }[] | undefined;
   if (dir === 'callers') {
     const name = byId.get(targetId)!.name;
     const members = possibleMemberCallers(index, name);
-    floor = `>= ${nodes.length} caller(s) (direct calls only). ${members.length} possible caller(s) reach "${name}" via obj.${name}() and are NOT counted — LOWER BOUND, never "clear".`;
+    possibleCallers = members.slice(0, POSSIBLE_CALLERS_CAP);
+    floor =
+      `>= ${nodes.length} caller(s) (direct calls only). ${members.length} possible caller(s) reach "${name}" via obj.${name}() — name-matched & UNVERIFIED (no types), NOT in the graph. LOWER BOUND, never "clear".` +
+      (members.length > possibleCallers.length ? ` (listing first ${possibleCallers.length})` : '');
   }
-  return { symbol: targetId, direction: dir, nodes, floor };
+  return { symbol: targetId, direction: dir, nodes, floor, possibleCallers };
 }
 
 /** `obj.method()` call sites whose property name matches — POSSIBLE callers the
- * graph can't confirm (method dispatch isn't type-resolved): the blast-radius floor. */
+ * graph can't confirm (method dispatch isn't type-resolved): the blast-radius floor.
+ * Deduped by (file, enclosing symbol). */
 function possibleMemberCallers(index: MapIndex, name: string): { file: string; caller: string }[] {
+  const seen = new Set<string>();
   const out: { file: string; caller: string }[] = [];
   for (const [file, calls] of Object.entries(index.fileCalls ?? {})) {
-    for (const c of calls) if (c.member && c.callee === name) out.push({ file, caller: c.caller });
+    for (const c of calls) {
+      if (!c.member || c.callee !== name) continue;
+      const key = `${file}\t${c.caller}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ file, caller: c.caller });
+    }
   }
   return out;
 }

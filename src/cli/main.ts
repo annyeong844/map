@@ -154,6 +154,10 @@ async function main(): Promise<void> {
       console.log(`# ${direction} of ${g.symbol} (depth ${depth}): ${g.nodes.length}`);
       for (const n of g.nodes) console.log(`  ${depth > 1 ? `d${n.depth}  ` : ''}${n.kind.padEnd(18)} ${n.id}  (${n.file}:${n.line})`);
       if (g.floor) console.log(`\nFLOOR: ${g.floor}`);
+      if (g.possibleCallers?.length) {
+        console.log(`\npossible via obj.${g.symbol?.split('#').pop()}() — name-matched, UNVERIFIED (${g.possibleCallers.length}):`);
+        for (const p of g.possibleCallers) console.log(`  ?  ${p.caller}  (${p.file})`);
+      }
       return;
     }
 

@@ -402,6 +402,22 @@ test('re-exported imports are not indexed as barrel symbols; calls resolve to th
   );
 });
 
+test('graph callers lists possible method-dispatch sites (name-matched, unverified)', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/svc.ts': 'export class Svc {\n  reload(): void {}\n}\n',
+      'src/use.ts': 'export function refresh(s: { reload(): void }): void {\n  s.reload();\n}\n',
+    }),
+  });
+  const g = graph(index, 'reload', { direction: 'callers' });
+  assert.ok(
+    g.possibleCallers?.some((p) => p.caller === 'refresh' && p.file === 'src/use.ts'),
+    's.reload() surfaces refresh as a possible (dispatch) caller — the obj.method() the graph cannot resolve',
+  );
+  // callees direction does not carry possibleCallers
+  assert.equal(graph(index, 'reload', { direction: 'callees' }).possibleCallers, undefined);
+});
+
 test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
   const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
   const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));

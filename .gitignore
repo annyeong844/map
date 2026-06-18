@@ -2,3 +2,4 @@ node_modules/
 .map-index.json
 *.log
 *.tmp
+.cache/

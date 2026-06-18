@@ -16,7 +16,8 @@
  * else it resolves the copy installed in this package.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -156,12 +157,58 @@ function findPosition(file: string, name?: string, line?: number, character?: nu
   return null;
 }
 
-// ── one warm session per project root ──
+// ── one warm session per project root (lazy — only spun up on a cache MISS) ──
 const sessions = new Map<string, TsgoLsp>();
 function session(root: string, bin: string): TsgoLsp {
   let s = sessions.get(root);
   if (!s) sessions.set(root, (s = new TsgoLsp(bin, root)));
   return s;
+}
+
+// ── persistent answer cache (the practical "snapshot"): the checker's RAM can't be
+// serialized, but the ANSWERS can. Persisted per root, reloaded on start → after a
+// restart, queries with no project change are served INSTANTLY, without even warming
+// the LSP. Validity is gated by a project epoch (max source mtime): any change bumps
+// it and drops the stale answers, which then lazily recompute against the warm LSP. ──
+const CACHE_DIR = join(HERE, '.cache');
+const sha16 = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.cache', 'coverage']);
+const SRC_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+
+const epochCache = new Map<string, { at: number; epoch: number }>();
+/** Project epoch = max source-file mtime; sampled ≤ once / 2s so repeat queries are O(1). */
+function projectEpoch(root: string): number {
+  const c = epochCache.get(root);
+  if (c && Date.now() - c.at < 2000) return c.epoch;
+  let max = 0;
+  const walk = (d: string) => {
+    let ents;
+    try { ents = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (SKIP_DIRS.has(e.name)) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (SRC_RE.test(e.name)) { try { const m = statSync(p).mtimeMs; if (m > max) max = m; } catch { /* gone */ } }
+    }
+  };
+  walk(root);
+  const epoch = Math.floor(max);
+  epochCache.set(root, { at: Date.now(), epoch });
+  return epoch;
+}
+
+type Cache = { epoch: number; entries: Record<string, unknown> };
+const caches = new Map<string, Cache>();
+const cacheFile = (root: string) => join(CACHE_DIR, `${sha16(root)}.json`);
+function loadCache(root: string): Cache {
+  let c = caches.get(root);
+  if (c) return c;
+  try { c = JSON.parse(readFileSync(cacheFile(root), 'utf8')) as Cache; } catch { c = { epoch: 0, entries: {} }; }
+  caches.set(root, c);
+  return c;
+}
+function persistCache(root: string): void {
+  try { mkdirSync(CACHE_DIR, { recursive: true }); writeFileSync(cacheFile(root), JSON.stringify(caches.get(root))); } catch { /* best effort */ }
 }
 
 const lineCache = new Map<string, string[]>();
@@ -181,24 +228,39 @@ async function callers(args: Record<string, any>): Promise<unknown> {
   if (!pos) return { error: `could not locate symbol "${args.name}" in ${file}; pass line/character.` };
 
   const root = args.root ? resolve(args.root) : projectRoot(file);
+  const relFile = relative(root, file).replace(/\\/g, '/');
+  const cacheKey = `${relFile}#${args.name ?? `${pos.line}:${pos.character}`}`;
+
+  // Cache gate: serve instantly (no LSP warmup) when the project hasn't changed.
+  const epoch = projectEpoch(root);
+  const cache = loadCache(root);
+  if (cache.epoch === epoch && cache.entries[cacheKey]) {
+    return { ...(cache.entries[cacheKey] as object), cached: true };
+  }
+
   const refs = await session(root, bin).references(file, pos.line, pos.character);
   const seen = new Set<string>();
   const out: { file: string; line: number; preview: string }[] = [];
   for (const r of refs) {
     const f = fileURLToPath(r.uri);
-    const key = `${f}\t${r.line}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const dk = `${f}\t${r.line}`;
+    if (seen.has(dk)) continue;
+    seen.add(dk);
     out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line) });
   }
   out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
-  return {
-    symbol: { file: relative(root, file).replace(/\\/g, '/'), name: args.name ?? null, position: pos },
+  const result = {
+    symbol: { file: relFile, name: args.name ?? null, position: pos },
     root,
     callers: out,
     count: out.length,
+    cached: false,
     note: 'Type-aware callers via tsgo LSP references (checker grade, resolves through interfaces/DI standard cases). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) is still invisible to the checker — a residual the agent must resolve from raw.',
   };
+  if (cache.epoch !== epoch) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
+  cache.entries[cacheKey] = result;
+  persistCache(root);
+  return result;
 }
 
 // ── MCP server (newline-delimited JSON-RPC over stdio, like code-map) ──
@@ -260,7 +322,9 @@ function main(): void {
     try { req = JSON.parse(t); } catch { return; }
     void handle(req);
   });
-  process.on('SIGTERM', () => { for (const s of sessions.values()) s.dispose(); process.exit(0); });
+  const shutdown = () => { for (const root of caches.keys()) persistCache(root); for (const s of sessions.values()) s.dispose(); process.exit(0); };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 let isEntry = false;

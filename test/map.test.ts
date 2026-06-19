@@ -503,3 +503,13 @@ test('calls inside a nested function roll up to the enclosing top-level symbol',
     "leaf() called inside nested inner() must be attributed to outer (not lost)",
   );
 });
+
+test('read refuses a path that escapes the index root (traversal / untrusted index)', async () => {
+  const root = repo({ 'src/m.ts': SRC });
+  const { index } = await buildIndex({ root });
+  // A malicious or corrupted index entry pointing outside the project root.
+  const evil = { ...index.entries[0], id: 'evil#x', file: '../../../../../../etc/hostname', name: 'x', charStart: 0, charEnd: 8 };
+  const r = read({ ...index, entries: [...index.entries, evil] }, 'evil#x');
+  assert.notEqual(r.status, 'exact', 'must not read a file outside the index root');
+  assert.equal(r.raw, null);
+});

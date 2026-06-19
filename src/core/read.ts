@@ -1,8 +1,29 @@
-import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { resolve as resolvePath, sep } from 'node:path';
 import { grep } from './grep.ts';
 import { locate } from './locate.ts';
 import type { MapEntry, MapIndex, ReadResult } from './types.ts';
 import { indexOfAll, lineAt, offsetOfLine, token, tryReadFile } from './util.ts';
+
+/**
+ * Resolve `relFile` under `root`, refusing anything that escapes it — a `..`
+ * traversal or a symlink pointing outside. An index is untrusted input (it can be
+ * committed in a downloaded repo), so a malicious `entry.file` must not make the
+ * server read outside the project root. Returns the absolute path, or null to refuse.
+ */
+function fileWithinRoot(root: string, relFile: string): string | null {
+  const rootAbs = resolvePath(root);
+  const target = resolvePath(rootAbs, relFile);
+  if (target !== rootAbs && !target.startsWith(rootAbs + sep)) return null; // lexical containment
+  try {
+    const real = realpathSync(target);
+    const realRoot = realpathSync(rootAbs);
+    if (real !== realRoot && !real.startsWith(realRoot + sep)) return null; // symlink escape
+  } catch {
+    /* not yet on disk — the lexical check already held */
+  }
+  return target;
+}
 
 /** Lines of trailing context for line-only symbols with no known sibling boundary. */
 const LINE_ONLY_WINDOW = 80;
@@ -32,7 +53,8 @@ export function read(index: MapIndex, ref: string, opts: { snippet?: string } = 
  * symbol and falsely report `hit`). `ambiguous` when the snippet occurs >1× inside.
  */
 function computeAim(index: MapIndex, entry: MapEntry, snippet: string): ReadResult['aim'] {
-  const text = tryReadFile(join(index.meta.root, entry.file));
+  const path = fileWithinRoot(index.meta.root, entry.file);
+  const text = path == null ? null : tryReadFile(path);
   if (text == null) return { status: 'unanchored', matches: [] };
 
   // Establish the symbol's byte range [lo, hi) — and refuse to guess past it.
@@ -81,7 +103,11 @@ function readCore(index: MapIndex, ref: string): ReadResult {
     };
   }
 
-  const text = tryReadFile(join(index.meta.root, entry.file));
+  const path = fileWithinRoot(index.meta.root, entry.file);
+  if (path == null) {
+    return { status: 'not-found', id: entry.id, file: entry.file, line: entry.line, raw: null, note: `Refused: "${entry.file}" resolves outside the index root.` };
+  }
+  const text = tryReadFile(path);
   if (text == null) {
     return { status: 'not-found', id: entry.id, file: entry.file, line: entry.line, raw: null, note: `File not readable: ${entry.file}` };
   }

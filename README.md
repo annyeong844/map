@@ -246,6 +246,11 @@ type-checker grade over a warm LSP session:
 - **Multi-language:** tsgo (TypeScript-Go) for TS/JS, `ty` for Python — picked by
   file extension; both speak LSP, so the warm session, persistent answer-cache, and
   readiness logic are shared.
+- **Eager warm-up.** At startup the server pre-warms the working project (cwd, or
+  `CODE_ORACLE_ROOT`) in the background and logs `warming… ready in Ns` — so the cold
+  ~10-20s load overlaps the agent's other startup work and the first blast-radius
+  query is already warm, instead of stalling. Non-blocking (the tool surface answers
+  immediately); set `CODE_ORACLE_PREWARM=0` to disable. Cache hits never need it.
 - **Why it's separate.** It has the *opposite* profile to the core: a heavy, pinned
   preview dependency, seconds of project warmup, a stateful LSP session. Isolating it
   keeps the core's "one dependency, no machinery" promise intact, and lets the backend

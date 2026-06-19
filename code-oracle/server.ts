@@ -175,6 +175,16 @@ class LspSession {
     return arr.map((l: any) => ({ uri: l.uri ?? l.targetUri, line: (l.range ?? l.targetRange)?.start?.line ?? 0 })).filter((x: any) => x.uri);
   }
 
+  /** Eagerly load the project (open a seed file + wait for quiescence) so the first
+   * real query doesn't pay the cold warmup. Fire-and-forget at startup. */
+  async prewarm(seedFile: string): Promise<void> {
+    await this.initDone;
+    this.syncFile(seedFile);
+    await this.waitReady();
+  }
+
+  get ready(): boolean { return this.warmed; }
+
   dispose(): void { try { this.proc.kill(); } catch { /* ignore */ } }
 }
 
@@ -191,7 +201,8 @@ function findPosition(file: string, name?: string, line?: number, character?: nu
   return null;
 }
 
-// ── one warm session per (language, project root); lazy — only on a cache MISS ──
+// ── one warm session per (language, project root). The working root is pre-warmed
+// at startup (see prewarm()); other roots spin up lazily on first use. ──
 const sessions = new Map<string, LspSession>();
 function session(root: string, lang: Lang, spec: { cmd: string; args: string[]; languageId: string }): LspSession {
   const key = `${lang}::${root}`;
@@ -389,8 +400,52 @@ async function handle(req: any): Promise<void> {
   }
 }
 
+// ── eager pre-warm: load the working project at startup so the first query is fast ──
+async function firstSourceFile(root: string, lang: Lang): Promise<string | null> {
+  const re = lang === 'ts' ? /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/ : /\.(py|pyi)$/;
+  const queue = [root];
+  let scanned = 0;
+  while (queue.length && scanned < 4000) {
+    const dir = queue.shift()!;
+    let ents;
+    try { ents = await readdir(dir, { withFileTypes: true }); } catch { continue; }
+    const subdirs: string[] = [];
+    for (const e of ents) {
+      scanned++;
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) subdirs.push(join(dir, e.name)); }
+      else if (re.test(e.name) && !e.name.endsWith('.d.ts')) return join(dir, e.name);
+    }
+    queue.push(...subdirs);
+  }
+  return null;
+}
+
+/** Pre-warm the oracle for the working project at startup (default on; set
+ * CODE_ORACLE_PREWARM=0 to disable). Non-blocking — it overlaps the agent's other
+ * startup work, so the first blast-radius query doesn't stall on the ~20s cold load. */
+async function prewarm(): Promise<void> {
+  if (process.env.CODE_ORACLE_PREWARM === '0') return;
+  const root = process.env.CODE_ORACLE_ROOT ? resolve(process.env.CODE_ORACLE_ROOT) : process.cwd();
+  const langs: Lang[] = [];
+  if (existsSync(join(root, 'tsconfig.json'))) langs.push('ts');
+  if (['pyproject.toml', 'setup.py', 'setup.cfg'].some((m) => existsSync(join(root, m)))) langs.push('py');
+  for (const lang of langs) {
+    const be = backend(lang);
+    if (!be) { process.stderr.write(`code-oracle: ${lang} project at ${root} but its tool isn't installed — pre-warm skipped\n`); continue; }
+    const seed = await firstSourceFile(root, lang);
+    if (!seed) continue;
+    process.stderr.write(`code-oracle: warming the ${lang} oracle for ${root} (~10-20s; queries wait until ready)…\n`);
+    const started = Date.now();
+    session(root, lang, be).prewarm(seed).then(
+      () => process.stderr.write(`code-oracle: ${lang} oracle ready in ${Math.round((Date.now() - started) / 1000)}s\n`),
+      (e) => process.stderr.write(`code-oracle: ${lang} pre-warm failed: ${e}\n`),
+    );
+  }
+}
+
 function main(): void {
   if (!backend('ts')) process.stderr.write('code-oracle: tsgo not found — set TSGO_BIN or `npm install` in code-oracle/. (Python uses ty via uvx / TY_CMD.) Tools error per-language until present.\n');
+  void prewarm(); // eager, non-blocking
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     const t = line.trim();

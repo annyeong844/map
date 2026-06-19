@@ -22,6 +22,9 @@ export interface SymbolRec {
   /** Superclass name for a ClassDeclaration (`class C extends B` → 'B'), used to
    * resolve inherited `this.m()` / `super.m()` calls without a type checker. */
   extends?: string;
+  /** `export default function foo` — exported under the name `default`, so a
+   * `import foo from …` (which references `default`, not `foo`) counts toward fan-in. */
+  default?: boolean;
 }
 
 /** A named symbol pulled from another module: `{ source, name }`. `name` is the
@@ -224,7 +227,9 @@ export function extractSymbols(file: string, text: string): FileParse {
       // Named `export default function foo` / `class Bar`: index it like any
       // declaration — real kind, and (for a class) its methods too.
       if (decl && (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration') && decl.id?.name) {
+        const at = symbols.length;
         pushDecl(decl, true, symbols);
+        if (symbols[at]) symbols[at].default = true; // foo is also the module's `default` export
         continue;
       }
       // Anonymous default (or an expression): a single 'default' entry.

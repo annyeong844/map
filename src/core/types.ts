@@ -44,6 +44,8 @@ export interface MapEntry {
   extends?: string;
   visibility?: string;
   static?: boolean;
+  /** Exported as the module's `default` — fan-in credits `default` imports of it. */
+  default?: boolean;
   /**
    * Cross-module call-site count — a structural ranking tiebreaker (not
    * interpretation). Computed natively in fan-in.ts: distinct files that import

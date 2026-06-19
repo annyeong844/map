@@ -513,3 +513,30 @@ test('read refuses a path that escapes the index root (traversal / untrusted ind
   assert.notEqual(r.status, 'exact', 'must not read a file outside the index root');
   assert.equal(r.raw, null);
 });
+
+test('default-exported function gets fan-in from default imports', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/dep.ts': 'export default function widget() { return 1 }\n',
+      'src/a.ts': "import widget from './dep.ts'\nexport function a() { return widget() }\n",
+      'src/b.ts': "import w from './dep.js'\nexport function b() { return w() }\n",
+    }),
+  });
+  const widget = index.entries.find((e) => e.name === 'widget' && e.file === 'src/dep.ts')!;
+  assert.ok(widget, 'default export indexed by its real name');
+  assert.ok(widget.default, 'marked as the module default export');
+  assert.equal(widget.fanIn, 2, 'two files default-import it (counted via the `default` bucket)');
+});
+
+test('fan-in propagates through a barrel re-export to the real definition', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/real.ts': 'export function gizmo() { return 1 }\n',
+      'src/index.ts': "export { gizmo } from './real.ts'\n", // barrel forwards it
+      'src/a.ts': "import { gizmo } from './index.ts'\nexport function a() { return gizmo() }\n",
+      'src/b.ts': "import { gizmo } from './index.ts'\nexport function b() { return gizmo() }\n",
+    }),
+  });
+  const gizmo = index.entries.find((e) => e.name === 'gizmo' && e.file === 'src/real.ts')!;
+  assert.equal(gizmo.fanIn, 2, 'two consumers importing via the barrel credit the real definition');
+});

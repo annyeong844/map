@@ -55,13 +55,36 @@ export function resolveRelative(fromFile: string, source: string, fileSet: Set<s
  */
 export function computeFanIn(files: string[], importsByFile: Map<string, ImportEdge[]>): Map<string, number> {
   const fileSet = new Set(files);
-  const importers = new Map<string, Set<string>>(); // "target::name" -> set of importing files
+
+  // Re-export edges per file, to follow `name` through barrels to the real definition.
+  const reexportsByFile = new Map<string, ImportEdge[]>();
+  for (const [f, edges] of importsByFile) {
+    const re = edges.filter((e) => e.reexport);
+    if (re.length) reexportsByFile.set(f, re);
+  }
+  /** Walk `export { name } from …` / `export * from …` chains to the file that
+   * actually defines `name`, so importers through a barrel count toward the real
+   * definition rather than the barrel. */
+  const resolveDef = (file: string, name: string, seen: Set<string>): string => {
+    if (seen.has(file)) return file;
+    seen.add(file);
+    for (const e of reexportsByFile.get(file) ?? []) {
+      if (e.name === name || e.name === '*') {
+        const next = resolveRelative(file, e.source, fileSet);
+        if (next) return resolveDef(next, name, seen);
+      }
+    }
+    return file;
+  };
+
+  const importers = new Map<string, Set<string>>(); // "defFile::name" -> set of importing files
   for (const [fromFile, edges] of importsByFile) {
     for (const edge of edges) {
-      if (!edge.name || edge.name === '*') continue;
+      if (!edge.name || edge.name === '*' || edge.reexport) continue; // re-exports forward, they don't consume
       const target = resolveRelative(fromFile, edge.source, fileSet);
       if (!target) continue;
-      const key = `${target}::${edge.name}`;
+      const def = resolveDef(target, edge.name, new Set());
+      const key = `${def}::${edge.name}`;
       let set = importers.get(key);
       if (!set) importers.set(key, (set = new Set()));
       set.add(fromFile);

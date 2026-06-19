@@ -30,7 +30,7 @@ function runPyBackend(root: string, targets: string[]): Promise<PyParse | null> 
 }
 
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 9;
+const INDEX_VERSION = 10;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -230,6 +230,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         extends: rec.extends,
         visibility: rec.visibility,
         static: rec.static,
+        default: rec.default,
         fanIn: 0,
         intraRefs: refs[rec.name] ?? 0,
         definitionId: `${file}#${rec.kind}:${rec.charStart}-${rec.charEnd}`,
@@ -242,7 +243,11 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   // def's fan-in can shift when *another* file changes its imports.
   const importsByFile = new Map<string, ImportEdge[]>(Object.entries(fileImports));
   const fanIn = computeFanIn(files, importsByFile);
-  for (const e of entries) e.fanIn = fanIn.get(`${e.file}::${e.name}`) ?? 0;
+  for (const e of entries) {
+    // A default-exported symbol is referenced by importers as `default`, not its
+    // local name, so credit that bucket too (`import foo from './x'` → x.ts::default).
+    e.fanIn = (fanIn.get(`${e.file}::${e.name}`) ?? 0) + (e.default ? (fanIn.get(`${e.file}::default`) ?? 0) : 0);
+  }
 
   // Public surface: entry/exported files (package.json → tsconfig source map →
   // re-export closure), so the dead-export screen can spare them.

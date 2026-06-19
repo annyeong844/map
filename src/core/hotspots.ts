@@ -1,4 +1,5 @@
 import { computeHistory, computeSymbolHistory } from './git-history.ts';
+import { rankByRisk } from './risk-rank.ts';
 import type { MapIndex } from './types.ts';
 
 /** A candidate impact point with the EVIDENCE behind it — never a verdict. The
@@ -35,29 +36,18 @@ export interface HotspotReport {
 /** Type-only declarations — runtime bugs rarely live here, so they're excluded. */
 const NON_CODE = new Set(['TSInterfaceDeclaration', 'TSTypeAliasDeclaration', 'TSEnumDeclaration', 'TSModuleDeclaration', 'ExportSpecifier']);
 
-function scoreOf(commits: number, fixes: number, fixNeighbors: number, fanIn: number, sizeChars: number, lastTouchedDays: number | null): number {
-  const recencyBoost = lastTouchedDays != null && lastTouchedDays < 90 ? 1 : 0;
-  return (
-    3 * fixes + // validated process signal leads
-    1.5 * fixNeighbors + // spatial locality
-    Math.log(commits + 1) + // churn
-    recencyBoost +
-    0.4 * Math.log(fanIn + 1) + // static coupling (fallback)
-    0.25 * Math.min(sizeChars / 1000, 20) // static size (fallback)
-  );
-}
-
 /**
- * Rank impact points by defect-prediction evidence. Process signals (churn, bug-fix
- * recurrence, recency) lead when git history is present — the literature found them
- * stronger than static metrics — with call-graph spatial locality and static
- * coupling/size folded in. Degrades to static-only when there's no history.
+ * Gather defect-prediction EVIDENCE per candidate (churn, bug-fix recurrence, recency,
+ * call-graph spatial locality, static coupling/size). This is the coordinate core's
+ * job: surface verifiable signals, decide nothing. The ORDER comes from `rankByRisk`
+ * (risk-rank.ts) — a separate, opinionated layer whose weights you can override or
+ * ignore; the `score` it attaches is a convenience ordering over the evidence, never a
+ * fact about the code. Degrades to static-only evidence when there's no git history.
  *
- * `precise` lowers process evidence from file → symbol (`git blame` per symbol):
- * since a symbol's churn ≤ its file's, the cheap file-level pass is an upper bound,
- * so we only refine a bounded shortlist of the top candidates (one git query each —
- * EXPENSIVE; opt-in). The `score` is a convenience order; the `evidence` is the truth,
- * and the tool decides nothing.
+ * `precise` lowers process evidence from file → symbol (`git blame` per symbol): since
+ * a symbol's churn ≤ its file's, the cheap file-level pass is an upper bound, so only a
+ * bounded shortlist of the top-ranked candidates is refined (one git query each —
+ * EXPENSIVE; opt-in), then re-ranked.
  */
 export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number; file?: string; precise?: boolean }): HotspotReport {
   const limit = opts.limit ?? 25;
@@ -101,16 +91,17 @@ export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number;
       kind: e.kind,
       file: e.file,
       line: e.line,
-      score: scoreOf(commits, fixes, fixNeighbors, fanIn, sizeChars, lastTouchedDays),
+      score: 0, // ordering is the separate risk-rank layer's job, not the core's
       evidence: { fanIn, sizeChars, commits, fixes, lastTouchedDays, fixNeighbors, scope: 'file' },
     });
   }
-  out.sort((a, b) => b.score - a.score || b.evidence.fanIn - a.evidence.fanIn || a.file.localeCompare(b.file) || a.line - b.line);
+  const ranked = rankByRisk(out);
 
-  // Precise mode: refine the top shortlist with per-symbol git history, then re-rank.
+  // Precise mode: refine the top shortlist's EVIDENCE with per-symbol git history, then
+  // re-rank (the ranking layer recomputes the score from the refined evidence).
   if (opts.precise && historyAvailable) {
     const k = Math.min(limit * 3, 50);
-    const shortlist = out.slice(0, k);
+    const shortlist = ranked.slice(0, k);
     let refined = 0;
     for (const hs of shortlist) {
       const e = byId.get(hs.id);
@@ -120,20 +111,18 @@ export function hotspots(index: MapIndex, opts: { limit?: number; nowMs: number;
       hs.evidence.fixes = sh.fixes;
       hs.evidence.lastTouchedDays = Number.isFinite(sh.lastTouchedDays) ? Math.round(sh.lastTouchedDays) : null;
       hs.evidence.scope = 'symbol';
-      hs.score = scoreOf(sh.commits, sh.fixes, hs.evidence.fixNeighbors, hs.evidence.fanIn, hs.evidence.sizeChars, sh.lastTouchedDays);
       refined++;
     }
-    shortlist.sort((a, b) => b.score - a.score || b.evidence.fanIn - a.evidence.fanIn || a.file.localeCompare(b.file) || a.line - b.line);
     return {
-      hotspots: shortlist.slice(0, limit),
+      hotspots: rankByRisk(shortlist).slice(0, limit),
       historyAvailable,
-      note: `Precise (symbol-level): refined ${refined} of the top ${shortlist.length} candidates with per-symbol git history (churn/fixes now scope:"symbol"). EVIDENCE, not a verdict — read the raw and judge.`,
+      note: `Precise (symbol-level): refined ${refined} of the top ${shortlist.length} candidates with per-symbol git history (churn/fixes now scope:"symbol"). EVIDENCE, not a verdict — the order is the separate risk heuristic's; read the raw and judge.`,
     };
   }
 
   const note = historyAvailable
-    ? 'Ranked by bug-fix recurrence + churn + call-graph spatial locality + static coupling/size. EVIDENCE, not a verdict — read the raw and judge. Process evidence is FILE-level (scope:"file"): every symbol in a file inherits that file\'s churn, so a high score reads as "this FILE is hot", NOT "this exact symbol" — in a monolith one hot file makes all its symbols look scary. Pass precise for per-symbol git blame (costlier).'
+    ? 'EVIDENCE per candidate (bug-fix recurrence + churn + call-graph spatial locality + static coupling/size); the ORDER is a separate, opinionated risk heuristic (risk-rank.ts) you can ignore — read the raw and judge. Process evidence is FILE-level (scope:"file"): every symbol in a file inherits that file\'s churn, so a high rank reads as "this FILE is hot", NOT "this exact symbol" — in a monolith one hot file makes all its symbols look scary. Pass precise for per-symbol git blame (costlier).'
     : 'No git history at this root — STATIC evidence only (fan-in, size). Weaker per the literature; a coarse screen, not a verdict.';
 
-  return { hotspots: out.slice(0, limit), historyAvailable, note };
+  return { hotspots: ranked.slice(0, limit), historyAvailable, note };
 }

@@ -25,17 +25,39 @@ export function read(index: MapIndex, ref: string, opts: { snippet?: string } = 
 }
 
 /**
- * Resolve a snippet to its char range(s) within a symbol. Searches the symbol's
- * own bytes when coordinates are trustworthy, else the whole file (best-effort).
- * `ambiguous` when the snippet occurs more than once — a second "classroom" in
- * the building; the tool flags it and judges nothing.
+ * Resolve a snippet to its char range(s) WITHIN the symbol's own bytes — never the
+ * whole file. If the file changed, re-anchor on the signature line and confine the
+ * search to the relocated range; if the symbol can't be re-confined, return
+ * `unanchored` (a whole-file search could match an identical snippet in a *different*
+ * symbol and falsely report `hit`). `ambiguous` when the snippet occurs >1× inside.
  */
 function computeAim(index: MapIndex, entry: MapEntry, snippet: string): ReadResult['aim'] {
   const text = tryReadFile(join(index.meta.root, entry.file));
-  if (text == null) return { status: 'not-in-symbol', matches: [] };
-  const bounded = token(text) === index.fileTokens[entry.file] && entry.charStart != null && entry.charEnd != null;
-  const lo = bounded ? entry.charStart! : 0;
-  const hi = bounded ? entry.charEnd! : text.length;
+  if (text == null) return { status: 'unanchored', matches: [] };
+
+  // Establish the symbol's byte range [lo, hi) — and refuse to guess past it.
+  let lo: number;
+  let hi: number;
+  const fresh = token(text) === index.fileTokens[entry.file];
+  if (fresh && entry.charStart != null && entry.charEnd != null) {
+    lo = entry.charStart;
+    hi = entry.charEnd;
+  } else if (entry.charStart != null && entry.charEnd != null) {
+    // File changed: re-anchor on the signature line; confine to the relocated span.
+    const hits = indexOfAll(text, entry.searchText);
+    if (hits.length !== 1) return { status: 'unanchored', matches: [] };
+    lo = hits[0];
+    hi = hits[0] + (entry.charEnd - entry.charStart);
+  } else {
+    // Line-only symbol (no char range): bound by the next indexed sibling.
+    const next = index.entries
+      .filter((e) => e.file === entry.file && e.line > entry.line)
+      .map((e) => e.line)
+      .sort((a, b) => a - b)[0];
+    lo = offsetOfLine(text, entry.line);
+    hi = next ? offsetOfLine(text, next) : Math.min(text.length, offsetOfLine(text, entry.line + LINE_ONLY_WINDOW));
+  }
+
   const local = indexOfAll(text.slice(lo, hi), snippet);
   if (!local.length) return { status: 'not-in-symbol', matches: [] };
   const matches = local.map((o) => ({ line: lineAt(text, lo + o), charStart: lo + o, charEnd: lo + o + snippet.length }));

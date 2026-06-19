@@ -153,7 +153,9 @@ export interface ReadResult {
    * in the symbol (another "classroom" in the same building — hold fire).
    */
   aim?: {
-    status: 'hit' | 'ambiguous' | 'not-in-symbol';
+    /** `unanchored`: the file changed and the symbol's range couldn't be re-confined,
+     * so the snippet was NOT searched (a whole-file match could land in another symbol). */
+    status: 'hit' | 'ambiguous' | 'not-in-symbol' | 'unanchored';
     matches: { line: number; charStart: number; charEnd: number }[];
   };
 }

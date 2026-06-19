@@ -464,3 +464,17 @@ test('grep parses matches on CRLF files', async () => {
   assert.ok(matches.length >= 1);
   assert.equal(matches[0].file, 'src/m.ts');
 });
+
+test('snippet aim never escapes the symbol: a stale file does not match another symbol', async () => {
+  const root = repo({
+    'm.ts': 'export function foo() {\n  return 1\n}\n\nexport function bar() {\n  const SECRET = 2\n  return SECRET\n}\n',
+  });
+  const { index } = await buildIndex({ root });
+  const foo = index.entries.find((e) => e.name === 'foo')!;
+  // Change the file so the token goes stale, but leave foo's signature line intact.
+  writeFileSync(join(root, 'm.ts'), 'export function foo() {\n  return 1\n}\n\nexport function bar() {\n  const SECRET = 2 // touched\n  return SECRET\n}\n// trailing change\n');
+  // `SECRET` lives only in bar. Aiming it while reading foo must NOT report `hit`.
+  const r = read(index, foo.id, { snippet: 'SECRET' });
+  assert.notEqual(r.aim?.status, 'hit', 'a snippet from another symbol must not be an in-symbol hit');
+  assert.ok(r.aim && (r.aim.status === 'not-in-symbol' || r.aim.status === 'unanchored'), `expected not-in-symbol/unanchored, got ${r.aim?.status}`);
+});

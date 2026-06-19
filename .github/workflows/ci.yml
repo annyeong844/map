@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24' # needs >=23.6 for native TS type-stripping (no build step)
+      - run: npm install
+      - run: npm run typecheck # tsc --noEmit, strict
+      - run: npm test # node --test; ubuntu-latest ships python3, so the Python backend test runs
+      - run: npm run lint # oxlint (correctness)
+      - run: cd code-oracle && npm run typecheck # sibling oracle: strict (no tsgo needed for typecheck)

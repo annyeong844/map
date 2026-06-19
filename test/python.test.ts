@@ -72,7 +72,7 @@ test('Python is a first-class backend: symbols, exact reads, fan-in, call graph 
   assert.match(r.raw ?? '', /def shared_util/);
 
   // Native fan-in: app.py imports shared_util → cross-module reference counted.
-  assert.ok(shared.fanIn >= 1, `fan-in counted (got ${shared.fanIn})`);
+  assert.ok((shared.fanIn ?? 0) >= 1, `fan-in counted (got ${shared.fanIn})`);
 
   // Call graph (shared pipeline): from-import call run()→shared_util resolves...
   const callers = graph(index, shared.id, { direction: 'callers' });

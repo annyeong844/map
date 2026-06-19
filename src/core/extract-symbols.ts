@@ -139,20 +139,28 @@ export function extractSymbols(file: string, text: string): FileParse {
   // as a re-export (an edge to the real definition) rather than a local symbol.
   const locals = new Map<string, any>();
   const importedFrom = new Map<string, { source: string; name: string }>();
+  // oxc types specifier names as Identifier | StringLiteral and declaration ids as a
+  // broad node union; read the identifier name via a real runtime narrowing so this
+  // stays type-honest under strict (not an `any` escape).
+  const idName = (n: unknown): string | undefined =>
+    n && typeof n === 'object' && 'name' in n && typeof (n as { name?: unknown }).name === 'string' ? (n as { name: string }).name : undefined;
   for (const node of body) {
     if (node.type === 'ImportDeclaration') {
       for (const spec of node.specifiers ?? []) {
-        const ln = spec.local?.name;
+        const ln = idName(spec.local);
         if (!ln || importedFrom.has(ln)) continue;
-        if (spec.type === 'ImportSpecifier' && spec.imported?.name) importedFrom.set(ln, { source: node.source.value, name: spec.imported.name });
-        else if (spec.type === 'ImportDefaultSpecifier') importedFrom.set(ln, { source: node.source.value, name: 'default' });
+        if (spec.type === 'ImportSpecifier') {
+          const im = idName(spec.imported);
+          if (im) importedFrom.set(ln, { source: node.source.value, name: im });
+        } else if (spec.type === 'ImportDefaultSpecifier') importedFrom.set(ln, { source: node.source.value, name: 'default' });
         else if (spec.type === 'ImportNamespaceSpecifier') importedFrom.set(ln, { source: node.source.value, name: '*' });
       }
       continue;
     }
     const decl = node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration' ? node.declaration : node;
     if (decl && isDeclNode(decl.type)) {
-      if (decl.id?.name && !locals.has(decl.id.name)) locals.set(decl.id.name, decl);
+      const did = idName((decl as { id?: unknown }).id);
+      if (did && !locals.has(did)) locals.set(did, decl);
       if (decl.type === 'VariableDeclaration') {
         for (const d of decl.declarations ?? []) if (d.id?.type === 'Identifier' && !locals.has(d.id.name)) locals.set(d.id.name, d);
       }
@@ -165,8 +173,10 @@ export function extractSymbols(file: string, text: string): FileParse {
   for (const node of body) {
     if (node.type === 'ImportDeclaration') {
       for (const spec of node.specifiers ?? []) {
-        if (spec.type === 'ImportSpecifier' && spec.imported?.name) imports.push({ source: node.source.value, name: spec.imported.name });
-        else if (spec.type === 'ImportDefaultSpecifier') imports.push({ source: node.source.value, name: 'default' });
+        if (spec.type === 'ImportSpecifier') {
+          const im = idName(spec.imported);
+          if (im) imports.push({ source: node.source.value, name: im });
+        } else if (spec.type === 'ImportDefaultSpecifier') imports.push({ source: node.source.value, name: 'default' });
         // ImportNamespaceSpecifier: no per-symbol attribution — skipped.
       }
       continue;
@@ -180,14 +190,18 @@ export function extractSymbols(file: string, text: string): FileParse {
       if (node.source) {
         // Re-export `export { x } from './y'`: an edge to y::x, not a local def.
         for (const spec of node.specifiers ?? []) {
-          if (spec.type === 'ExportSpecifier' && spec.local?.name) imports.push({ source: node.source.value, name: spec.local.name, reexport: true });
+          if (spec.type !== 'ExportSpecifier') continue;
+          const ln = idName(spec.local);
+          if (ln) imports.push({ source: node.source.value, name: ln, reexport: true });
         }
         continue;
       }
       if (node.declaration) pushDecl(node.declaration, true, symbols);
       for (const spec of node.specifiers ?? []) {
-        if (spec.type !== 'ExportSpecifier' || !spec.exported?.name) continue;
-        const local = spec.local?.name ?? spec.exported.name;
+        if (spec.type !== 'ExportSpecifier') continue;
+        const exp = idName(spec.exported);
+        if (!exp) continue;
+        const local = idName(spec.local) ?? exp;
         const reexp = importedFrom.get(local);
         if (reexp) {
           // `import { x } …; export { x }` — re-export of an imported binding. Edge
@@ -196,7 +210,7 @@ export function extractSymbols(file: string, text: string): FileParse {
           continue;
         }
         const target = locals.get(local) ?? spec;
-        symbols.push({ name: spec.exported.name, kind: 'ExportSpecifier', charStart: target.start, charEnd: target.end, exported: true });
+        symbols.push({ name: exp, kind: 'ExportSpecifier', charStart: target.start, charEnd: target.end, exported: true });
       }
       continue;
     }

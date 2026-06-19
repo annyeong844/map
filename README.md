@@ -121,8 +121,11 @@ candidates instead.)
 
 ## Usage
 
-Requires Node ≥ 23.6 (runs TypeScript directly — no build step) and one dependency,
-`oxc-parser` (the parser). `ripgrep` is used when present, with a pure-JS fallback.
+Requires Node ≥ 23.6 (runs TypeScript directly — no build step) and one **runtime**
+dependency, `oxc-parser` (the parser). `ripgrep` is used when present, with a pure-JS
+fallback. Dev-only: `typescript` + `@types/node` for `npm run typecheck` (strict, no
+emit); `npm run lint` runs oxlint via npx (no dependency). Python needs `python3` on
+`PATH` for its backend. CI (`.github/workflows/ci.yml`) runs typecheck + tests + lint.
 
 ### Index
 

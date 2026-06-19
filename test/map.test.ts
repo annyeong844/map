@@ -41,7 +41,7 @@ test('index extracts coordinates + an anchor from real source, no meaning, no ex
   assert.equal(typeof alpha.charStart, 'number');
   assert.equal(typeof alpha.charEnd, 'number');
   assert.match(alpha.searchText, /function alpha/);
-  assert.equal((alpha as Record<string, unknown>).summary, undefined);
+  assert.equal((alpha as unknown as Record<string, unknown>).summary, undefined);
   // The private helper is covered too — the map parsed it itself.
   const helper = index.entries.find((e) => e.name === 'helper')!;
   assert.ok(helper, 'private fn indexed');

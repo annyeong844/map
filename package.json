@@ -11,6 +11,7 @@
     "map": "node src/cli/main.ts",
     "mcp": "node src/mcp/server.ts",
     "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p .",
     "lint": "npx --yes oxlint src test"
   },
   "engines": {
@@ -26,5 +27,9 @@
   "license": "MIT",
   "dependencies": {
     "oxc-parser": "^0.136.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.21",
+    "typescript": "^5.9.3"
   }
 }

@@ -82,3 +82,16 @@ test('Python is a first-class backend: symbols, exact reads, fan-in, call graph 
   const greetCallees = graph(index, greet.id, { direction: 'callees' });
   assert.ok(greetCallees.nodes.some((n) => n.id === shout.id), 'self.shout() resolved to Greeter.shout');
 });
+
+test('Python offsets are UTF-16 — read stays exact past a non-BMP (astral) char', { skip: hasPython ? false : 'python3 not available', timeout: 60_000 }, async () => {
+  // The emoji is 1 code point but 2 UTF-16 units; a code-point offset would slice
+  // the wrong range for `target` and still claim `exact`. The slice must be correct.
+  const root = repo({ 'astral.py': 'EMOJI = "\u{1F600}\u{1F600}"\n\n\ndef target():\n    return 42\n' });
+  const { index } = await buildIndex({ root });
+  const fn = index.entries.find((e) => e.name === 'target')!;
+  assert.ok(fn, 'target indexed');
+  const r = read(index, fn.id);
+  assert.equal(r.status, 'exact');
+  assert.match(r.raw ?? '', /^def target\(\):/, 'slice starts exactly at the def, not shifted by the astral chars');
+  assert.ok((r.raw ?? '').includes('return 42'), 'slice includes the whole body');
+});

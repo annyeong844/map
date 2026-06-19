@@ -82,11 +82,22 @@ def extract(root, only):
         file_tokens[file] = token(src)
         starts = line_starts(src)
         lines = src.split("\n")
+        # Node's read slices by UTF-16 code UNITS, but Python indexes by code POINTS.
+        # A non-BMP char (e.g. an emoji) is 1 code point but 2 UTF-16 units, so a
+        # code-point offset would slice the wrong range past it — returning the wrong
+        # bytes while still claiming `exact`. Map every code-point offset to UTF-16.
+        u16 = [0] * (len(src) + 1)
+        _acc = 0
+        for _i, _ch in enumerate(src):
+            u16[_i] = _acc
+            _acc += 2 if ord(_ch) > 0xFFFF else 1
+        u16[len(src)] = _acc
 
         def off(lineno, col):
             ln = lines[lineno - 1] if 0 <= lineno - 1 < len(lines) else ""
             char_col = len(ln.encode("utf-8")[:col].decode("utf-8", "replace"))
-            return starts[lineno - 1] + char_col
+            cp = starts[lineno - 1] + char_col
+            return u16[cp] if 0 <= cp < len(u16) else _acc
 
         def sig(lineno):
             return (lines[lineno - 1].strip() if 0 <= lineno - 1 < len(lines) else "")[:200]

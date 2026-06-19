@@ -30,7 +30,7 @@ function runPyBackend(root: string, targets: string[]): Promise<PyParse | null> 
 }
 
 /** Index format version. Bump invalidates incremental reuse from older indexes. */
-const INDEX_VERSION = 8;
+const INDEX_VERSION = 9;
 
 async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
@@ -50,15 +50,15 @@ async function readAll(root: string, files: string[], concurrency = 32): Promise
 }
 
 /** Concurrent stat — a read-free change signal, cheaper than reading on a mount. */
-async function statAll(root: string, files: string[], concurrency = 64): Promise<Map<string, { mtimeMs: number; size: number } | null>> {
-  const out = new Map<string, { mtimeMs: number; size: number } | null>();
+async function statAll(root: string, files: string[], concurrency = 64): Promise<Map<string, FileStat | null>> {
+  const out = new Map<string, FileStat | null>();
   let i = 0;
   const worker = async (): Promise<void> => {
     while (i < files.length) {
       const f = files[i++];
       try {
         const s = await stat(join(root, f));
-        out.set(f, { mtimeMs: s.mtimeMs, size: s.size });
+        out.set(f, { mtimeMs: s.mtimeMs, size: s.size, ctimeMs: s.ctimeMs, ino: s.ino });
       } catch {
         out.set(f, null);
       }
@@ -142,7 +142,16 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   for (const file of files) {
     const st = stats.get(file) ?? null;
     const pv = prev?.fileStats[file];
-    const reusable = !!pv && !!st && prev!.fileTokens[file] !== undefined && pv.mtimeMs === st.mtimeMs && pv.size === st.size;
+    const reusable =
+      !!pv &&
+      !!st &&
+      prev!.fileTokens[file] !== undefined &&
+      pv.mtimeMs === st.mtimeMs &&
+      pv.size === st.size &&
+      // ctime/ino guard a same-size edit with a restored mtime; only enforced when the
+      // prior index recorded them (older indexes omit them → fall back to mtime+size).
+      (pv.ctimeMs === undefined || pv.ctimeMs === st.ctimeMs) &&
+      (pv.ino === undefined || pv.ino === st.ino);
     if (reusable) {
       for (const e of prevByFile.get(file) ?? []) entries.push(e);
       fileTokens[file] = prev!.fileTokens[file];
@@ -187,7 +196,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       continue;
     }
     fileTokens[file] = token(src);
-    if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size };
+    if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
     let symbols: SymbolRec[];
     let imports: ImportEdge[];
     let calls: CallSite[];

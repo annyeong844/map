@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -477,4 +477,17 @@ test('snippet aim never escapes the symbol: a stale file does not match another 
   const r = read(index, foo.id, { snippet: 'SECRET' });
   assert.notEqual(r.aim?.status, 'hit', 'a snippet from another symbol must not be an in-symbol hit');
   assert.ok(r.aim && (r.aim.status === 'not-in-symbol' || r.aim.status === 'unanchored'), `expected not-in-symbol/unanchored, got ${r.aim?.status}`);
+});
+
+test('incremental detects a same-size edit with a restored mtime (ctime/ino guard)', async () => {
+  const root = repo({ 'src/m.ts': 'export function alpha(){ return 1 }\n' });
+  const first = await buildIndex({ root });
+  const p = join(root, 'src/m.ts');
+  const before = statSync(p);
+  // alpha -> bravo is the same length; restoring mtime makes (mtime,size) identical.
+  writeFileSync(p, 'export function bravo(){ return 1 }\n');
+  utimesSync(p, before.atime, before.mtime);
+  const second = await buildIndex({ root, previous: first.index });
+  assert.ok(locate(second.index, 'bravo').some((h) => h.file === 'src/m.ts'), 'same-size mtime-restored edit detected');
+  assert.equal(locate(second.index, 'alpha').filter((h) => h.file === 'src/m.ts').length, 0, 'stale alpha entry dropped');
 });

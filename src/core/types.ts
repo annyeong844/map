@@ -108,6 +108,11 @@ export interface MapIndex {
 export interface FileStat {
   mtimeMs: number;
   size: number;
+  /** Inode change time + inode number: catch a same-size edit whose mtime was
+   * restored (e.g. a rename to an equal-length name + `utimes`). `ctimeMs` updates
+   * on any write and can't be set back via utimes; `ino` changes on replace. */
+  ctimeMs?: number;
+  ino?: number;
 }
 
 export interface LocateHit {

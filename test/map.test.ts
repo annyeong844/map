@@ -491,3 +491,15 @@ test('incremental detects a same-size edit with a restored mtime (ctime/ino guar
   assert.ok(locate(second.index, 'bravo').some((h) => h.file === 'src/m.ts'), 'same-size mtime-restored edit detected');
   assert.equal(locate(second.index, 'alpha').filter((h) => h.file === 'src/m.ts').length, 0, 'stale alpha entry dropped');
 });
+
+test('calls inside a nested function roll up to the enclosing top-level symbol', async () => {
+  const { index } = await buildIndex({
+    root: repo({ 'src/m.ts': 'export function leaf() { return 1 }\nexport function outer() {\n  function inner() { return leaf() }\n  return inner()\n}\n' }),
+  });
+  const outer = index.entries.find((e) => e.name === 'outer')!;
+  const leaf = index.entries.find((e) => e.name === 'leaf')!;
+  assert.ok(
+    index.callEdges.some(([f, t]) => f === outer.id && t === leaf.id),
+    "leaf() called inside nested inner() must be attributed to outer (not lost)",
+  );
+});

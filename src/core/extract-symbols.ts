@@ -84,10 +84,15 @@ function walkProgram(program: unknown): { refs: Record<string, number>; calls: C
     }
     let scope = caller;
     let cls = klass;
+    // Only the OUTERMOST symbol level sets the scope; a function nested inside an
+    // already-entered symbol keeps it, so calls in a nested helper roll up to the
+    // enclosing top-level symbol instead of being attributed to (and lost with) the
+    // un-indexed nested name. `<module>` means we haven't entered a symbol yet.
+    const atTop = caller === '<module>';
     if (node.type === 'ClassDeclaration' && node.id?.name) cls = node.id.name;
-    else if (node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
-    else if (node.type === 'MethodDefinition' && node.key?.name) scope = node.key.name;
-    else if (node.type === 'VariableDeclarator' && node.id?.name && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) scope = node.id.name;
+    else if (atTop && node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
+    else if (atTop && node.type === 'MethodDefinition' && node.key?.name) scope = node.key.name;
+    else if (atTop && node.type === 'VariableDeclarator' && node.id?.name && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) scope = node.id.name;
     if (node.type === 'CallExpression' && node.callee) {
       const c = node.callee;
       if (c.type === 'Identifier') calls.push({ caller: scope, callee: c.name, member: false });

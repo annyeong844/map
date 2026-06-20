@@ -2,13 +2,15 @@
 
 **좌표만 정밀하게. 의미는 LLM이 raw를 보고 매번 새로 판정한다.**
 
-A tool that hands back a symbol's **exact source slice** — its own bytes, a function/
-method/class body, *not the whole file* — and stays correct when the file drifts. It
-stores **coordinates, never meaning**: what the code *means* is the consumer's job,
-done fresh from the raw bytes every time.
+A **drift-safe coordinate cache**: hand it a symbol's coordinate and `read` returns
+that symbol's exact slice — re-anchoring on the signature line when the file has
+changed, so a **stale coordinate never silently returns the wrong bytes** (measured: 0
+silent at heavy churn scale; a naive line-cache is ~100 % wrong). It stores
+**coordinates, never meaning** — the consumer judges the raw bytes fresh, every time.
 
 code-map is deliberately small: **one tool, `read`.** Search with your normal `grep`;
-use `read` to pull the slice cheaply.
+reuse a symbol's coordinate across turns and `read` keeps it honest (and lands it in
+fewer agent turns than grep-then-read).
 
 ---
 
@@ -25,10 +27,14 @@ baseline* — is the point.
 | **Search / routing** (`locate`) | **Tie.** On single "where is X" a strong model + ripgrep (100% recall) does as well; locate's name-match is narrower on concept queries. | removed |
 | **Semantic embeddings** | **Worse.** CodeRankEmbed-137M & Qodo-1.5B returned plausible-but-wrong neighbours; *added* to a grep agent it **degraded** results (cannibalized the grep path) and the 1.5B model is CPU-infeasible. Rejected three independent ways. | not built |
 | **Call graph / blast-radius** (`graph`) | **Lost on recall.** grep never misses a caller (the name is in every using file); the structural graph is blind to `obj.method()` dispatch + types. Type-precise callers are the *separate* `code-oracle` (LSP), not a light index. | removed |
-| **Reading** (`read`) | **Win, and it reproduces.** A symbol's slice is ~3% of its file. On read-heavy tasks (summarize N functions across files) `read` cut **16–35% of work-tokens + turns** vs native whole-file reads, **same correctness**, on both models. Mechanistic (a slice *is* smaller), not noise. | **kept** |
+| **Drift resistance** (`read`) | **Strongest, verified.** After heavy churn, no re-index: **0 silently-wrong bytes**, 94.5% correct recovery (re-anchored by signature) vs naive line-caching at **100% silent**. Reproduced. | **kept** |
+| **Read — turns** (`read`) | **Win (K=30, CI clear of 0).** −25–30% agent *turns* at N=6, both models — `read(symbol)` vs grep-then-read. | **kept** |
+| **Read — tokens** (`read`) | **Retracted.** The K=5 "−16–35% tokens" was noise; at K=30 it's ~0 (Opus −11%, worse). Token claim withdrawn. | corrected |
 
-So code-map kept exactly one thing: **a token-efficient, drift-resistant reader.**
-The honest division of labour is *grep finds, `read` reads cheaply.*
+So code-map is, honestly: **a drift-safe coordinate cache** (0 silent / 94.5% recovery
+after churn) that also cuts ~25–30% of agent *turns*. The division of labour is *grep
+finds, `read` re-anchors + reads*. It does **not** save tokens at scale — that headline
+didn't survive K=30. Full numbers + retractions: [code-map-bench](https://github.com/annyeong844/code-map-bench).
 
 > **Full reproducible measurements + every negative result:**
 > [**code-map-bench**](https://github.com/annyeong844/code-map-bench) — the harnesses,

@@ -1,205 +1,145 @@
 # code-map
 
-**지도는 정밀하게 만들지 않는다. 착탄 지점만 정밀하게 만들고, 의미는 LLM이 raw를 보고 매번 새로 판정한다.**
+**좌표만 정밀하게. 의미는 LLM이 raw를 보고 매번 새로 판정한다.**
 
-A code map that stores **coordinates, never meaning**. It guides you to the exact
-spot — a path, a line, a char range — and then hands back the raw source. What the
-code *means* is never the map's claim; that interpretation is the consumer's job,
-done fresh from the evidence every time.
+A tool that hands back a symbol's **exact source slice** — its own bytes, a function/
+method/class body, *not the whole file* — and stays correct when the file drifts. It
+stores **coordinates, never meaning**: what the code *means* is the consumer's job,
+done fresh from the raw bytes every time.
+
+code-map is deliberately small: **one tool, `read`.** Search with your normal `grep`;
+use `read` to pull the slice cheaply.
 
 ---
 
-## Why this shape
+## What this is — and what the measurements say it isn't
 
-A map that tries to store *meaning* (intent prose, summaries, "what this function
-does") has to defend that meaning against being wrong — so it grows producers,
-adversarial verifiers, completeness gates, drift flags, regeneration pipelines.
-Most of that machinery exists to guard one problem: *the stored interpretation
-might be false.*
+This started broad (locate, grep, graph, hotspots, semantic search) and was then
+**benchmarked honestly against `grep` + a strong agent** (Sonnet/Opus, headless, on
+real repos — `cline`, `django`, `requests` from SWE-bench). The measurements ate most
+of it, and the surface was cut to match. The rigor — *keeping only what beat the
+baseline* — is the point.
 
-Decide not to store interpretation at all, and the machinery disappears. What is
-left is only what a machine can verify:
+| Capability | Measured vs `grep` + strong agent | Verdict |
+|---|---|---|
+| **Search / routing** (`locate`) | **Tie.** On single "where is X" a strong model + ripgrep (100% recall) does as well; locate's name-match is narrower on concept queries. | removed |
+| **Semantic embeddings** | **Worse.** CodeRankEmbed-137M & Qodo-1.5B returned plausible-but-wrong neighbours; *added* to a grep agent it **degraded** results (cannibalized the grep path) and the 1.5B model is CPU-infeasible. Rejected three independent ways. | not built |
+| **Call graph / blast-radius** (`graph`) | **Lost on recall.** grep never misses a caller (the name is in every using file); the structural graph is blind to `obj.method()` dispatch + types. Type-precise callers are the *separate* `code-oracle` (LSP), not a light index. | removed |
+| **Reading** (`read`) | **Win, and it reproduces.** A symbol's slice is ~3% of its file. On read-heavy tasks (summarize N functions across files) `read` cut **16–35% of work-tokens + turns** vs native whole-file reads, **same correctness**, on both models. Mechanistic (a slice *is* smaller), not noise. | **kept** |
 
-- a **coordinate index** (`path` / `line` / `charStart`–`charEnd`)
-- one **token per file** to tell whether those coordinates still hold
-- a **search primitive** (`grep` + read-raw)
+So code-map kept exactly one thing: **a token-efficient, drift-resistant reader.**
+The honest division of labour is *grep finds, `read` reads cheaply.*
 
-The only question left — *"is this coordinate correct?"* — has an answer. The
-unanswerable question — *"is this description right?"* — is never asked. That is
-why retrieval collapses to roughly `grep + grep + read_file`.
+---
 
-### The honest trade-offs
+## Why coordinates, never meaning
 
-1. **Simplicity isn't free — it moves.** Build-time interpretation (write + verify
-   docs) becomes query-time interpretation (the LLM reads raw each time). Good when
-   code changes often; a stored cache wins when it's stable and widely read.
-2. **Everything rests on routing precision.** If the coordinate narrows to *this
-   function, this line*, the LLM reads a small slice and judges. If it's vague
-   ("somewhere in this file"), the LLM burns context reading the whole file and the
-   map added nothing. So all the effort goes where it's verifiable — the coordinate
-   — and none goes where it isn't — the meaning.
-3. **No embeddings — routing is purely lexical + structural.** `locate` matches
-   tokens and structure, not concepts. *"Where is auth handled?"* only routes if an
-   `auth` / `authenticate` token actually appears in the code; a query whose words
-   aren't in the source won't find it. Usually fine — an LLM consumer can phrase good
-   lexical queries — but it is the **ceiling** of this approach, and a deliberate
-   non-goal (concept search is what embeddings are for; this stays unmeasured).
-4. **fan-in is honest about its scope.** It counts named/default references through
-   *resolved* import edges; namespace imports (`import * as x`), `export *`, and
-   re-aliased specifiers are **not** attributed. On barrel-heavy codebases the
-   cross-module count — and so the ranking tiebreak — is therefore blunter.
+A map that stores *meaning* (summaries, "what this does") must defend that meaning
+against being wrong — producers, verifiers, completeness gates, regeneration. Store no
+interpretation and that machinery disappears; what's left is only what a machine can
+verify: a **coordinate index** (`path` / `line` / `charStart`–`charEnd`) and **one
+token per file** that says whether those coordinates still hold. The only question —
+*"is this coordinate correct?"* — has an answer. *"Is this description right?"* is
+never asked.
+
+### Honest trade-offs
+
+1. **Interpretation moves to query time.** The LLM reads raw each call instead of
+   trusting stored prose. Good when code changes often; a cache wins when it's stable.
+2. **`read` is the value, not search.** Measured: search ties `grep`. So code-map
+   doesn't try to beat `grep` at finding — it makes the *read* small and drift-proof.
+   The win scales with read-heaviness (more symbols to inspect → bigger saving); on a
+   single lookup it's a wash, and that's fine.
+3. **No embeddings — deliberate, and now *measured* as a non-goal.** Concept search
+   ("where is auth handled" with no `auth` token) is what embeddings are for; tested,
+   they didn't beat lexical retrieval and hurt a strong agent. Use `grep` + the model's
+   own reasoning.
+4. **fan-in is honest about scope.** It ranks `read`'s name→symbol resolution by
+   cross-file references through *resolved* import edges; namespace imports, `export *`,
+   and alias specifiers aren't attributed (blunter ties on barrel-heavy trees).
 
 ---
 
 ## Where the coordinates come from
 
-The map parses the source tree itself — no external symbol graph, no precomputed
-artifact. It only ever **reads** the source.
+The map parses the source tree itself — no external symbol graph. It only ever
+**reads** the source.
 
-1. **File enumeration.** In a git repo it asks git for tracked + untracked-not-ignored
-   files (`git ls-files --cached --others --exclude-standard`), so `.gitignore` is
-   respected for free and generated/vendored trees stay out. Outside git it walks and
-   skips the usual generated directories.
+1. **File enumeration.** In a git repo: `git ls-files --cached --others
+   --exclude-standard` (so `.gitignore` is respected, vendored trees stay out). Outside
+   git it walks and skips the usual generated dirs.
+2. **Parsing.** Each TS/JS file → `oxc-parser`; every top-level declaration (exported
+   **or** module-private) and class method is recorded with its exact **UTF-16
+   char-offset range** — exactly what `read` slices by. **Python** (`.py`/`.pyi`) →
+   a stdlib-`ast` backend (`src/py/extract.py`), auto-detected, emitting the same
+   per-file primitives so build-index runs it through the identical pipeline (`python3`
+   on `PATH`, override `CODE_MAP_PYTHON`; absent → Python skipped).
 
-2. **Parsing.** Each TS/JS file is parsed with `oxc-parser`. Every top-level
-   declaration — exported **or** module-private — and every class method is recorded
-   with its exact **char-offset range** (e.g. `lib/alias-map.mjs#FunctionDeclaration:...`).
-   `locate` routes to an internal helper just as well as to the public API.
-
-   **Python** (`.py` / `.pyi`) is parsed by a stdlib-`ast` backend (`src/py/extract.py`),
-   auto-detected by extension. It emits the *same* per-file primitives the oxc path
-   does, so build-index runs Python through the identical pipeline — stable ids,
-   exact reads (char offsets + content token match), native fan-in, and the Level-1
-   call graph (direct + from-import + `self.m()`). The only requirement is `python3`
-   on `PATH` (override with `CODE_MAP_PYTHON`); absent, Python files are skipped. The
-   optional type oracle on top is `ty` (see *code-oracle*), as tsgo is for TS.
-
-> oxc returns **UTF-16 char offsets**, not bytes — exactly what `read` slices by
-> (`fileText.slice(charStart, charEnd)`), so a multibyte-heavy file stays exact.
-
-Per symbol the map keeps only what's mechanically verifiable, plus two derived fields:
-
-- `searchText` — the declaration's first line, the **drift anchor**.
-- a per-file content **token** — the `sourceVersionToken`.
-
-(`fanIn` — a cross-module reference count for ranking ties — is computed natively
-from the import graph; see *Ranking*.)
+Per symbol it keeps only the verifiable: the coordinate, `searchText` (the
+declaration's first line — the **drift anchor**), and a per-file content **token**.
+`fanIn` (cross-module reference count) is computed natively from the import graph and
+used only to break ties when a bare name resolves to more than one symbol.
 
 ---
 
 ## How `read` survives drift
 
+`read(symbol)` resolves the name to one symbol (via the index), then:
+
 ```
 1. file token matches index   →  exact char-offset slice          [exact]
 2. file changed               →  re-anchor on searchText, re-slice [relocated]
 3. anchor matches many sites  →  return the candidate locations    [ambiguous]
-4. anchor is gone             →  grep the name, return matches      [grep-fallback]
+4. anchor is gone             →  say so; re-index to refresh        [anchor-lost]
 ```
 
-Line numbers drift; a signature line rarely does. When offsets go stale, the anchor
-re-finds the symbol and the result is flagged so the consumer verifies the boundary.
-Nothing is silently trusted.
-
-## How `locate` ranks
-
-Matching is tiered — exact > case-insensitive exact > prefix > substring > fuzzy —
-and **a better tier always wins** (an exact match outranks a fuzzy one regardless of
-anything else). Ties *within* a tier break by **fan-in**, then closest-length name,
-then path order.
-
-Fan-in is computed natively: the map enumerates every named/default import and
-re-export edge, resolves the **relative** ones against the indexed file set (no
-filesystem access — path math + membership), and counts the distinct importing files
-per `target::name`. So the symbol the codebase actually depends on floats up — a
-canonical definition over a vendored copy. (Honest scope: namespace imports,
-`export *`, and package/tsconfig-alias specifiers aren't attributed — resolving those
-fully is a module resolver's job, out of scope. Fan-in only sharpens *ranking*; `read`
-still refuses to guess between two genuinely distinct files, returning the ranked
-candidates instead.)
+Line numbers drift; a signature line rarely does. When offsets go stale the anchor
+re-finds the symbol and the result is **flagged** so the consumer verifies the
+boundary — nothing is silently trusted. (This is `read`'s edge over a blind
+`Read(file, lineRange)`: a stale line range returns the wrong bytes; `read` re-anchors
+or tells you it can't.) Pass `snippet` (text quoted from inside the symbol) to get its
+exact char range *within* the symbol, never escaping into another symbol.
 
 ---
 
 ## Usage
 
 Requires Node ≥ 23.6 (runs TypeScript directly — no build step) and one **runtime**
-dependency, `oxc-parser` (the parser). `ripgrep` is used when present, with a pure-JS
-fallback. Dev-only: `typescript` + `@types/node` for `npm run typecheck` (strict, no
-emit); `npm run lint` runs oxlint via npx (no dependency). Python needs `python3` on
-`PATH` for its backend. CI (`.github/workflows/ci.yml`) runs typecheck + tests + lint.
-
-### Index
+dependency, `oxc-parser`. `ripgrep` is used by the indexer's file walk when present.
+Dev-only: `typescript` + `@types/node` for `npm run typecheck`; `npm run lint` runs
+oxlint via npx. Python needs `python3` on `PATH`.
 
 ```bash
-# Writes ./.map-index.json; --root defaults to the current directory.
-node src/cli/main.ts index --root .
-node src/cli/main.ts index --root ../target-repo --out ../target-repo/.map-index.json
-node src/cli/main.ts index --root ../target-repo --force   # ignore prior index, rebuild all
-```
+# Index (writes ./.map-index.json; --root defaults to cwd). Incremental: reuses files
+# whose bytes are unchanged (stat mtime+size+ctime/ino), re-parses only what changed.
+node src/cli/main.ts index --root ../target-repo
 
-**Incremental.** A rebuild reuses every file whose bytes are unchanged (filesystem
-`mtime`+`size`, a read-free check), re-reading and re-parsing only what actually
-changed; a true no-op leaves the index untouched. Detection (`stat`) is cheaper than
-the work it skips. On a ~700-file repo over a Windows mount: full build ~5s, no-op
-incremental ~2s (the floor is fixed cost — statting every file, writing the index —
-and is far cheaper on a native filesystem).
+# Read — the one tool. Takes a symbol id or a bare/path-scoped name (resolved internally).
+node src/cli/main.ts read "alias-map.ts#buildAliasMap"
+node src/cli/main.ts read buildAliasMap                 # bare name (errors if ambiguous)
+node src/cli/main.ts read withRetry --snippet "req.copy()"   # sub-symbol char range
 
-### Locate → Read → Grep
-
-```bash
-node src/cli/main.ts locate buildAliasMap --limit 3
-node src/cli/main.ts locate handler --kind method --file routes
-node src/cli/main.ts locate compute the diff                   # multi-word concept (no quotes needed)
-
-node src/cli/main.ts read "_lib/alias-map.mjs#buildAliasMap"   # id from locate
-node src/cli/main.ts read buildAliasMap                        # bare name (errors if ambiguous)
-
-node src/cli/main.ts grep "buildAliasMap(" --fixed --file alias-map
-node src/cli/main.ts grep "export (async )?function \w+" --limit 20
-
-node src/cli/main.ts graph buildAliasMap                # who calls it (+ floor); default callers
-node src/cli/main.ts graph computeDiff --callees        # what it calls
-node src/cli/main.ts graph parseProject --depth 3       # transitive blast radius
-
-node src/cli/main.ts dead --file src/    # exported + no cross-file importer (dead-code vs dead-export)
 node src/cli/main.ts stats
 ```
 
-Add `--json` to any command for machine-readable output. Queries accept a bare name
-(`buildIndex`), a path-scoped name (`alias-map#buildAliasMap`), or a path fragment
-(`alias-map#`).
+Add `--json` for machine output. **Search with your own `grep`/ripgrep** — that's not
+code-map's job (it ties); feed the `file:line` or symbol name you find to `read`.
 
 ### As an MCP server
 
-A model consumes the same primitives over stdio (newline-delimited JSON-RPC).
-Install once so it's on `PATH` (no absolute paths in any config):
-
 ```bash
-npm link            # exposes the `map` and `map-mcp` bins
-```
-
-Then register it — globally (every project) or per-project:
-
-```bash
+npm link                                          # exposes `map` + `map-mcp` on PATH
 claude mcp add code-map --scope user -- map-mcp
 ```
 
 ```jsonc
-// or by hand — no paths, no env
 { "mcpServers": { "code-map": { "command": "map-mcp" } } }
 ```
 
-Exposes five tools — `locate`, `read`, `grep`, `graph` (call-graph navigation:
-`direction` callers/callees, `depth` for transitive; the `callers` result carries a
-`floor` — a lower bound, since `obj.method()` dispatch isn't in the graph, so it's
-never "clear"), and `hotspots` (bug-risk impact points with their evidence — bug-fix
-recurrence + churn + spatial locality + coupling/size; evidence, not a verdict). The
-server **auto-detects** the index: it walks up
-from the working directory for `.map-index.json`, so one global server serves whatever
-project it's launched in — just run `map index` in that project. It **auto-reloads**
-when the index changes (stats it before each tool call), so a rebuild (or the first
-build in a fresh project) takes effect with no client reconnect; a project with no
-index yet stays connected and the tools say so. The server routes and quotes; it
-never summarizes.
+Exposes **one tool — `read`** (raw drift-resistant slice; optional `snippet` for a
+sub-symbol range). The server **auto-detects** the index (walks up for
+`.map-index.json`) and **auto-reloads** when it changes (no client reconnect). It
+routes and quotes; it never summarizes.
 
 ---
 
@@ -207,60 +147,43 @@ never summarizes.
 
 ```
 src/
-  core/            # retrieval library (only dep: oxc-parser)
+  core/            # retrieval library (only runtime dep: oxc-parser)
     types.ts          # MapEntry / MapIndex — coordinates only, no meaning fields
     files.ts          # enumerate source files (git ls-files, else walk)
-    extract-symbols.ts# oxc parse → top-level defs (exported/private) + methods + import edges
-    fan-in.ts         # resolve relative imports → cross-file reference counts
-    build-index.ts    # walk + parse + coordinates + fan-in → index (TS via oxc, Python via the
-                      #   ast backend; incremental, drift-aware)
-    locate.ts         # tiered ranked routing  ← the one thing that must be precise
-    read.ts           # exact slice + token check + searchText re-anchoring
-    grep.ts           # ripgrep wrapper, JS fallback
+    extract-symbols.ts# oxc parse → top-level defs + methods + import edges
+    fan-in.ts         # resolve relative imports → cross-file ref counts (ranking ties)
+    build-index.ts    # walk + parse + coordinates + fan-in → index (TS via oxc, Python
+                      #   via the ast backend; incremental, drift-aware)
+    locate.ts         # internal name→symbol resolution for read (tiered, fan-in tie-break)
+    read.ts           # exact slice + token check + searchText re-anchoring  ← the value
     store.ts          # load/save .map-index.json
-  py/extract.py    # Python backend: stdlib `ast` → the same per-file primitives oxc emits
-  cli/main.ts      # CLI adapter
-  mcp/server.ts    # MCP stdio adapter (auto-reloads on index change)
-test/map.test.ts   # extract, exact-slice, methods, relocation, grep-fallback, incremental, CRLF
-test/python.test.ts# Python: symbols, exact read, fan-in, from-import + self.m() edges
+  py/extract.py    # Python backend: stdlib `ast` → the same per-file primitives
+  cli/main.ts      # CLI: index / read / stats
+  mcp/server.ts    # MCP stdio adapter — the single `read` tool, auto-reload
+test/              # extract, exact-slice, methods, relocation, anchor-lost, incremental,
+                   #   fan-in, snippet-aim, path-traversal refusal, Python
 ```
 
 ```bash
 node --test "test/*.test.ts"
 ```
 
+> **What was removed (and why):** `locate`/`grep`/`graph`/`hotspots`/`dead` as exposed
+> tools, and the call-graph / git-history / dead-export / embedding code behind them —
+> all measured to tie or lose to `grep` + a strong agent, so they earned no place on
+> the surface. `locate`'s ranking logic survives *inside* `read` (name → symbol). The
+> benchmark harness + negative results live under `Downloads/codemap-bench/`.
+
 ### `code-oracle/` — the optional type oracle (a sibling, not the core)
 
-The core resolves the call graph *structurally* — direct calls and `this`/`super`,
-instant and light. It deliberately does **not** resolve `obj.method()` dispatch,
-which needs types; `graph`'s `floor` says so honestly (a lower bound, name-matched
-& unverified) and now points here to verify. `code-oracle/` is a **separate MCP**
-that answers *who calls this / what implements this / where is this defined* at
-type-checker grade over a warm LSP session:
-
-- **`callers` · `definition` · `implementations`.** `implementations` is type-aware
-  Class Hierarchy Analysis (interface → every concrete impl) — the over-approximate
-  set that is sound for blast radius, including DI-injected impls a structural graph
-  can't draw. Fan-out can be wide (N impls = N sites); that breadth is the nature of
-  dispatch, biased safely toward over-inclusion.
-- **Multi-language:** tsgo (TypeScript-Go) for TS/JS, `ty` for Python — picked by
-  file extension; both speak LSP, so the warm session, persistent answer-cache, and
-  readiness logic are shared.
-- **Eager warm-up.** At startup the server pre-warms the working project (cwd, or
-  `CODE_ORACLE_ROOT`) in the background and logs `warming… ready in Ns` — so the cold
-  ~10-20s load overlaps the agent's other startup work and the first blast-radius
-  query is already warm, instead of stalling. Non-blocking (the tool surface answers
-  immediately); set `CODE_ORACLE_PREWARM=0` to disable. Cache hits never need it.
-- **Why it's separate.** It has the *opposite* profile to the core: a heavy, pinned
-  preview dependency, seconds of project warmup, a stateful LSP session. Isolating it
-  keeps the core's "one dependency, no machinery" promise intact, and lets the backend
-  be swapped later (LSP today → a stable typed API) without touching the core. The
-  seam is the call-graph `floor` (lower bound) → oracle (checker-confirmed set).
-- **Honest bounds.** tsgo is solid; `ty` (early preview) currently resolves
-  `definition` cross-file but `references`/`implementations` intra-file only, so
-  Python `callers` carry `incomplete: true`. Truly dynamic dispatch (token-only DI,
-  `Proxy`, `obj[k]()`) is invisible to any checker — a residual for the reader.
-
-`code-oracle/` has its own `package.json` (its preview dep is pinned exact) and
-tests (`cd code-oracle && npm test` — the interface-dispatch fixture asserts
-`implementations` returns every concrete impl).
+`grep` and the (now-internal) structural pass cannot resolve `obj.method()` dispatch —
+that needs types. `code-oracle/` is a **separate MCP** that answers *who calls this /
+what implements this / where is this defined* at **type-checker grade** over a warm LSP
+session (tsgo for TS/JS, `ty` for Python; picked by extension). It's the type-precise
+answer to blast-radius that a light index can't give — and it's kept separate on
+purpose: a heavy pinned preview dependency, seconds of warmup, a stateful session, the
+*opposite* profile to code-map's "one dependency, no machinery". Honest bounds: tsgo is
+solid; `ty` (early preview) resolves `definition` cross-file but `references` intra-file
+(Python `callers` carry `incomplete: true`); truly dynamic dispatch (token-only DI,
+`Proxy`, `obj[k]()`) is invisible to any checker. Its own `package.json` + tests
+(`cd code-oracle && npm test`).

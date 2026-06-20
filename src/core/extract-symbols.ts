@@ -37,23 +37,9 @@ export interface ImportEdge {
   reexport?: boolean;
 }
 
-/** A call site: the enclosing top-level symbol (`caller`) calls `callee`.
- * `member` marks a `x.m()` call; `recv` says what `x` is — `this`/`super` (the
- * enclosing class, deterministically resolvable) vs `other` (`obj.m()`, needs
- * types). `callerClass` is the class enclosing the call, so `this.m()` resolves
- * to the right class's method. */
-export interface CallSite {
-  caller: string;
-  callee: string;
-  member: boolean;
-  recv?: 'this' | 'super' | 'other';
-  callerClass?: string;
-}
-
 export interface FileParse {
   symbols: SymbolRec[];
   imports: ImportEdge[];
-  calls: CallSite[];
   /** Identifier-name → occurrence count across the whole file AST (incl. the
    * declaration itself). Lets dead-code classification ask "is this symbol used
    * anywhere in its own file?" — AST-based, so comments/strings never inflate it.
@@ -63,54 +49,30 @@ export interface FileParse {
 }
 
 /**
- * ONE deep traversal of the AST that does both jobs — was two separate full walks
- * (identifier tally + call collection), now merged so each node is visited once:
- *   • `refs`: every Identifier name's occurrence count (for dead-code intraRefs).
- *   • `calls`: call sites attributed to the enclosing top-level symbol (function,
- *     class method, or `const fn = () => …`). Direct `foo()` carries the callee
- *     name; member `obj.m()` is tagged (no type info to pick the method).
- * Iterative, carrying the current caller down the stack (big files won't overflow).
+ * ONE deep traversal of the AST that tallies `refs`: every Identifier name's
+ * occurrence count, the raw material for dead-code intraRefs. Iterative (big files
+ * won't overflow the stack).
  */
-function walkProgram(program: unknown): { refs: Record<string, number>; calls: CallSite[] } {
+function walkProgram(program: unknown): { refs: Record<string, number> } {
   const refs: Record<string, number> = Object.create(null);
-  const calls: CallSite[] = [];
-  const stack: { node: any; caller: string; klass: string }[] = [{ node: program, caller: '<module>', klass: '' }];
+  const stack: any[] = [program];
   while (stack.length) {
-    const { node, caller, klass } = stack.pop()!;
+    const node = stack.pop();
     if (!node || typeof node !== 'object') continue;
     if (Array.isArray(node)) {
-      for (const c of node) stack.push({ node: c, caller, klass });
+      for (const c of node) stack.push(c);
       continue;
     }
     if (node.type === 'Identifier' && typeof node.name === 'string') {
       refs[node.name] = (refs[node.name] ?? 0) + 1;
     }
-    let scope = caller;
-    let cls = klass;
-    // Only the OUTERMOST symbol level sets the scope; a function nested inside an
-    // already-entered symbol keeps it, so calls in a nested helper roll up to the
-    // enclosing top-level symbol instead of being attributed to (and lost with) the
-    // un-indexed nested name. `<module>` means we haven't entered a symbol yet.
-    const atTop = caller === '<module>';
-    if (node.type === 'ClassDeclaration' && node.id?.name) cls = node.id.name;
-    else if (atTop && node.type === 'FunctionDeclaration' && node.id?.name) scope = node.id.name;
-    else if (atTop && node.type === 'MethodDefinition' && node.key?.name) scope = node.key.name;
-    else if (atTop && node.type === 'VariableDeclarator' && node.id?.name && (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) scope = node.id.name;
-    if (node.type === 'CallExpression' && node.callee) {
-      const c = node.callee;
-      if (c.type === 'Identifier') calls.push({ caller: scope, callee: c.name, member: false });
-      else if (c.type === 'MemberExpression' && !c.computed && c.property?.name) {
-        const recv = c.object?.type === 'ThisExpression' ? 'this' : c.object?.type === 'Super' ? 'super' : 'other';
-        calls.push({ caller: scope, callee: c.property.name, member: true, recv, callerClass: cls || undefined });
-      }
-    }
     for (const k in node) {
       if (k === 'type') continue;
       const v = node[k];
-      if (v && typeof v === 'object') stack.push({ node: v, caller: scope, klass: cls });
+      if (v && typeof v === 'object') stack.push(v);
     }
   }
-  return { refs, calls };
+  return { refs };
 }
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -136,10 +98,10 @@ export function extractSymbols(file: string, text: string): FileParse {
   try {
     res = parseSync(file, text);
   } catch {
-    return { symbols: [], imports: [], refs: {}, calls: [] };
+    return { symbols: [], imports: [], refs: {} };
   }
   const body = res?.program?.body;
-  if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {}, calls: [] };
+  if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {} };
 
   // Local top-level declarations by name, so `export { foo as bar }` can point
   // at foo's real coordinates rather than the specifier. Also track imported
@@ -239,8 +201,8 @@ export function extractSymbols(file: string, text: string): FileParse {
     }
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);
   }
-  const { refs, calls } = walkProgram(res.program);
-  return { symbols, imports, refs, calls };
+  const { refs } = walkProgram(res.program);
+  return { symbols, imports, refs };
 }
 
 function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {

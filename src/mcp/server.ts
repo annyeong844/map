@@ -2,10 +2,11 @@
 /**
  * Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0), zero deps.
  *
- * It exposes five tools and nothing else — locate, read, grep, graph, hotspots —
- * so a model consuming this server gets coordinates, raw bytes, call-graph
- * navigation, and bug-risk evidence, and does the interpreting itself. The server
- * never summarizes or judges; it routes, quotes, and hands over evidence.
+ * It exposes ONE tool — `read` — and nothing else: given a symbol id or a bare
+ * name, it returns the RAW source slice (the symbol's own bytes, not the whole
+ * file), drift-resistant (re-anchors when the file moved). Coordinates, never
+ * meaning — the model does the interpreting. Search with your normal grep; this
+ * just pulls the exact slice cheaply.
  *
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
@@ -13,10 +14,6 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { graph } from '../core/call-graph.ts';
-import { grep } from '../core/grep.ts';
-import { hotspots } from '../core/hotspots.ts';
-import { locate } from '../core/locate.ts';
 import { read } from '../core/read.ts';
 import { loadIndex } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
@@ -73,73 +70,16 @@ function ensureFresh(): void {
 
 export const TOOLS = [
   {
-    name: 'locate',
-    description:
-      'Route a query (symbol name, path-scoped name like "alias-map#buildAliasMap", or path fragment) to ranked candidate coordinates. Returns ids, kinds, file:line, and the signature line. This does not interpret code — it only points.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Symbol name, "path#name", or "path#".' },
-        kind: { type: 'string', description: 'Filter by AST kind substring, e.g. "function", "method", "class".' },
-        file: { type: 'string', description: 'Filter by file path substring.' },
-        limit: { type: 'number', description: 'Max hits (default 20).' },
-      },
-      required: ['query'],
-    },
-  },
-  {
     name: 'read',
     description:
-      'Return the RAW source at a routed location — the evidence to interpret yourself. Pass an id from locate, or a bare name. If the file changed since indexing, it re-anchors on the signature line and flags the result; if the anchor is lost, it returns grep matches instead. Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Read the raw and judge it fresh.',
+      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice cheaply.)',
     inputSchema: {
       type: 'object',
       properties: {
-        ref: { type: 'string', description: 'An id from locate, or a symbol name.' },
+        ref: { type: 'string', description: 'A symbol id, or a bare name / "path#name".' },
         snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s).' },
       },
       required: ['ref'],
-    },
-  },
-  {
-    name: 'grep',
-    description: 'Fallback search over the source tree (ripgrep). Use when locate/read cannot route you, or to confirm where something lives.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        pattern: { type: 'string' },
-        fixed: { type: 'boolean', description: 'Treat pattern as a literal string, not a regex.' },
-        file: { type: 'string', description: 'Restrict to files whose path contains this substring.' },
-        caseInsensitive: { type: 'boolean' },
-        limit: { type: 'number', description: 'Max matches (default 100).' },
-      },
-      required: ['pattern'],
-    },
-  },
-  {
-    name: 'graph',
-    description:
-      'Walk the call graph from a symbol. direction="callers" (default) = who depends on it — the blast radius; "callees" = what it calls. depth=1 (default) is direct neighbours, depth>1 is transitive. For callers the result includes a `floor` (LOWER BOUND — `obj.method()` dispatch is not in the graph, never treat a small result as "safe") and `possibleCallers`: the `obj.<name>()` sites that MIGHT reach it via dispatch — name-matched & UNVERIFIED (reliable for distinctive names, noisy for generic ones like run/get), to inspect for "what might my change touch".',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string', description: 'An id from locate, or a symbol name.' },
-        direction: { type: 'string', enum: ['callers', 'callees'], description: 'callers (default) or callees.' },
-        depth: { type: 'number', description: 'Traversal depth; 1 = direct (default), >1 = transitive.' },
-      },
-      required: ['ref'],
-    },
-  },
-  {
-    name: 'hotspots',
-    description:
-      'Bug-risk impact points to investigate, each with the EVIDENCE behind it — bug-fix recurrence + churn (from git history), call-graph spatial locality, fan-in coupling, and size. NOT a verdict: it points "look here, and why"; you read the raw and judge whether a bug is real. Strong (process) signals need git history; without it, falls back to static (fan-in/size) — a coarser screen. Optional file-path filter and limit.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        file: { type: 'string', description: 'Restrict to files whose path contains this substring.' },
-        limit: { type: 'number', description: 'Max hotspots (default 25).' },
-        precise: { type: 'boolean', description: 'Refine the top shortlist to SYMBOL-level churn/fixes (per-symbol git blame). More precise but slow — opt in when narrowing on a real candidate.' },
-      },
     },
   },
 ];
@@ -156,23 +96,8 @@ function callTool(name: string, args: Record<string, any>): string {
  * exercised in tests without a live stdio process. */
 export function dispatch(index: MapIndex, name: string, args: Record<string, any>): string {
   switch (name) {
-    case 'locate':
-      return JSON.stringify(locate(index, String(args.query), { kind: args.kind, file: args.file, limit: args.limit }), null, 2);
     case 'read':
       return JSON.stringify(read(index, String(args.ref), { snippet: args.snippet ? String(args.snippet) : undefined }), null, 2);
-    case 'grep':
-      return JSON.stringify(
-        grep(index.meta.root, String(args.pattern), { fixed: !!args.fixed, file: args.file, caseInsensitive: !!args.caseInsensitive, limit: args.limit }),
-        null,
-        2,
-      );
-    case 'graph': {
-      const direction = args.direction === 'callees' ? 'callees' : 'callers';
-      const g = graph(index, String(args.ref), { direction, depth: args.depth });
-      return JSON.stringify(g.symbol ? g : { error: `no symbol matches "${args.ref}"` }, null, 2);
-    }
-    case 'hotspots':
-      return JSON.stringify(hotspots(index, { limit: args.limit, nowMs: Date.now(), file: args.file ? String(args.file) : undefined, precise: !!args.precise }), null, 2);
     default:
       throw new Error(`unknown tool: ${name}`);
   }

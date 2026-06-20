@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
-import { graph } from '../src/core/call-graph.ts';
 import { read } from '../src/core/read.ts';
 
 function repo(files: Record<string, string>): string {
@@ -50,7 +49,7 @@ def run():
     return shared_util(41)
 `;
 
-test('Python is a first-class backend: symbols, exact reads, fan-in, call graph (incl. self.m())', { skip: hasPython ? false : 'python3 not available' }, async () => {
+test('Python is a first-class backend: symbols, exact reads, fan-in (incl. from-import edges)', { skip: hasPython ? false : 'python3 not available' }, async () => {
   const root = repo({ 'mod.py': MOD, 'app.py': APP });
   const { index } = await buildIndex({ root });
 
@@ -58,7 +57,6 @@ test('Python is a first-class backend: symbols, exact reads, fan-in, call graph 
   const shared = index.entries.find((e) => e.name === 'shared_util' && e.file === 'mod.py')!;
   const greeter = index.entries.find((e) => e.name === 'Greeter')!;
   const greet = index.entries.find((e) => e.name === 'greet')!;
-  const shout = index.entries.find((e) => e.name === 'shout')!;
   const run = index.entries.find((e) => e.name === 'run')!;
   assert.ok(shared && greeter && run, 'function + class + caller indexed');
   assert.equal(shared.kind, 'FunctionDeclaration');
@@ -71,16 +69,8 @@ test('Python is a first-class backend: symbols, exact reads, fan-in, call graph 
   assert.equal(r.status, 'exact', 'python read is exact');
   assert.match(r.raw ?? '', /def shared_util/);
 
-  // Native fan-in: app.py imports shared_util → cross-module reference counted.
+  // Native fan-in via the from-import edge: app.py imports shared_util → counted.
   assert.ok((shared.fanIn ?? 0) >= 1, `fan-in counted (got ${shared.fanIn})`);
-
-  // Call graph (shared pipeline): from-import call run()→shared_util resolves...
-  const callers = graph(index, shared.id, { direction: 'callers' });
-  assert.ok(callers.nodes.some((n) => n.id === run.id), 'run() resolved as a caller via from-import');
-
-  // ...and self.m() resolves to the enclosing class's method (Python's `this`).
-  const greetCallees = graph(index, greet.id, { direction: 'callees' });
-  assert.ok(greetCallees.nodes.some((n) => n.id === shout.id), 'self.shout() resolved to Greeter.shout');
 });
 
 test('Python offsets are UTF-16 — read stays exact past a non-BMP (astral) char', { skip: hasPython ? false : 'python3 not available', timeout: 60_000 }, async () => {

@@ -2,21 +2,19 @@ import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { computeCallEdges } from './call-graph.ts';
-import { type CallSite, extractSymbols, type ImportEdge, isPython, type SymbolRec } from './extract-symbols.ts';
+import { extractSymbols, type ImportEdge, isPython, type SymbolRec } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
 import { listSourceFiles } from './files.ts';
-import { computePublicSurface } from './public-surface.ts';
 import type { FileStat, MapEntry, MapIndex } from './types.ts';
 import { firstLine, lineAt, token } from './util.ts';
 
 /** Python parse backend: the stdlib-ast extractor, shelled out once per build.
  * The whole tree is walked for import resolution; only `targets` are parsed
  * (incremental). Returns the same per-file primitives the oxc path does, so the
- * shared entry/fan-in/call-graph pipeline runs over Python unchanged. Returns null
+ * shared entry/fan-in pipeline runs over Python unchanged. Returns null
  * if Python isn't available — Python files then just don't appear (honest skip). */
 const PY_BACKEND = fileURLToPath(new URL('../py/extract.py', import.meta.url));
-interface PyParse { entries: (SymbolRec & { file: string })[]; fileImports: Record<string, ImportEdge[]>; fileCalls: Record<string, CallSite[]> }
+interface PyParse { entries: (SymbolRec & { file: string })[]; fileImports: Record<string, ImportEdge[]> }
 function runPyBackend(root: string, targets: string[]): Promise<PyParse | null> {
   return new Promise((res) => {
     const cmd = process.env.CODE_MAP_PYTHON ?? 'python3';
@@ -110,7 +108,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const fileTokens: Record<string, string> = {};
   const fileStats: Record<string, FileStat> = {};
   const fileImports: Record<string, ImportEdge[]> = {};
-  const fileCalls: Record<string, CallSite[]> = {};
   const filesMissing: string[] = [];
   const usedIds = new Map<string, number>();
 
@@ -157,7 +154,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       fileTokens[file] = prev!.fileTokens[file];
       fileStats[file] = pv!;
       fileImports[file] = prev!.fileImports?.[file] ?? [];
-      fileCalls[file] = prev!.fileCalls?.[file] ?? [];
       reused++;
     } else {
       changedFiles.push(file);
@@ -174,7 +170,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const pyChanged = changedFiles.filter(isPython);
   const pyByFile = new Map<string, SymbolRec[]>();
   let pyImports: Record<string, ImportEdge[]> = {};
-  let pyCalls: Record<string, CallSite[]> = {};
   if (pyChanged.length) {
     const py = await runPyBackend(root, pyChanged);
     if (py) {
@@ -184,7 +179,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         else pyByFile.set(rec.file, [rec]);
       }
       pyImports = py.fileImports ?? {};
-      pyCalls = py.fileCalls ?? {};
     }
   }
 
@@ -199,21 +193,17 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
     let symbols: SymbolRec[];
     let imports: ImportEdge[];
-    let calls: CallSite[];
     let refs: Record<string, number> = {};
     if (isPython(file)) {
       symbols = pyByFile.get(file) ?? [];
       imports = pyImports[file] ?? [];
-      calls = pyCalls[file] ?? [];
     } else {
       const parsed = extractSymbols(file, src);
       symbols = parsed.symbols;
       imports = parsed.imports;
-      calls = parsed.calls;
       refs = parsed.refs;
     }
     fileImports[file] = imports;
-    fileCalls[file] = calls;
     for (const rec of symbols) {
       const line = lineAt(src, rec.charStart);
       entries.push({
@@ -249,18 +239,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     e.fanIn = (fanIn.get(`${e.file}::${e.name}`) ?? 0) + (e.default ? (fanIn.get(`${e.file}::default`) ?? 0) : 0);
   }
 
-  // Public surface: entry/exported files (package.json → tsconfig source map →
-  // re-export closure), so the dead-export screen can spare them.
-  const reexportsByFile = new Map<string, ImportEdge[]>();
-  for (const [f, edges] of importsByFile) {
-    const re = edges.filter((e) => e.reexport);
-    if (re.length) reexportsByFile.set(f, re);
-  }
-  const publicSurface = computePublicSurface(root, files, reexportsByFile);
-
-  // Call graph: resolve direct call sites into caller→callee edges (Level 1).
-  const callEdges = computeCallEdges(entries, importsByFile, new Map(Object.entries(fileCalls)), files);
-
   entries.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.name.localeCompare(b.name));
 
   let methods = 0;
@@ -284,9 +262,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     fileTokens,
     fileStats,
     fileImports,
-    publicFiles: [...publicSurface.files].sort(),
-    fileCalls,
-    callEdges,
     entries,
   };
 

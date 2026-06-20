@@ -1,16 +1,10 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { computeSymbolHistory } from '../src/core/git-history.ts';
 import { buildIndex } from '../src/core/build-index.ts';
-import { graph } from '../src/core/call-graph.ts';
-import { grep } from '../src/core/grep.ts';
-import { hotspots } from '../src/core/hotspots.ts';
 import { locate } from '../src/core/locate.ts';
-import { stripJsonc } from '../src/core/public-surface.ts';
 import { read } from '../src/core/read.ts';
 import { dispatch, TOOLS } from '../src/mcp/server.ts';
 
@@ -84,14 +78,16 @@ test('read re-anchors via searchText after the file drifts', async () => {
   assert.equal(r.line, alpha.line + 3);
 });
 
-test('read falls back to grep when the anchor is destroyed', async () => {
+test('read reports anchor-lost when the signature anchor is destroyed', async () => {
   const root = repo({ 'src/m.ts': SRC });
   const { index } = await buildIndex({ root });
   const alpha = index.entries.find((e) => e.name === 'alpha')!;
+  // Rewrite the file so alpha's signature line no longer exists anywhere — the
+  // searchText anchor can't re-anchor, so read must confess it lost the symbol.
   writeFileSync(join(root, 'src/m.ts'), '// alpha was rewritten elsewhere\nexport const z = 1;\n');
   const r = read(index, alpha.id);
-  assert.equal(r.status, 'grep-fallback');
-  assert.ok((r.candidates ?? []).some((c) => /alpha/.test(c.preview)));
+  assert.equal(r.status, 'anchor-lost');
+  assert.equal(r.raw, null);
 });
 
 test('incremental rebuild reuses unchanged files, re-reads changed ones', async () => {
@@ -195,31 +191,6 @@ test('intraRefs distinguishes dead code from a merely-dead export', async () => 
   assert.ok((reallyDead.intraRefs ?? 0) <= 1, 'reallyDead used nowhere');
 });
 
-test('public surface (package.json → tsconfig src map → re-export closure) spares entry exports', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'package.json': JSON.stringify({ name: 'pkg', exports: { '.': './dist/index.js' }, bin: { pkg: 'dist/index.js' } }),
-      'tsconfig.json': JSON.stringify({ compilerOptions: { outDir: 'dist', rootDir: 'src' } }),
-      // The entry file's OWN export: no internal importer, only public-surface saves it.
-      'src/index.ts': "export function main(): void {}\nexport { publicThing } from './api.js';\n",
-      'src/api.ts': 'export function publicThing(): number { return 1; }\n',
-      'src/internal.ts': 'export function deadOne(): void {}\n', // not on the public surface
-    }),
-  });
-  // dist/index.js → src/index.ts (via tsconfig), then re-export closure → src/api.ts.
-  assert.ok(index.publicFiles.includes('src/index.ts'), 'entry mapped from package.json');
-  assert.ok(index.publicFiles.includes('src/api.ts'), 're-export closure');
-  assert.ok(!index.publicFiles.includes('src/internal.ts'));
-  // `main` has zero importers but lives in the public entry file → spared (not dead).
-  const main = index.entries.find((e) => e.name === 'main')!;
-  assert.equal(main.fanIn, 0);
-  assert.ok(index.publicFiles.includes(main.file), 'main spared by public surface despite fan-in 0');
-  // deadOne is genuinely dead (not public, no importer).
-  const deadOne = index.entries.find((e) => e.name === 'deadOne')!;
-  assert.equal(deadOne.fanIn, 0);
-  assert.ok(!index.publicFiles.includes(deadOne.file));
-});
-
 test('default-exported function/class keeps real kind; default class methods are indexed', async () => {
   const { index } = await buildIndex({
     root: repo({
@@ -236,55 +207,6 @@ test('default-exported function/class keeps real kind; default class methods are
   assert.ok(greet && greet.className === 'Bar', 'default class method indexed');
   // Anonymous default still recorded as 'default'.
   assert.ok(index.entries.some((e) => e.name === 'default' && e.kind === 'default'));
-});
-
-test('call graph: direct calls become caller→callee edges; method dispatch is omitted', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/util.ts': 'export function helper(): number { return 1; }\n',
-      'src/main.ts': [
-        "import { helper } from './util.js';",
-        'export function run(): number { return helper() + same(); }', // imported + same-file calls
-        'function same(): number { return 2; }',
-        'export function viaMethod(o: { go(): number }): number { return o.go(); }', // member call
-      ].join('\n') + '\n',
-    }),
-  });
-  const id = (name: string, file: string) => index.entries.find((e) => e.name === name && e.file === file)!.id;
-  const has = (from: string, to: string) => index.callEdges.some(([f, t]) => f === from && t === to);
-  assert.ok(has(id('run', 'src/main.ts'), id('helper', 'src/util.ts')), 'run → helper (cross-file import)');
-  assert.ok(has(id('run', 'src/main.ts'), id('same', 'src/main.ts')), 'run → same (same file)');
-  // o.go() is a member call — not type-resolvable, so no edge.
-  const viaMethod = id('viaMethod', 'src/main.ts');
-  assert.ok(!index.callEdges.some(([f]) => f === viaMethod), 'method dispatch not edged');
-});
-
-test('graph: callers depth>1 = transitive blast radius; callees walks outward; floor confesses uncounted dispatch', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/a.ts': "import { mid } from './b.js';\nexport function top(): number { return mid(); }\n",
-      'src/b.ts': "import { leaf } from './c.js';\nexport function mid(): number { return leaf(); }\n",
-      'src/c.ts': 'export function leaf(): number { return 1; }\n',
-      'src/d.ts': 'export function viaDispatch(o: { leaf(): number }): number { return o.leaf(); }\n',
-    }),
-  });
-  const nm = (id: string) => index.entries.find((e) => e.id === id)!.name;
-  const leafId = index.entries.find((e) => e.name === 'leaf')!.id;
-
-  const transitive = graph(index, leafId, { direction: 'callers', depth: 6 });
-  const callerNames = new Set(transitive.nodes.map((n) => nm(n.id)));
-  assert.ok(callerNames.has('mid') && callerNames.has('top'), 'transitive callers of leaf = mid (d1) + top (d2)');
-  // floor surfaces the o.leaf() method-dispatch caller it cannot resolve, and refuses "clear".
-  assert.match(transitive.floor!, /1 possible caller/);
-  assert.match(transitive.floor!, /never "clear"/);
-
-  // depth 1 = direct neighbours only.
-  assert.deepEqual(
-    graph(index, leafId, { direction: 'callers', depth: 1 }).nodes.map((n) => nm(n.id)),
-    ['mid'],
-  );
-  // callees walks the other way.
-  assert.ok(graph(index, index.entries.find((e) => e.name === 'mid')!.id, { direction: 'callees' }).nodes.some((n) => nm(n.id) === 'leaf'));
 });
 
 test('read --snippet designates a sub-symbol char range and flags intra-symbol ambiguity', async () => {
@@ -306,23 +228,6 @@ test('read --snippet designates a sub-symbol char range and flags intra-symbol a
   assert.equal(read(index, fId, { snippet: 'a();' }).aim?.status, 'not-in-symbol');
 });
 
-test('hotspots: static-only mode (no git) ranks by coupling/size, carries evidence, gives no verdict', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/core.ts': `export function bigHub(): number {\n${'  let q = 0;\n'.repeat(40)}  return q;\n}\nexport function tiny(): number { return 1; }\n`,
-      'src/a.ts': "import { bigHub } from './core.js';\nexport function ua(): number { return bigHub(); }\n",
-      'src/b.ts': "import { bigHub } from './core.js';\nexport function ub(): number { return bigHub(); }\n",
-    }),
-  });
-  const r = hotspots(index, { nowMs: 0 }); // a temp dir is not a git repo → static-only
-  assert.equal(r.historyAvailable, false);
-  assert.match(r.note, /STATIC/);
-  const big = r.hotspots.findIndex((h) => h.name === 'bigHub');
-  const tiny = r.hotspots.findIndex((h) => h.name === 'tiny');
-  assert.ok(big !== -1 && (tiny === -1 || big < tiny), 'large, high-fan-in hub outranks the tiny unused fn');
-  assert.ok(r.hotspots[big].evidence.fanIn >= 2 && r.hotspots[big].evidence.fixes === 0 && r.hotspots[big].evidence.scope === 'file', 'evidence carries fan-in; no fix data and file-scope without history');
-});
-
 test('read flags ambiguous relocation when the signature anchor matches multiple sites', async () => {
   const root = repo({ 'src/m.ts': 'export function widget(): number {\n  return 1;\n}\n' });
   const { index } = await buildIndex({ root });
@@ -335,53 +240,20 @@ test('read flags ambiguous relocation when the signature anchor matches multiple
   assert.ok((r.candidates ?? []).length >= 2, 'returns the multiple candidate anchor sites');
 });
 
-test('mcp server: tool list is the five primitives; dispatch routes each over a given index', async () => {
-  assert.deepEqual(TOOLS.map((t) => t.name).sort(), ['graph', 'grep', 'hotspots', 'locate', 'read']);
+test('mcp server: the only tool is read; dispatch routes it over a given index', async () => {
+  assert.equal(TOOLS.length, 1);
+  assert.equal(TOOLS[0].name, 'read');
   const { index } = await buildIndex({
     root: repo({
       'src/u.ts': 'export function helper(): number { return 1; }\n',
       'src/m.ts': "import { helper } from './u.js';\nexport function run(): number { return helper(); }\n",
     }),
   });
-  const loc = JSON.parse(dispatch(index, 'locate', { query: 'helper' }));
-  assert.ok(Array.isArray(loc) && loc.some((h: { name: string }) => h.name === 'helper'));
   assert.match(JSON.parse(dispatch(index, 'read', { ref: 'helper' })).raw ?? '', /function helper/);
-  const g = JSON.parse(dispatch(index, 'graph', { ref: 'helper', direction: 'callers' }));
-  assert.ok(g.nodes.some((n: { id: string }) => n.id.includes('run')) && typeof g.floor === 'string');
-  assert.ok(Array.isArray(JSON.parse(dispatch(index, 'hotspots', { limit: 3 })).hotspots));
   assert.throws(() => dispatch(index, 'nope', {}), /unknown tool/);
 });
 
-test('symbol-level history isolates a helper extracted in the same commit (no cross-symbol bleed)', () => {
-  // The realistic extract-function shape: one commit BOTH edits the churned `risky`
-  // AND adds a fresh `helper`. The new helper must NOT inherit risky's fix history.
-  const root = mkdtempSync(join(tmpdir(), 'cm-git-'));
-  const f = join(root, 'hot.ts');
-  const g = (...a: string[]) => execFileSync('git', ['-C', root, ...a], { stdio: 'pipe' });
-  g('init', '-q', '-b', 'main');
-  g('config', 'user.email', 't@t');
-  g('config', 'user.name', 't');
-  g('config', 'commit.gpgsign', 'false');
-  const commit = (content: string, msg: string) => {
-    writeFileSync(f, content);
-    g('add', 'hot.ts');
-    g('commit', '-q', '-m', msg);
-  };
-  commit('export function risky(): number {\n  const a = base();\n  return a;\n}\n', 'init risky');
-  commit('export function risky(): number {\n  const a = base() + 1;\n  return a;\n}\n', 'fix risky base');
-  commit('export function risky(): number {\n  const a = base() + 1;\n  return a + 5;\n}\n', 'fix risky scaling');
-  // extract: edit risky's body AND append a helper with NOVEL logic, in ONE non-fix
-  // commit. `git log -L` bleeds risky's history onto the new lines here; blame won't.
-  commit('export function risky(): number {\n  const a = base() + 1;\n  return wrap(a);\n}\nexport function helper(a: number): number {\n  return a - 99;\n}\n', 'extract helper from risky');
-
-  const risky = computeSymbolHistory(root, 'hot.ts', 1, 3, Date.now());
-  const helper = computeSymbolHistory(root, 'hot.ts', 5, 6, Date.now()); // signature + novel body (skip the shared `}`)
-  assert.ok(risky && risky.commits >= 2 && risky.fixes >= 1, 'risky retains its multi-commit fix history');
-  assert.equal(helper?.commits, 1, 'helper is touched by exactly its extract commit — no bleed');
-  assert.equal(helper?.fixes, 0, 'freshly extracted helper must NOT inherit risky fixes');
-});
-
-test('re-exported imports are not indexed as barrel symbols; calls resolve to the true definition', async () => {
+test('re-exported imports are not indexed as barrel symbols', async () => {
   const { index } = await buildIndex({
     root: repo({
       'src/parser.ts': 'export function isResetIntent(): boolean {\n  return true;\n}\n',
@@ -393,76 +265,6 @@ test('re-exported imports are not indexed as barrel symbols; calls resolve to th
   // not be indexed as their own symbols (that shadows the real definition).
   const files = [...new Set(index.entries.filter((e) => e.name === 'isResetIntent').map((e) => e.file))];
   assert.deepEqual(files, ['src/parser.ts'], 'isResetIntent indexed only at its real definition');
-  // A call follows the import to the real definition, not the local re-export.
-  const run = index.entries.find((e) => e.name === 'run')!.id;
-  const realDef = index.entries.find((e) => e.name === 'isResetIntent' && e.file === 'src/parser.ts')!.id;
-  assert.ok(
-    index.callEdges.some(([from, to]) => from === run && to === realDef),
-    'run() → parser.ts#isResetIntent (not the pipeline.ts re-export)',
-  );
-});
-
-test('graph callers lists possible method-dispatch sites (name-matched, unverified)', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/svc.ts': 'export class Svc {\n  reload(): void {}\n}\n',
-      'src/use.ts': 'export function refresh(s: { reload(): void }): void {\n  s.reload();\n}\n',
-    }),
-  });
-  const g = graph(index, 'reload', { direction: 'callers' });
-  assert.ok(
-    g.possibleCallers?.some((p) => p.caller === 'refresh' && p.file === 'src/use.ts'),
-    's.reload() surfaces refresh as a possible (dispatch) caller — the obj.method() the graph cannot resolve',
-  );
-  // callees direction does not carry possibleCallers
-  assert.equal(graph(index, 'reload', { direction: 'callees' }).possibleCallers, undefined);
-});
-
-test('calls resolve through a multi-hop re-export chain to the true definition', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/def.ts': 'export function deepFn(): number {\n  return 1;\n}\n',
-      'src/mid.ts': "export { deepFn } from './def.js';\n", // barrel 1
-      'src/top.ts': "export { deepFn } from './mid.js';\n", // barrel 2
-      'src/use.ts': "import { deepFn } from './top.js';\nexport function caller(): number {\n  return deepFn();\n}\n",
-    }),
-  });
-  assert.equal(index.entries.find((e) => e.name === 'deepFn')!.file, 'src/def.ts'); // one def, real location
-  const caller = index.entries.find((e) => e.name === 'caller')!.id;
-  const def = index.entries.find((e) => e.name === 'deepFn')!.id;
-  assert.ok(
-    index.callEdges.some(([from, to]) => from === caller && to === def),
-    'caller → def.ts#deepFn, followed through top → mid → def',
-  );
-});
-
-test('this.method() / super.method() resolve to the class method without a type checker', async () => {
-  const { index } = await buildIndex({
-    root: repo({
-      'src/svc.ts':
-        ['class Base {', '  init(): void {}', '}', 'export class Svc extends Base {', '  run(): void {', '    this.step();', '    this.init();', '  }', '  step(): void {', '    super.init();', '  }', '}'].join('\n') + '\n',
-    }),
-  });
-  const id = (name: string) => index.entries.find((e) => e.kind === 'ClassMethod' && e.name === name)!.id;
-  const has = (from: string, to: string) => index.callEdges.some(([f, t]) => f === from && t === to);
-  assert.ok(has(id('run'), id('step')), 'run → this.step() (same class)');
-  assert.ok(has(id('run'), id('init')), 'run → this.init() (inherited from Base via extends)');
-  assert.ok(has(id('step'), id('init')), 'step → super.init() (superclass)');
-});
-
-test('JSONC stripper removes comments but preserves // and /* inside strings', () => {
-  const src = '{\n  // line comment\n  "url": "https://x//y",\n  "glob": "a/*b*/c", /* block */\n  "n": 1,\n}';
-  const parsed = JSON.parse(stripJsonc(src).replace(/,(\s*[}\]])/g, '$1'));
-  assert.equal(parsed.url, 'https://x//y', 'double-slash inside a string is not a comment');
-  assert.equal(parsed.glob, 'a/*b*/c', 'slash-star inside a string is not a comment');
-  assert.equal(parsed.n, 1);
-});
-
-test('grep parses matches on CRLF files', async () => {
-  const root = repo({ 'src/m.ts': SRC.replace(/\n/g, '\r\n') });
-  const matches = grep(root, 'function alpha', { fixed: true });
-  assert.ok(matches.length >= 1);
-  assert.equal(matches[0].file, 'src/m.ts');
 });
 
 test('snippet aim never escapes the symbol: a stale file does not match another symbol', async () => {
@@ -490,18 +292,6 @@ test('incremental detects a same-size edit with a restored mtime (ctime/ino guar
   const second = await buildIndex({ root, previous: first.index });
   assert.ok(locate(second.index, 'bravo').some((h) => h.file === 'src/m.ts'), 'same-size mtime-restored edit detected');
   assert.equal(locate(second.index, 'alpha').filter((h) => h.file === 'src/m.ts').length, 0, 'stale alpha entry dropped');
-});
-
-test('calls inside a nested function roll up to the enclosing top-level symbol', async () => {
-  const { index } = await buildIndex({
-    root: repo({ 'src/m.ts': 'export function leaf() { return 1 }\nexport function outer() {\n  function inner() { return leaf() }\n  return inner()\n}\n' }),
-  });
-  const outer = index.entries.find((e) => e.name === 'outer')!;
-  const leaf = index.entries.find((e) => e.name === 'leaf')!;
-  assert.ok(
-    index.callEdges.some(([f, t]) => f === outer.id && t === leaf.id),
-    "leaf() called inside nested inner() must be attributed to outer (not lost)",
-  );
 });
 
 test('read refuses a path that escapes the index root (traversal / untrusted index)', async () => {

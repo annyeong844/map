@@ -1,6 +1,5 @@
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
-import { grep } from './grep.ts';
 import { locate } from './locate.ts';
 import type { MapEntry, MapIndex, ReadResult } from './types.ts';
 import { indexOfAll, lineAt, offsetOfLine, token, tryReadFile } from './util.ts';
@@ -156,16 +155,14 @@ function readCore(index: MapIndex, ref: string): ReadResult {
     };
   }
 
-  // 3 — anchor gone: honest grep on the name.
-  const matches = grep(index.meta.root, entry.name, { file: entry.file, fixed: true, limit: 20 });
+  // 3 — anchor gone: the symbol moved or was renamed beyond recovery.
   return {
-    status: 'grep-fallback',
+    status: 'anchor-lost',
     id: entry.id,
     file: entry.file,
     line: entry.line,
     raw: null,
-    note: `File changed and the anchor was lost. Showing grep matches for "${entry.name}".`,
-    candidates: matches.map((m) => ({ line: m.line, preview: m.text.trim() })),
+    note: `File changed and the signature anchor "${entry.searchText.slice(0, 60)}" is no longer present — the symbol was renamed or removed. Re-run \`map index\` to refresh coordinates.`,
   };
 }
 

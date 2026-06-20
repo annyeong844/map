@@ -92,18 +92,6 @@ export interface MapIndex {
    * rebuilds can recompute global fan-in without re-reading unchanged files.
    */
   fileImports: Record<string, { source: string; name: string; reexport?: boolean }[]>;
-  /**
-   * Source files reachable as public API / entry points (package.json public
-   * fields → tsconfig source map → re-export closure). Their exports are not
-   * dead even with zero internal importers.
-   */
-  publicFiles: string[];
-  /** Per-file raw call sites, cached so incremental rebuilds recompute the call
-   * graph without re-reading unchanged files. */
-  fileCalls: Record<string, { caller: string; callee: string; member: boolean; recv?: 'this' | 'super' | 'other'; callerClass?: string }[]>;
-  /** Resolved caller→callee edges as `[fromEntryId, toEntryId]` (direct calls
-   * only — `obj.m()` method dispatch needs type info and is omitted). */
-  callEdges: [string, string][];
   entries: MapEntry[];
 }
 
@@ -137,7 +125,7 @@ export type ReadStatus =
   | 'exact' // file unchanged, sliced precisely from stored coordinates
   | 'relocated' // file changed, re-anchored via searchText (verify boundaries)
   | 'ambiguous' // searchText matched multiple sites; candidates returned
-  | 'grep-fallback' // anchor lost; name-grep matches returned instead
+  | 'anchor-lost' // file changed and the signature anchor is gone; re-index to refresh
   | 'not-found'; // nothing found
 
 export interface ReadResult {
@@ -147,11 +135,11 @@ export interface ReadResult {
   /** 1-based line range actually returned (best-effort when relocated). */
   line: number;
   endLine?: number;
-  /** The raw source. The evidence. null only for grep-fallback/not-found. */
+  /** The raw source. The evidence. null only for anchor-lost/not-found. */
   raw: string | null;
   /** Human-facing caveat when the result is not a clean exact slice. */
   note?: string;
-  /** Candidate locations for ambiguous / grep-fallback statuses. */
+  /** Candidate locations for the ambiguous status. */
   candidates?: { line: number; preview: string }[];
   /**
    * Sub-symbol designator: present only when `read` was given a `snippet`. The
@@ -165,10 +153,4 @@ export interface ReadResult {
     status: 'hit' | 'ambiguous' | 'not-in-symbol' | 'unanchored';
     matches: { line: number; charStart: number; charEnd: number }[];
   };
-}
-
-export interface GrepMatch {
-  file: string;
-  line: number;
-  text: string;
 }

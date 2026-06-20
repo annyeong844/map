@@ -97,7 +97,7 @@ export const TOOLS = [
   },
 ];
 
-function callTool(name: string, args: Record<string, any>): string {
+function callTool(name: string, args: Record<string, unknown>): string {
   ensureFresh();
   if (!index) {
     return JSON.stringify({ error: `No code-map index found at ${indexPath}. Run \`map index --root <repo>\` to build one; it will be picked up automatically.` }, null, 2);
@@ -107,7 +107,7 @@ function callTool(name: string, args: Record<string, any>): string {
 
 /** Pure tool dispatch over a given index — exported so the protocol layer can be
  * exercised in tests without a live stdio process. */
-export function dispatch(index: MapIndex, name: string, args: Record<string, any>): string {
+export function dispatch(index: MapIndex, name: string, args: Record<string, unknown>): string {
   switch (name) {
     case 'read': {
       const hasRefs = args.refs !== undefined;
@@ -138,7 +138,13 @@ function send(msg: unknown): void {
   process.stdout.write(JSON.stringify(msg) + '\n');
 }
 
-function handle(req: any): void {
+interface JsonRpcRequest {
+  id?: string | number | null;
+  method?: string;
+  params?: { protocolVersion?: string; name?: string; arguments?: Record<string, unknown>; [k: string]: unknown };
+}
+
+function handle(req: JsonRpcRequest): void {
   const { id, method, params } = req;
   const isRequest = id !== undefined && id !== null;
   try {
@@ -157,7 +163,7 @@ function handle(req: any): void {
       case 'tools/list':
         return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
       case 'tools/call': {
-        const text = callTool(params.name, params.arguments ?? {});
+        const text = callTool(String(params?.name ?? ''), params?.arguments ?? {});
         return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } });
       }
       case 'ping':
@@ -182,9 +188,9 @@ function main(): void {
   rl.on('line', (line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    let req: any;
+    let req: JsonRpcRequest;
     try {
-      req = JSON.parse(trimmed);
+      req = JSON.parse(trimmed) as JsonRpcRequest;
     } catch {
       return;
     }

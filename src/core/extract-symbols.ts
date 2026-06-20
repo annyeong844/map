@@ -55,7 +55,7 @@ export interface FileParse {
  */
 function walkProgram(program: unknown): { refs: Record<string, number> } {
   const refs: Record<string, number> = Object.create(null);
-  const stack: any[] = [program];
+  const stack: unknown[] = [program];
   while (stack.length) {
     const node = stack.pop();
     if (!node || typeof node !== 'object') continue;
@@ -63,16 +63,36 @@ function walkProgram(program: unknown): { refs: Record<string, number> } {
       for (const c of node) stack.push(c);
       continue;
     }
-    if (node.type === 'Identifier' && typeof node.name === 'string') {
-      refs[node.name] = (refs[node.name] ?? 0) + 1;
+    // Verified non-null object, non-array above — read it as a generic record (oxc's AST
+    // node union is the boundary; the cast is the one place we narrow it, no `any` escape).
+    const rec = node as Record<string, unknown>;
+    if (rec.type === 'Identifier' && typeof rec.name === 'string') {
+      refs[rec.name] = (refs[rec.name] ?? 0) + 1;
     }
-    for (const k in node) {
+    for (const k in rec) {
       if (k === 'type') continue;
-      const v = node[k];
+      const v = rec[k];
       if (v && typeof v === 'object') stack.push(v);
     }
   }
   return { refs };
+}
+
+/** The slice of an oxc declaration node that `pushDecl` reads — a minimal structural view of
+ * the AST boundary so the extractor stays `any`-free (oxc's full union is heavier than the
+ * handful of fields used here). Coordinates (`start`/`end`) plus the kind-specific shapes. */
+interface DeclNode {
+  type: string;
+  start: number;
+  end: number;
+  id?: { name?: string; type?: string };
+  superClass?: { type?: string; name?: string };
+  body?: { body?: DeclNode[] };
+  declarations?: DeclNode[];
+  kind?: string;
+  key?: { name?: string; type?: string; value?: unknown };
+  static?: boolean;
+  accessibility?: string;
 }
 
 const JS_TS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -107,7 +127,7 @@ export function extractSymbols(file: string, text: string): FileParse {
   // at foo's real coordinates rather than the specifier. Also track imported
   // bindings → their source export, so `import { x }; export { x }` is recognized
   // as a re-export (an edge to the real definition) rather than a local symbol.
-  const locals = new Map<string, any>();
+  const locals = new Map<string, { start: number; end: number }>();
   const importedFrom = new Map<string, { source: string; name: string }>();
   // oxc types specifier names as Identifier | StringLiteral and declaration ids as a
   // broad node union; read the identifier name via a real runtime narrowing so this
@@ -205,7 +225,8 @@ export function extractSymbols(file: string, text: string): FileParse {
   return { symbols, imports, refs };
 }
 
-function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {
+function pushDecl(declNode: unknown, exported: boolean, out: SymbolRec[]): void {
+  const decl = declNode as DeclNode;
   const visibility = exported ? undefined : 'module-private';
   if (decl.type === 'FunctionDeclaration') {
     if (decl.id?.name) out.push({ name: decl.id.name, kind: 'FunctionDeclaration', charStart: decl.start, charEnd: decl.end, exported, visibility });
@@ -234,7 +255,7 @@ function pushDecl(decl: any, exported: boolean, out: SymbolRec[]): void {
   }
   if (decl.type === 'VariableDeclaration') {
     for (const d of decl.declarations ?? []) {
-      if (d.id?.type === 'Identifier') out.push({ name: d.id.name, kind: `${decl.kind}-var`, charStart: d.start, charEnd: d.end, exported, visibility });
+      if (d.id?.type === 'Identifier' && d.id.name) out.push({ name: d.id.name, kind: `${decl.kind}-var`, charStart: d.start, charEnd: d.end, exported, visibility });
     }
     return;
   }

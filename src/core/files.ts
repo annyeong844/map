@@ -6,7 +6,7 @@ import { posix } from './util.ts';
 
 /** Generated/vendored dirs skipped by the walker — and by the JS grep fallback,
  * so both grep backends see roughly the same corpus (ripgrep adds .gitignore). */
-export const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', 'coverage', '.next', '.audit', '.cache']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', 'coverage', '.next', '.audit', '.cache']);
 
 /**
  * Enumerate the source files to index, POSIX-relative to root.

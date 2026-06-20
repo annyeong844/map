@@ -72,14 +72,14 @@ export const TOOLS = [
   {
     name: 'read',
     description:
-      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice cheaply.)',
+      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. **Batch: pass `refs` (an array) to read MANY symbols in ONE call** — same cheap slices, but one round-trip instead of N (read everything you need up front). Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice(s) cheaply.)',
     inputSchema: {
       type: 'object',
       properties: {
         ref: { type: 'string', description: 'A symbol id, or a bare name / "path#name".' },
-        snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s).' },
+        refs: { type: 'array', items: { type: 'string' }, description: 'Read several symbols in one call (ids or names). Returns one result per ref — prefer this over many single reads.' },
+        snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s). Applies when reading a single `ref`.' },
       },
-      required: ['ref'],
     },
   },
 ];
@@ -96,8 +96,14 @@ function callTool(name: string, args: Record<string, any>): string {
  * exercised in tests without a live stdio process. */
 export function dispatch(index: MapIndex, name: string, args: Record<string, any>): string {
   switch (name) {
-    case 'read':
+    case 'read': {
+      if (Array.isArray(args.refs)) {
+        // Batch: one round-trip for many symbols — same cheap slices, far fewer turns.
+        const results = args.refs.map((r: unknown) => read(index, String(r), {}));
+        return JSON.stringify({ results }, null, 2);
+      }
       return JSON.stringify(read(index, String(args.ref), { snippet: args.snippet ? String(args.snippet) : undefined }), null, 2);
+    }
     default:
       throw new Error(`unknown tool: ${name}`);
   }

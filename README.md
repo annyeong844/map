@@ -30,6 +30,10 @@ baseline* — is the point.
 So code-map kept exactly one thing: **a token-efficient, drift-resistant reader.**
 The honest division of labour is *grep finds, `read` reads cheaply.*
 
+> **Full reproducible measurements + every negative result:**
+> [**code-map-bench**](https://github.com/annyeong844/code-map-bench) — the harnesses,
+> the raw numbers, and the honest log of each hypothesis the data killed.
+
 ---
 
 ## Why coordinates, never meaning
@@ -172,7 +176,8 @@ node --test "test/*.test.ts"
 > tools, and the call-graph / git-history / dead-export / embedding code behind them —
 > all measured to tie or lose to `grep` + a strong agent, so they earned no place on
 > the surface. `locate`'s ranking logic survives *inside* `read` (name → symbol). The
-> benchmark harness + negative results live under `Downloads/codemap-bench/`.
+> benchmark harnesses + raw results + negative-result log live in a separate repo:
+> [**code-map-bench**](https://github.com/annyeong844/code-map-bench).
 
 ### `code-oracle/` — the optional type oracle (a sibling, not the core)
 

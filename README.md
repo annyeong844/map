@@ -30,14 +30,21 @@ baseline* — is the point.
 | **Drift-safe EDIT** (`read --snippet` / `aim`) | **Verified.** Quoted snippet → its *current* char range after churn: **0 silent mistargets**, 94.5% vs naive char-offset at **100% mistarget** — patch lands even as the file moved. | **kept** |
 | **Caller precision** (`code-oracle`, separate) | **31% fewer files to read** for blast-radius (40–75% on common/colliding names); grep can't say *which* class's method, the type checker can. LSP-warmup cost → a separate sibling. | **kept (sibling)** |
 | **Read — turns** (`read`) | **Win (K=30, CI clear of 0).** −25–30% agent *turns* at N=6, both models. | **kept** |
-| **Read — tokens** (`read`) | **Retracted.** The K=5 "−16–35% tokens" was noise; at K=30 ~0 (Opus −11%, worse). Withdrawn. | corrected |
+| **Read — single-read tokens** (`read`) | **Retracted.** The K=5 "−16–35% tokens" was noise; *single* read at K=30 ~0 (Opus −11%, worse). | corrected |
+| **Read — `refs` batch tokens** (`read`) | **Win, wired & model-dependent.** Batch many known symbols in one call → **−30% logical / −26% cost / −72% turns vs grep on codex** (corrected metric incl. cache_read); ~−30% Sonnet; **a loss on Opus** (native read already lean). The cut tracks the symbols' *grep-noise*, not count. | **kept** |
 | **Search / semantic / light call-graph** | Tie or lose to `grep` (search ties; embeddings rejected 3 ways; structural graph loses on recall). | removed |
 
 So code-map is, honestly: **a guess-free coordinate layer that stays correct under
 churn** — for *reading* (`read`, 0 silent) and *editing* (`aim`, 0 mistarget) — plus a
 separate type-oracle that narrows a refactor's read-set. It is **not** a search tool
-(grep ties it) and **not** a token-saver (~0 at scale). Full numbers, retractions, and
-a one-command verifier: [code-map-bench](https://github.com/annyeong844/code-map-bench).
+(grep ties it). On tokens it's conditional: *single* reads are ~0, but **`refs` batch
+cuts −30% (logical & cost) on codex when wired** — because the real cost is *round-trips*
+(context re-processing), not bytes, and batching collapses them. That win scales with how
+round-trip-heavy/grep-noisy the agent's native read is (big on codex, a loss on Opus). Full
+numbers, retractions, the round-trip law, and the adoption ladder:
+**[code-map-bench](https://github.com/annyeong844/code-map-bench)** —
+[RESULTS.md](https://github.com/annyeong844/code-map-bench/blob/main/RESULTS.md) (drift/edit/oracle)
++ [EFFICIENCY-CODEX.md](https://github.com/annyeong844/code-map-bench/blob/main/EFFICIENCY-CODEX.md) (batch/cross-model/adoption).
 
 > **Full reproducible measurements + every negative result:**
 > [**code-map-bench**](https://github.com/annyeong844/code-map-bench) — the harnesses,
@@ -215,10 +222,28 @@ not explicitly say "use read". Tool choice is still model behavior, so the
 benchmark harness verifies the route from event logs instead of trusting intent.
 
 For Codex specifically, server instructions are not strong enough to guarantee
-routing by themselves. They improve the floor, but Codex may still mix in shell
-body reads. For reliable savings on known refs, add a project-level routing hint
-to `AGENTS.md`; see `bench/codex-headless/AGENTS.code-map.md` for a copyable
-snippet.
+routing by themselves (measured: ~67% adoption, mixes in shell reads). **Two wirings
+reach 100% reliable adoption** — pick one:
+
+- **A skill (zero per-project setup).** Drop a `code-map` skill into `~/.codex/skills/`
+  so it ships globally and Codex self-routes everywhere — no per-repo file. Measured:
+  17% → **100%** adoption. Costs a one-time `cat SKILL.md` load round-trip per session
+  (≈ one extra context re-process). Copyable skill:
+  [`integrations/codex-skill/SKILL.md`](https://github.com/annyeong844/code-map-bench/blob/main/integrations/codex-skill/SKILL.md).
+
+  ```bash
+  mkdir -p ~/.codex/skills/code-map
+  curl -sL https://raw.githubusercontent.com/annyeong844/code-map-bench/main/integrations/codex-skill/SKILL.md \
+    -o ~/.codex/skills/code-map/SKILL.md
+  ```
+
+- **A project `AGENTS.md` line (zero load cost, per-repo).** Slightly leaner (no skill-load
+  round-trip) but you add it per project. See `bench/codex-headless/AGENTS.code-map.md` for
+  a copyable snippet.
+
+Either says, in effect: *"read known symbols via code-map `read` (batch independent refs
+in one call); use grep only to discover."* The win is **−30% tokens/cost on read-heavy
+known-ref tasks** once routing is reliable.
 
 ### Benchmarking retrieval strategies
 

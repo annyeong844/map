@@ -343,8 +343,17 @@ what implements this / where is this defined* at **type-checker grade** over a w
 session (tsgo for TS/JS, `ty` for Python; picked by extension). It's the type-precise
 answer to blast-radius that a light index can't give — and it's kept separate on
 purpose: a heavy pinned preview dependency, seconds of warmup, a stateful session, the
-*opposite* profile to code-map's "one dependency, no machinery". Honest bounds: tsgo is
-solid; `ty` (early preview) resolves `definition` cross-file but `references` intra-file
-(Python `callers` carry `incomplete: true`); truly dynamic dispatch (token-only DI,
-`Proxy`, `obj[k]()`) is invisible to any checker. Its own `package.json` + tests
-(`cd code-oracle && npm test`).
+*opposite* profile to code-map's "one dependency, no machinery". Honest bounds (measured
+2026-06 on a real typed Python project, `ouroboros`): tsgo is solid; **`ty` (0.0.50)
+resolves `definition` cross-file and accurately, but `references` is INTRA-FILE ONLY** — so
+Python `callers`/`implementations` are a lower-bound intra-file screen, flagged
+`incomplete: true` (verified: a function with 2 cross-file callers returned only its 1
+intra-file caller). This is a maturity gap in ty's reference subsystem (type-checking and
+project-wide find-references are different problems), not a speed issue — ty is fast (~6 s
+warm). **For complete Python callers, use `grep`** (100 % recall — the name is in every
+calling file); we deliberately do NOT add a Python references backend (jedi/pyright) — the
+dependency cost isn't worth the marginal precision over grep, and it would break the
+one-dep thesis. Use `ty` for Python `definition` (trustworthy); use `grep` for "who calls
+this". When ty ships cross-file references, `callers` can switch to it (fast AND complete).
+Truly dynamic dispatch (token-only DI, `Proxy`, `obj[k]()`) is invisible to any checker.
+Its own `package.json` + tests (`cd code-oracle && npm test`).

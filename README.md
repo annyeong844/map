@@ -26,15 +26,18 @@ baseline* — is the point.
 |---|---|---|
 | **Search / routing** (`locate`) | **Tie.** On single "where is X" a strong model + ripgrep (100% recall) does as well; locate's name-match is narrower on concept queries. | removed |
 | **Semantic embeddings** | **Worse.** CodeRankEmbed-137M & Qodo-1.5B returned plausible-but-wrong neighbours; *added* to a grep agent it **degraded** results (cannibalized the grep path) and the 1.5B model is CPU-infeasible. Rejected three independent ways. | not built |
-| **Call graph / blast-radius** (`graph`) | **Lost on recall.** grep never misses a caller (the name is in every using file); the structural graph is blind to `obj.method()` dispatch + types. Type-precise callers are the *separate* `code-oracle` (LSP), not a light index. | removed |
-| **Drift resistance** (`read`) | **Strongest, verified.** After heavy churn, no re-index: **0 silently-wrong bytes**, 94.5% correct recovery (re-anchored by signature) vs naive line-caching at **100% silent**. Reproduced. | **kept** |
-| **Read — turns** (`read`) | **Win (K=30, CI clear of 0).** −25–30% agent *turns* at N=6, both models — `read(symbol)` vs grep-then-read. | **kept** |
-| **Read — tokens** (`read`) | **Retracted.** The K=5 "−16–35% tokens" was noise; at K=30 it's ~0 (Opus −11%, worse). Token claim withdrawn. | corrected |
+| **Drift-safe READ** (`read`) | **Strongest, verified.** After heavy churn, no re-index: **0 silently-wrong bytes**, 94.5% recovery (re-anchored by signature) vs naive line-caching at **100% silent**. Reproduced. | **kept** |
+| **Drift-safe EDIT** (`read --snippet` / `aim`) | **Verified.** Quoted snippet → its *current* char range after churn: **0 silent mistargets**, 94.5% vs naive char-offset at **100% mistarget** — patch lands even as the file moved. | **kept** |
+| **Caller precision** (`code-oracle`, separate) | **31% fewer files to read** for blast-radius (40–75% on common/colliding names); grep can't say *which* class's method, the type checker can. LSP-warmup cost → a separate sibling. | **kept (sibling)** |
+| **Read — turns** (`read`) | **Win (K=30, CI clear of 0).** −25–30% agent *turns* at N=6, both models. | **kept** |
+| **Read — tokens** (`read`) | **Retracted.** The K=5 "−16–35% tokens" was noise; at K=30 ~0 (Opus −11%, worse). Withdrawn. | corrected |
+| **Search / semantic / light call-graph** | Tie or lose to `grep` (search ties; embeddings rejected 3 ways; structural graph loses on recall). | removed |
 
-So code-map is, honestly: **a drift-safe coordinate cache** (0 silent / 94.5% recovery
-after churn) that also cuts ~25–30% of agent *turns*. The division of labour is *grep
-finds, `read` re-anchors + reads*. It does **not** save tokens at scale — that headline
-didn't survive K=30. Full numbers + retractions: [code-map-bench](https://github.com/annyeong844/code-map-bench).
+So code-map is, honestly: **a guess-free coordinate layer that stays correct under
+churn** — for *reading* (`read`, 0 silent) and *editing* (`aim`, 0 mistarget) — plus a
+separate type-oracle that narrows a refactor's read-set. It is **not** a search tool
+(grep ties it) and **not** a token-saver (~0 at scale). Full numbers, retractions, and
+a one-command verifier: [code-map-bench](https://github.com/annyeong844/code-map-bench).
 
 > **Full reproducible measurements + every negative result:**
 > [**code-map-bench**](https://github.com/annyeong844/code-map-bench) — the harnesses,

@@ -281,10 +281,11 @@ const METHOD: Record<string, string> = {
   definition: 'textDocument/definition',
   implementations: 'textDocument/implementation',
 };
+// `ENGINE` is substituted with the actual backend (tsgo for TS/JS, ty for Python) per query.
 const NOTE: Record<string, string> = {
-  callers: 'Type-aware callers via tsgo references (checker grade; resolves through interfaces / standard DI). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) stays invisible — a residual for the agent to read.',
-  definition: 'Type-aware definition(s) via tsgo — where this symbol/expression actually resolves (the precise callee), not a name guess.',
-  implementations: 'Implementations via tsgo (type-aware CHA) — the concrete classes/methods behind an interface/abstract; the over-approximate set that is sound for blast radius.',
+  callers: 'Type-aware callers via ENGINE references (checker grade; resolves through interfaces / standard DI). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) stays invisible — a residual for the agent to read.',
+  definition: 'Type-aware definition(s) via ENGINE — where this symbol/expression actually resolves (the precise callee), not a name guess.',
+  implementations: 'Implementations via ENGINE (type-aware CHA) — the concrete classes/methods behind an interface/abstract; the over-approximate set that is sound for blast radius.',
 };
 
 /** One query path for all three tools: resolve a position, gate on the cache, else
@@ -327,10 +328,12 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   // grep/`definition` confirm they're used across many files). So for Python, callers/
   // implementations are a LOWER BOUND, not the cross-file blast radius. (ty `definition`
   // DOES resolve cross-file, so it's trustworthy.)
+  const engine = lang === 'ts' ? 'tsgo' : 'ty';
+  const base = NOTE[tool].replace(/ENGINE/g, engine);
   const pyRefsCaveat = lang === 'py' && (tool === 'callers' || tool === 'implementations');
   const note = pyRefsCaveat
-    ? NOTE[tool] + ' ⚠ Python (ty 0.0.50): find-references is INTRA-FILE ONLY here — cross-file callers are NOT found (verified). Treat as a LOWER BOUND / intra-file screen, NOT a complete blast radius. `definition` does resolve cross-file.'
-    : NOTE[tool];
+    ? base + ' ⚠ Python (ty 0.0.50): find-references is INTRA-FILE ONLY here — cross-file callers are NOT found (verified). Treat as a LOWER BOUND / intra-file screen, NOT a complete blast radius. `definition` does resolve cross-file.'
+    : base;
   const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note, ...(pyRefsCaveat ? { incomplete: true } : {}) };
   if (cache.epoch !== epoch) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
   cache.entries[cacheKey] = result;

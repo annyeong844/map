@@ -19,6 +19,12 @@ import { loadIndex } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
 
 const PROTOCOL = '2025-06-18';
+const SERVER_INSTRUCTIONS = [
+  'ROUTING RULES: for indexed repos, do not read known symbol bodies with shell commands. If a file:line, symbol id, or path#name is known, call code-map read for source.',
+  'Use shell search only to discover candidate refs, names, or line numbers; after discovery, stop shell body reads and inspect exact code with read.',
+  'For two or more independent known refs, make one read call with refs: [...] before answering. Split only when a later ref depends on earlier output or the batch exceeds 64 refs.',
+  'Never answer from index metadata alone; answer from raw code returned by read.',
+].join(' ');
 
 /** Walk up from `start` looking for `name`; null if never found. */
 function findUp(name: string, start: string): string | null {
@@ -72,12 +78,19 @@ export const TOOLS = [
   {
     name: 'read',
     description:
-      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. **Batch: pass `refs` (an array) to read MANY symbols in ONE call** — same cheap slices, but one round-trip instead of N (read everything you need up front). Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice(s) cheaply.)',
+      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. **Batch: pass `refs` (an array) to read several symbols in ONE call** — one round-trip instead of N, which cuts agent turns/latency. Batch only INDEPENDENT symbols whose refs you already know; use a single `ref` when a later read depends on what an earlier one shows (sequential reads preserve your chance to course-correct, and cost fewer tokens than loading everything at once). Pass `ref` OR `refs`, not both. Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice(s) cheaply.)',
+    annotations: {
+      title: 'Read symbol source',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: 'object',
       properties: {
         ref: { type: 'string', description: 'A symbol id, or a bare name / "path#name".' },
-        refs: { type: 'array', items: { type: 'string' }, description: 'Read several symbols in one call (ids or names). Returns one result per ref — prefer this over many single reads.' },
+        refs: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 64, uniqueItems: true, description: 'Read several INDEPENDENT, already-known symbols in one call (ids or names). One result per ref. Use sequential single reads when later reads depend on earlier ones.' },
         snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s). Applies when reading a single `ref`.' },
       },
     },
@@ -97,11 +110,23 @@ function callTool(name: string, args: Record<string, any>): string {
 export function dispatch(index: MapIndex, name: string, args: Record<string, any>): string {
   switch (name) {
     case 'read': {
-      if (Array.isArray(args.refs)) {
-        // Batch: one round-trip for many symbols — same cheap slices, far fewer turns.
-        const results = args.refs.map((r: unknown) => read(index, String(r), {}));
-        return JSON.stringify({ results }, null, 2);
+      const hasRefs = args.refs !== undefined;
+      const hasRef = args.ref !== undefined;
+      if (hasRefs && hasRef) return JSON.stringify({ error: 'Pass `ref` (single) OR `refs` (batch), not both.' }, null, 2);
+      if (hasRefs) {
+        if (!Array.isArray(args.refs) || args.refs.length === 0) return JSON.stringify({ error: '`refs` must be a non-empty array of symbol ids or names.' }, null, 2);
+        // Batch: one round-trip for many symbols — same slices, fewer turns. Dedupe (keep
+        // first occurrence) and cap so a stray huge array can't blow up the context window.
+        const MAX = 64;
+        const seen = new Set<string>();
+        const uniq = args.refs.map((r: unknown) => String(r)).filter((r) => (seen.has(r) ? false : (seen.add(r), true)));
+        const capped = uniq.slice(0, MAX);
+        const out: Record<string, unknown> = { results: capped.map((r) => read(index, r, {})) };
+        if (uniq.length > MAX) out.note = `Read first ${MAX} of ${uniq.length} refs; split the rest into another call.`;
+        // Compact (no pretty-print indentation) — leaner in context than N single pretty reads.
+        return JSON.stringify(out);
       }
+      if (!hasRef) return JSON.stringify({ error: 'Pass `ref` (a symbol id or name) or `refs` (an array).' }, null, 2);
       return JSON.stringify(read(index, String(args.ref), { snippet: args.snippet ? String(args.snippet) : undefined }), null, 2);
     }
     default:
@@ -126,6 +151,7 @@ function handle(req: any): void {
             protocolVersion: params?.protocolVersion ?? PROTOCOL,
             capabilities: { tools: {} },
             serverInfo: { name: 'code-map', version: '0.1.0' },
+            instructions: SERVER_INSTRUCTIONS,
           },
         });
       case 'tools/list':

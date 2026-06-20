@@ -253,6 +253,34 @@ test('mcp server: the only tool is read; dispatch routes it over a given index',
   assert.throws(() => dispatch(index, 'nope', {}), /unknown tool/);
 });
 
+test('mcp read batch: refs reads many in one call; validates, dedupes, caps', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/u.ts': 'export function helper(): number { return 1; }\nexport function other(): number { return 2; }\n',
+    }),
+  });
+  // batch: one call, one result per ref, order preserved
+  const batch = JSON.parse(dispatch(index, 'read', { refs: ['helper', 'other'] }));
+  assert.equal(batch.results.length, 2);
+  assert.match(batch.results[0].raw ?? '', /function helper/);
+  assert.match(batch.results[1].raw ?? '', /function other/);
+  // a missing ref in a batch is reported per-result, not a thrown error
+  const withMiss = JSON.parse(dispatch(index, 'read', { refs: ['helper', 'nonexistent_xyz'] }));
+  assert.equal(withMiss.results.length, 2);
+  assert.notEqual(withMiss.results[1].status, 'exact');
+  // dedupe: duplicate refs collapse to one result
+  assert.equal(JSON.parse(dispatch(index, 'read', { refs: ['helper', 'helper'] })).results.length, 1);
+  // invalid input: both ref and refs, empty refs, neither → error object (no "undefined" symbol search)
+  assert.match(JSON.parse(dispatch(index, 'read', { ref: 'helper', refs: ['other'] })).error ?? '', /not both/);
+  assert.match(JSON.parse(dispatch(index, 'read', { refs: [] })).error ?? '', /non-empty/);
+  assert.match(JSON.parse(dispatch(index, 'read', {})).error ?? '', /Pass `ref`/);
+  // cap: >64 refs reads the first 64 and notes the rest
+  const many = Array.from({ length: 70 }, (_, i) => `s${i}`);
+  const capped = JSON.parse(dispatch(index, 'read', { refs: many }));
+  assert.equal(capped.results.length, 64);
+  assert.match(capped.note ?? '', /first 64 of 70/);
+});
+
 test('re-exported imports are not indexed as barrel symbols', async () => {
   const { index } = await buildIndex({
     root: repo({

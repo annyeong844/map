@@ -115,24 +115,50 @@ exact char range *within* the symbol, never escaping into another symbol.
 
 ---
 
-## Usage
+## Install
 
 Requires Node ≥ 23.6 (runs TypeScript directly — no build step) and one **runtime**
 dependency, `oxc-parser`. `ripgrep` is used by the indexer's file walk when present.
 Dev-only: `typescript` + `@types/node` for `npm run typecheck`; `npm run lint` runs
 oxlint via npx. Python needs `python3` on `PATH`.
 
+Once published to npm:
+
+```bash
+npm install -g @annyeong844/code-map
+```
+
+Until the npm package is published, install directly from GitHub (requires access
+to the repository):
+
+```bash
+npm install -g github:annyeong844/map
+```
+
+For local development from a checkout:
+
+```bash
+git clone https://github.com/annyeong844/map.git
+cd map
+npm install
+npm link
+```
+
+All three paths expose two commands on `PATH`: `map` and `map-mcp`.
+
+## Usage
+
 ```bash
 # Index (writes ./.map-index.json; --root defaults to cwd). Incremental: reuses files
 # whose bytes are unchanged (stat mtime+size+ctime/ino), re-parses only what changed.
-node src/cli/main.ts index --root ../target-repo
+map index --root ../target-repo
 
 # Read — the one tool. Takes a symbol id or a bare/path-scoped name (resolved internally).
-node src/cli/main.ts read "alias-map.ts#buildAliasMap"
-node src/cli/main.ts read buildAliasMap                 # bare name (errors if ambiguous)
-node src/cli/main.ts read withRetry --snippet "req.copy()"   # sub-symbol char range
+map read "alias-map.ts#buildAliasMap"
+map read buildAliasMap                 # bare name (errors if ambiguous)
+map read withRetry --snippet "req.copy()"   # sub-symbol char range
 
-node src/cli/main.ts stats
+map stats
 ```
 
 Add `--json` for machine output. **Search with your own `grep`/ripgrep** — that's not
@@ -140,10 +166,39 @@ code-map's job (it ties); feed the `file:line` or symbol name you find to `read`
 
 ### As an MCP server
 
+Build an index in the repo you want the assistant to inspect:
+
 ```bash
-npm link                                          # exposes `map` + `map-mcp` on PATH
+cd /path/to/target-repo
+map index --root .
+```
+
+Then add the stdio server to your MCP client.
+
+Codex:
+
+```bash
+codex mcp add code-map -- map-mcp
+```
+
+If your Codex client starts MCP servers outside the target repo, pin the index in
+`~/.codex/config.toml` (or project `.codex/config.toml` in a trusted project):
+
+```toml
+[mcp_servers.code-map]
+command = "map-mcp"
+
+[mcp_servers.code-map.env]
+MAP_INDEX = "/path/to/target-repo/.map-index.json"
+```
+
+Claude:
+
+```bash
 claude mcp add code-map --scope user -- map-mcp
 ```
+
+Generic MCP JSON:
 
 ```jsonc
 { "mcpServers": { "code-map": { "command": "map-mcp" } } }
@@ -153,6 +208,73 @@ Exposes **one tool — `read`** (raw drift-resistant slice; optional `snippet` f
 sub-symbol range). The server **auto-detects** the index (walks up for
 `.map-index.json`) and **auto-reloads** when it changes (no client reconnect). It
 routes and quotes; it never summarizes.
+
+The MCP server also returns server-wide instructions during initialization so
+agents are nudged to use `read` for exact symbol slices even when the user did
+not explicitly say "use read". Tool choice is still model behavior, so the
+benchmark harness verifies the route from event logs instead of trusting intent.
+
+For Codex specifically, server instructions are not strong enough to guarantee
+routing by themselves. They improve the floor, but Codex may still mix in shell
+body reads. For reliable savings on known refs, add a project-level routing hint
+to `AGENTS.md`; see `bench/codex-headless/AGENTS.code-map.md` for a copyable
+snippet.
+
+### Benchmarking retrieval strategies
+
+The repo includes a Codex headless benchmark harness for comparing native
+`rg`/read workflows against code-map batched `read({ refs: [...] })` workflows:
+
+```bash
+codex login --device-auth
+map-bench --run --passes 30 --auth chatgpt --strategies native,map-batch
+```
+
+See `bench/codex-headless/README.md` for the pass@30 setup, task format, and
+usage metrics captured from `codex exec --json`. The harness defaults to saved
+ChatGPT/OAuth Codex auth and removes `CODEX_API_KEY` / `OPENAI_API_KEY` from
+child `codex exec` processes. Each pass also runs one no-op cache warm-up
+resume turn before scored tasks. The main comparison table uses scored task
+turns only and reports adjusted input as `input_tokens - cached_input_tokens`,
+so repeated cached prompt prefix can be excluded as a diagnostic. It also reports
+cache-aware `effective_input_tokens = uncached + cached * cached_input_weight`
+for the practical "cache really applies" view. Scoring checks the route: native
+rows fail if they use MCP, and map-batch rows fail if they do not complete a
+batched code-map `read({ refs: [...] })` call.
+
+Current Codex routing probes show the honest ladder:
+
+| Routing mechanism | Codex behavior | Token/time expectation |
+|---|---|---|
+| No project hint | often pure `rg`/file reads | no reliable savings |
+| MCP server instructions only | partial adoption; can mix `read` and shell | noisy, sometimes worse |
+| Strong MCP routing rules | fewer shell reads, still not guaranteed | modest average gain, high variance |
+| `AGENTS.md` project hint | reliable use of code-map for known refs | stable gains on read-heavy known-ref tasks |
+| Literal one-call prompt | best possible batching | useful ceiling, not normal agent behavior |
+
+This does **not** mean code-map saves tokens everywhere. It is strongest when
+the agent already knows several independent symbol refs and can batch them in
+one `read({ refs: [...] })` call. It is often a wash on one-symbol lookups, and
+discovery-heavy or whole-file tasks may still be better served by `rg` plus a
+small direct read. Use `bench/codex-headless/tasks.diverse.json` and the
+`By Scenario` table in `summary.md` to keep those cases separate.
+
+### Publishing checklist
+
+For maintainers publishing the npm package:
+
+```bash
+npm test
+npm run typecheck
+npm run check:package
+npm pack --dry-run
+npm publish --access public
+```
+
+`npm publish` also runs `npm run check:package` through `prepublishOnly`.
+The safety check inspects the exact dry-run package file list and fails if local
+env/config paths (`.env`, `.codex`, `.audit`, `.bench`, `auth.json`,
+`config.toml`, etc.) or likely token values are present.
 
 ---
 

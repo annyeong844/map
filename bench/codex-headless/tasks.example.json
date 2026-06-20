@@ -1,0 +1,63 @@
+{
+  "name": "code-map self benchmark smoke tasks",
+  "version": 1,
+  "tasks": [
+    {
+      "id": "mcp-read-batch-contract",
+      "prompt": "Explain the MCP read tool's single-ref vs batch-ref behavior. Include what happens if both ref and refs are passed, and name the batch cap.",
+      "mapRefs": [
+        "src/mcp/server.ts#TOOLS",
+        "src/mcp/server.ts#dispatch"
+      ],
+      "nativeHints": [
+        "src/mcp/server.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "ref",
+          "refs",
+          "not both",
+          "64"
+        ]
+      }
+    },
+    {
+      "id": "mcp-index-reload",
+      "prompt": "Describe how the MCP server reloads the map index and what it does when the index is missing or half-written.",
+      "mapRefs": [
+        "src/mcp/server.ts#ensureFresh",
+        "src/mcp/server.ts#callTool"
+      ],
+      "nativeHints": [
+        "src/mcp/server.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "mtime",
+          "size",
+          "loadIndex",
+          "No code-map index"
+        ]
+      }
+    },
+    {
+      "id": "read-path-containment",
+      "prompt": "Explain the path containment defense in read: what checks keep an indexed file path from escaping the project root?",
+      "mapRefs": [
+        "src/core/read.ts#fileWithinRoot",
+        "src/core/read.ts#readCore"
+      ],
+      "nativeHints": [
+        "src/core/read.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "resolve",
+          "realpath",
+          "outside",
+          "root"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "name": "code-map diverse retrieval scenarios",
+  "version": 1,
+  "tasks": [
+    {
+      "id": "known-batch-mcp-contract",
+      "category": "known-batch",
+      "scenario": "known-batch-multi-symbol",
+      "prompt": "Summarize the MCP read tool schema and dispatch validation. Mention single vs batch refs, mutual exclusion, the batch cap, and the shape of the returned batch output.",
+      "mapRefs": [
+        "src/mcp/server.ts#TOOLS",
+        "src/mcp/server.ts#dispatch"
+      ],
+      "nativeHints": [
+        "src/mcp/server.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "ref",
+          "refs",
+          "64"
+        ],
+        "requiredRegex": [
+          "(not both|mutual|exclusive|exactly one)"
+        ]
+      }
+    },
+    {
+      "id": "known-single-read-drift",
+      "category": "known-single",
+      "scenario": "known-single-symbol",
+      "prompt": "Explain what readCore does when a file token is fresh, when the signature anchor relocates once, and when the anchor is lost.",
+      "mapRefs": [
+        "src/core/read.ts#readCore"
+      ],
+      "nativeHints": [
+        "src/core/read.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "exact",
+          "relocated",
+          "anchor-lost"
+        ]
+      }
+    },
+    {
+      "id": "known-cross-file-index-load",
+      "category": "known-cross-file",
+      "scenario": "known-cross-file",
+      "prompt": "Explain how the MCP server reloads the map index and how loadIndex parses it. Include what is compared to decide whether a reload is needed.",
+      "mapRefs": [
+        "src/mcp/server.ts#ensureFresh",
+        "src/core/store.ts#loadIndex"
+      ],
+      "nativeHints": [
+        "src/mcp/server.ts",
+        "src/core/store.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "mtime",
+          "size",
+          "loadIndex"
+        ]
+      }
+    },
+    {
+      "id": "discovery-python-backend",
+      "category": "discovery-needed",
+      "scenario": "lexical-discovery-first",
+      "prompt": "Find where Python files are extracted into map entries. Explain which backend is used and how it returns symbol records to the TypeScript indexer.",
+      "nativeHints": [
+        "src/core/build-index.ts",
+        "src/core/extract-symbols.ts",
+        "src/py/extract.py"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "Python",
+          "extract.py",
+          "ast"
+        ]
+      }
+    },
+    {
+      "id": "file-wide-cli-flow",
+      "category": "file-wide-context",
+      "scenario": "file-wide-cli",
+      "prompt": "Describe the public CLI subcommands and the index/read/stats flow in src/cli/main.ts.",
+      "mapRefs": [
+        "src/cli/main.ts#USAGE",
+        "src/cli/main.ts#main"
+      ],
+      "nativeHints": [
+        "src/cli/main.ts"
+      ],
+      "expected": {
+        "requiredSubstrings": [
+          "index",
+          "read",
+          "stats"
+        ]
+      }
+    }
+  ]
+}

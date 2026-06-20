@@ -76,6 +76,20 @@ async function main(): Promise<void> {
     }
 
     case 'read': {
+      // Batch: --refs "a,b,c" reads several independent symbols in one invocation (mirrors the
+      // MCP `refs` array) — one process, many slices, instead of N separate calls.
+      if (typeof flags.refs === 'string') {
+        const idx = loadIndex(indexPath);
+        const refs = [...new Set(flags.refs.split(',').map((s) => s.trim()).filter(Boolean))].slice(0, 64);
+        const results = refs.map((rf) => read(idx, rf, {}));
+        if (json) return void console.log(JSON.stringify({ results }, null, 2));
+        for (const r of results) {
+          console.log(`# ${r.id}  [${r.status}]  ${r.file}:${r.line}${r.endLine ? `-${r.endLine}` : ''}`);
+          if (r.note) console.log(`# note: ${r.note}`);
+          if (r.raw != null) { console.log('---'); console.log(r.raw); }
+        }
+        return;
+      }
       const ref = _.slice(1).join(' ');
       if (!ref) die('read needs an <id|query>.');
       const idx = loadIndex(indexPath);

@@ -194,20 +194,33 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
 ```
 
 **The efficiency win needs adoption.** Agents won't pick code-map over grep on their own
-(measured: ~17%). Two wirings reach **100% reliable** use — pick one:
+(measured: ~17%). Wirings that reach **100% reliable** use — pick one:
 
-- **A skill (zero per-project setup):** drop a `code-map` skill into `~/.codex/skills/` and
-  Codex self-routes everywhere. Costs a one-time skill-load per session.
+- **The bundled plugin/skill (recommended):** this repo ships the routing skill at
+  `skills/code-map-retrieval/` with a `.claude-plugin/plugin.json` manifest, so it installs
+  as a plugin and self-routes everywhere.
   ```bash
-  mkdir -p ~/.codex/skills/code-map
-  curl -sL https://raw.githubusercontent.com/annyeong844/code-map-bench/main/integrations/codex-skill/SKILL.md \
-    -o ~/.codex/skills/code-map/SKILL.md
+  grok plugin install annyeong844/map          # Grok (or a local path)
+  claude plugin install annyeong844/map         # Claude Code
+  # any host: copy skills/code-map-retrieval/SKILL.md into ~/.codex/skills/ (or .grok/.claude)
   ```
+  It carries the **discovery double-call guard** — for discovery, grep and *stop*; don't add a
+  `read` on top — which a 3-arm benchmark showed flips discovery from a loss to a win.
 - **An `AGENTS.md` line (per-repo, zero load cost):** see `bench/codex-headless/AGENTS.code-map.md`.
+- **Antigravity / Gemini:** Antigravity reads rules from `GEMINI.md` (global `~/.gemini/GEMINI.md`
+  or workspace) and `AGENTS.md`. This repo ships a ready `GEMINI.md` — copy it into your global
+  `~/.gemini/GEMINI.md` (or a workspace) for the routing. Wire the MCP via the IDE's
+  **Manage MCP Servers → View raw config** (`~/.gemini/config/mcp_config.json`):
+  ```jsonc
+  { "mcpServers": { "code-map": { "command": "map-mcp" } } }
+  ```
+  On Windows + WSL, install code-map with the *Windows* Node (≥23.6) so `map-mcp` is a native
+  command (`{ "command": "cmd", "args": ["/d","/c","map-mcp"] }`); it reads the same repo files.
 
 Either says, in effect: *"read known symbols via code-map `read` (batch independent refs in
-one call); use grep only to discover."* The MCP server also self-advertises this at startup
-(raises the no-config baseline), but a project/skill directive is what makes it reliable.
+one call); use grep only to discover, and don't double-fetch."* The MCP server also
+self-advertises this at startup (raises the no-config baseline), but a plugin/skill/rule
+directive is what makes it reliable.
 
 </details>
 

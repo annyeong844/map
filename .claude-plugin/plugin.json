@@ -1,0 +1,21 @@
+{
+  "name": "code-map",
+  "version": "0.1.0",
+  "description": "Token-efficient, drift-resistant code reads. grep finds, code-map read reads. Ships the code-map retrieval-routing skill that prevents the discovery double-call (grep to find AND read on top).",
+  "license": "MIT",
+  "repository": "https://github.com/annyeong844/map",
+  "homepage": "https://github.com/annyeong844/map#readme",
+  "keywords": [
+    "code-map",
+    "retrieval",
+    "mcp",
+    "code-navigation",
+    "claude-code-plugin",
+    "codex",
+    "grok",
+    "skill"
+  ],
+  "skills": [
+    "./skills/code-map-retrieval"
+  ]
+}

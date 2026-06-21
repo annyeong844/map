@@ -288,10 +288,26 @@ const NOTE: Record<string, string> = {
   implementations: 'Implementations via ENGINE (type-aware CHA) — the concrete classes/methods behind an interface/abstract; the over-approximate set that is sound for blast radius.',
 };
 
+/** Cross-platform path bridge: accept BOTH WSL (`/mnt/c/...`) and Windows
+ * (`C:\...`) paths no matter which OS this server runs on, so ONE server (e.g. a
+ * fast win32 tsgo) can serve a Windows IDE and WSL agents (over interop) alike —
+ * same files on disk, different path spelling. */
+function toHostPath(p: unknown): any {
+  if (typeof p !== 'string' || !p) return p;
+  if (process.platform === 'win32') {
+    const m = /^\/mnt\/([a-zA-Z])\/(.*)$/.exec(p);
+    return m ? `${m[1].toUpperCase()}:\\${m[2].replace(/\//g, '\\')}` : p;
+  }
+  const m = /^([a-zA-Z]):[\\/](.*)$/.exec(p);
+  return m ? `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}` : p;
+}
+
 /** One query path for all three tools: resolve a position, gate on the cache, else
  * ask the warm tsgo session (references / definition / implementation), format. */
 async function query(tool: string, args: Record<string, any>): Promise<unknown> {
   if (!args.file) return { error: `${tool} needs \`file\` (and \`name\` or line/character).` };
+  args.file = toHostPath(args.file);
+  if (args.root) args.root = toHostPath(args.root);
   const file = isAbsolute(args.file) ? args.file : resolve(args.root ?? process.cwd(), args.file);
   if (!existsSync(file)) return { error: `file not found: ${file}` };
   const lang = langOf(file);

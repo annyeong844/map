@@ -209,6 +209,19 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
 쓰고 이중 fetch 금지."* MCP 서버도 시작 시 이를 스스로 광고하지만(무설정 baseline↑), *신뢰성*은
 plugin/skill/규칙 지시가 줍니다.
 
+**참조(선택, 타입-인지): `code-oracle`도 wire.** *호출자/정의/구현*은 스킬이 형제 `code-oracle`
+(tsgo=TS/JS, ty=Python, checker-grade)로 escalate해요. 코어를 zero-dep로 두려고 분리된 별도 MCP라,
+스킬이 닿을 곳에 배선하세요:
+
+```bash
+codex  mcp add code-oracle -- node /abs/path/to/map/code-oracle/server.ts
+claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/server.ts
+```
+
+tsgo 세션을 1회 워밍(~수초~20s, 레포 크기별)하니 스킬은 값어치 있을 때만(큰 레포·충돌 이름) 호출해요.
+네이티브 바이너리는 플랫폼별 — **WSL Node 설치본은 Windows-네이티브 클라이언트가 못 띄워요**(호스트
+자체 Node로 설치하거나 WSL로 브리지).
+
 </details>
 
 <details>

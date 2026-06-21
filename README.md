@@ -224,6 +224,19 @@ one call); use grep only to discover, and don't double-fetch."* The MCP server a
 self-advertises this at startup (raises the no-config baseline), but a plugin/skill/rule
 directive is what makes it reliable.
 
+**References (optional, type-aware): wire `code-oracle` too.** For *who-calls / definition /
+implementations* the skill escalates to the sibling `code-oracle` (tsgo for TS/JS, ty for Python,
+checker-grade). It's a separate MCP (kept out of the zero-dep core); wire it where the skill can reach it:
+
+```bash
+codex  mcp add code-oracle -- node /abs/path/to/map/code-oracle/server.ts
+claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/server.ts
+```
+
+It warms a tsgo session once (~seconds–20s by repo size), so the skill only calls it when it pays
+(large repo / colliding name). Native binary is per-platform: a WSL Node install can't be launched by
+a *Windows*-native client — install `code-oracle` with the host's own Node (or bridge through WSL).
+
 </details>
 
 <details>

@@ -1,0 +1,18 @@
+{
+  "name": "code-map",
+  "description": "code-map — token-efficient, drift-resistant code reads (grep finds, read reads).",
+  "owner": {
+    "name": "annyeong844",
+    "url": "https://github.com/annyeong844/map"
+  },
+  "plugins": [
+    {
+      "name": "code-map",
+      "description": "Token-efficient, drift-resistant code reads. grep finds, code-map read reads. Ships the retrieval-routing skill that prevents the discovery double-call (grep to find AND read on top).",
+      "category": "tools",
+      "source": "./",
+      "homepage": "https://github.com/annyeong844/map",
+      "keywords": ["code-map", "retrieval", "mcp", "code-navigation", "skill"]
+    }
+  ]
+}

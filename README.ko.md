@@ -85,38 +85,6 @@ claude mcp add code-map --scope user -- map-mcp   # Claude Code
 
 ---
 
-## 비교 — Serena
-
-가장 잘 알려진 인접 도구가 [**Serena**](https://github.com/oraios/serena)라 정직하게 견줘봅니다.
-둘은 **같은 도구가 아니라 다른 베팅**이고, 이건 기능·철학 비교지 **헤드투헤드 벤치마크가 아니에요**
-(code-map 수치는 `grep`+에이전트와 순진한 baseline 대비지, Serena 대비가 아님).
-
-| | **code-map** | **Serena** |
-|---|---|---|
-| 정체 | grep 옆에 붙는 얇은 **드리프트-안전 좌표 캐시**(`read`) | 완전한 **LSP "에이전트용 IDE"** |
-| 핵심 베팅 | *좌표지 의미가 아니다* — grep이 찾고 `read`가 읽고 LLM이 raw 해석 | 풍부한 시맨틱 추상(심볼 트리·참조·리팩터) |
-| 도구 수 | **1개** (`read`; 편집은 `aim`; `code-oracle`는 별도 형제) | **~25개** (find_symbol, find_referencing_symbols, get_symbols_overview, replace_symbol_body, rename/move/inline, search_for_pattern, memories …) |
-| 찾기/참조 | 단순 찾기→**grep**; **호출자/정의/구현→`code-oracle`**(타입-인지 형제: `callers`/`definition`/`implementations`, **tsgo**=TS/JS + **ty**=Python, checker-grade) — 스킬이 레포 크기·이름 충돌도로 켬 | **네이티브** find_symbol / find_referencing_symbols / find_implementations (LSP) |
-| 편집 | `aim`: 드리프트-안전 **패치 타겟팅**(스니펫→현재 char 범위) | 심볼 단위: replace_symbol_body, insert_before/after, safe_delete |
-| 언어 | TS/JS **+ Python** (oxc AST) | **40+** (언어서버, 또는 유료 JetBrains) |
-| 설치/비용 | `map index`(~ms), **의존성 1개, LSP 없음, 워밍업 없음** | uv + **언어서버**(언어별 의존성·워밍업), 프로젝트 init/온보딩 |
-| 드리프트 | **stale 좌표 재앵커 → 처닝에도 silent 0** (차별점) | 라이브 LSP=항상 최신(캐시가 없으니 드리프트도 없음; LSP는 떠 있어야 함) |
-| 컨텍스트 부담 | 도구 정의 **1개** | 도구 정의 다수 — 풍부하지만 프롬프트가 무거움 |
-
-**정직한 결론:** Serena가 **더 넓고 강력**해요 — 진짜 시맨틱 내비게이션, 교차파일 참조, 리팩터,
-40+ 언어 (라이브 언어서버 덕분). *에이전트용 IDE*를 원하면 Serena가 더 많이 합니다. **code-map은
-의도적으로 좁아요**: 드리프트-안전 `read` 하나, LSP 0, 즉시, TS/JS+Python. 강점은 **처닝 속 무결성
-보장**(좌표를 턴 너머 재사용 — 재앵커 또는 거부, 절대 틀린 바이트 안 줌)과 **거의 0인 오버헤드**(언어서버
-없음, 도구 1개). Serena가 확실히 앞서는 단 한 곳 — 시맨틱 **참조** — 이 바로 형제 **`code-oracle`**이
-답하는 지점이에요: **tsgo**(TS/JS)·**ty**(Python) 위의 타입-인지 `callers`/`definition`/`implementations`,
-checker-grade, 그리고 라우팅 스킬이 **판단으로** 켜요(큰 레포·충돌 이름→oracle; 작은 레포·distinctive→grep).
-tsgo는 *네이티브* TS 컴파일러라 TS/JS에선 빨라요. 즉 실제 그림은: **Serena** = 40+ 언어에 항상 켜진 넓은
-LSP 툴킷; **code-map(+code-oracle)** = 드리프트-안전한 얇은 `read` + 값어치 있을 때만 켜는 타입-인지 참조
-엔진(TS/JS 우선, Python은 ty가 intra-file만이라 부분적). **항상 켜진 넓이**면 Serena, **린하고 드리프트-안전한
-코어 + 필요시 checker-grade 참조로 escalate**면 code-map — 충돌 안 하니 같이 써도 됩니다.
-
----
-
 ## 유일한 도구: `read`
 
 ```bash

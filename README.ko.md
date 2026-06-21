@@ -219,8 +219,9 @@ claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/ser
 ```
 
 tsgo 세션을 1회 워밍(~수초~20s, 레포 크기별)하니 스킬은 값어치 있을 때만(큰 레포·충돌 이름) 호출해요.
-네이티브 바이너리는 플랫폼별 — **WSL Node 설치본은 Windows-네이티브 클라이언트가 못 띄워요**(호스트
-자체 Node로 설치하거나 WSL로 브리지).
+**크로스플랫폼:** code-oracle가 `/mnt/c/…` ↔ `C:\…` 경로를 정규화해서 **서버 하나가 Windows IDE와
+WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** 빌드가 WSL 클라이언트까지 담당해
+`/mnt/c` drvfs 페널티를 피함(같은 레포 ~38s → ~4s).
 
 </details>
 

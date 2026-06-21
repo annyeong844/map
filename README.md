@@ -234,8 +234,9 @@ claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/ser
 ```
 
 It warms a tsgo session once (~seconds–20s by repo size), so the skill only calls it when it pays
-(large repo / colliding name). Native binary is per-platform: a WSL Node install can't be launched by
-a *Windows*-native client — install `code-oracle` with the host's own Node (or bridge through WSL).
+(large repo / colliding name). **Cross-platform:** code-oracle normalizes `/mnt/c/…` ↔ `C:\…` paths,
+so *one* server serves both a Windows IDE and WSL agents (over interop) — e.g. a fast **win32** build
+can serve WSL clients too, dodging the `/mnt/c` drvfs penalty (~38s → ~4s on the same repo).
 
 </details>
 

@@ -34,13 +34,15 @@ small, exact, drift-proof. That's the whole idea.
 | | |
 |---|---|
 | 🎯 **Never silently wrong** | After heavy edits with no re-index, `read` re-anchors on the signature line: **0 silently-wrong bytes** (a naive "line number" cache is ~100% wrong). It returns the right code or tells you it can't — never the wrong bytes. |
-| ⚡ **Fewer tokens, fewer steps** | Wired into a coding agent (codex, 150-task pass@30, real plugin run): **−19% tokens, −67% shell commands, same success rate.** Strongest reading *known* symbols across files (−44% wall-clock there). |
-| 🧩 **Tiny & drop-in** | Node + **one** dependency (`oxc-parser`), no build step. TS/JS **and** Python. Add it as an MCP server and go. |
+| ⚡ **Fewer tokens, fewer steps** | Wired into a coding agent (codex, 150-task pass@30): **−19% tokens, −67% shell commands, same success rate.** On **known-ref** reads the cut is much larger — grok composer-2.5-fast, 30 passes: **−53…−60% tokens, −71…−78% retrieval payload**; codex with the routing skill: **−34…−54%**. |
+| 🧭 **Routing is the lever** | Agents won't reach for `read` on their own (~17%). The bundled **plugin/skill** makes them: it flips discovery from a *loss* to **−31%** by killing the double-call, and turns vague usage (erratic, **+61%** worse on one task) into a steady win — **30/30 pass**. |
+| 🧩 **Tiny & drop-in** | Node + **one** dependency (`oxc-parser`), no build step. TS/JS **and** Python. MCP server + a one-line skill — install for Claude, Codex, grok, or Antigravity. |
 
 > **Honest about the edges** (this repo's whole point): code-map does **not** beat `grep` at
-> *searching* — it ties, so keep grepping. And it's **not** a magic token-saver everywhere —
-> the win is real for reading known symbols and fades (or reverses) on discovery-heavy tasks
-> or an already-lean agent. Every number, every retraction, and a one-command verifier:
+> *searching* — it ties, so keep grepping. And it's **not** a universal token-saver — the win
+> is large for reading *known* symbols **with routing**, ~0 on an already-lean read task, and a
+> *loss* on raw discovery unless the skill routes it. Every number, every retraction, the
+> model/metric caveats, and a one-command verifier:
 > **[code-map-bench](https://github.com/annyeong844/code-map-bench)**.
 
 **TL;DR — grep finds, `read` reads.**

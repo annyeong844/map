@@ -81,7 +81,16 @@ function computeAim(index: MapIndex, entry: MapEntry, snippet: string): ReadResu
 
   const local = indexOfAll(text.slice(lo, hi), snippet);
   if (!local.length) return { status: 'not-in-symbol', matches: [] };
-  const matches = local.map((o) => ({ line: lineAt(text, lo + o), charStart: lo + o, charEnd: lo + o + snippet.length }));
+  // `local` offsets are ascending, so walk a single cursor forward instead of
+  // re-scanning from offset 0 per match — O(span + M) rather than O(M · offset)
+  // (matters only when a snippet matches many times inside a deep-in-file symbol).
+  let cursor = lo;
+  let line = lineAt(text, lo); // seed the symbol's start line once
+  const matches = local.map((o) => {
+    const at = lo + o;
+    for (; cursor < at; cursor++) if (text.charCodeAt(cursor) === 10 /* \n */) line++;
+    return { line, charStart: at, charEnd: at + snippet.length };
+  });
   return { status: matches.length > 1 ? 'ambiguous' : 'hit', matches };
 }
 

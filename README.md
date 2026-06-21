@@ -87,6 +87,38 @@ when you re-index — no reconnect.
 
 ---
 
+## How it compares — Serena
+
+[**Serena**](https://github.com/oraios/serena) is the closest well-known tool, so here's the
+honest contrast. They're **different bets, not the same tool** — and this is a feature/philosophy
+comparison, **not a head-to-head benchmark** (code-map's numbers are vs `grep`+agent and a naive
+baseline, not vs Serena).
+
+| | **code-map** | **Serena** |
+|---|---|---|
+| What it is | a thin **drift-safe coordinate cache** (`read`) that rides alongside grep | a full **LSP "IDE for your agent"** |
+| Core bet | *coordinates, not meaning* — grep finds, `read` reads, the LLM interprets raw | rich semantic abstractions (symbol tree, references, refactors) |
+| Tools | **1** (`read`; `aim` for edit-targeting; `code-oracle` is a separate sibling) | **~25** (find_symbol, find_referencing_symbols, get_symbols_overview, replace_symbol_body, rename/move/inline, search_for_pattern, memories, …) |
+| Find / references | **defers to grep**; type-confirmed callers via the separate `code-oracle` (tsgo) | **native** find_symbol / find_referencing_symbols / find_implementations (LSP) |
+| Editing | `aim`: drift-safe **patch targeting** (snippet → current char range) | symbol-level: replace_symbol_body, insert_before/after, safe_delete |
+| Languages | TS/JS **+ Python** (oxc AST) | **40+** via language servers (or JetBrains, paid) |
+| Setup / cost | `map index` (~ms), **1 dep, no LSP, no warmup** | uv + **language servers** (per-lang deps, warmup), project init/onboarding |
+| Drift | **re-anchors stale coordinates → 0 silent at churn** (the differentiator) | live LSP = always current (no cache to drift; needs the LSP running) |
+| Context footprint | **one** tool def | many tool defs — richer, but a heavier prompt |
+
+**The honest read:** Serena is **broader and more capable** — genuine semantic navigation, cross-file
+references, refactoring, 40+ languages — because it rides live language servers. If you want an *IDE
+for your agent*, Serena does more. **code-map is deliberately narrow**: one drift-safe `read`, zero
+LSP, instant, TS/JS+Python. Its edges are the **integrity guarantee under churn** (reuse a coordinate
+across turns — it re-anchors or refuses, never returns wrong bytes) and **near-zero overhead** (no
+language servers, one tool def). They even overlap politely: code-map punts *search/references* to
+grep (and tsgo for type-confirmed callers), exactly where Serena leans on the LSP. **Pick Serena** for
+breadth and semantic power across many languages; **pick code-map** for a thin, drift-safe, zero-setup
+read layer (especially TS/JS/Python) that rides alongside grep — and run both if you like; they don't
+conflict.
+
+---
+
 ## The one tool: `read`
 
 ```bash

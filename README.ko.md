@@ -34,13 +34,14 @@ code-map이 옆에 있으면 에이전트는 그냥:
 | | |
 |---|---|
 | 🎯 **조용히 틀리지 않음** | 대량 편집 후 재인덱싱 없이도 `read`는 시그니처 줄로 재앵커링: **조용히-틀린 바이트 0개** (순진한 "줄번호" 캐시는 ~100% 틀림). 맞는 코드를 주거나 *못 준다고 말할 뿐*, 절대 엉뚱한 바이트를 안 줍니다. |
-| ⚡ **토큰·단계 절감** | 코딩 에이전트에 배선 시(codex, 150-태스크 pass@30, 실 plugin 실행): **토큰 −19%, 셸 명령 −67%, 성공률 동일.** 파일에 흩어진 *기지(known)* 심볼 읽기에서 가장 강함(거기선 시간 −44%). |
-| 🧩 **가볍고 drop-in** | Node + 의존성 **1개**(`oxc-parser`), 빌드 단계 없음. TS/JS **그리고** Python. MCP 서버로 붙이면 끝. |
+| ⚡ **토큰·단계 절감** | 코딩 에이전트 배선 시(codex, 150-태스크 pass@30): **토큰 −19%, 셸 명령 −67%, 성공률 동일.** *기지(known) ref* 읽기에선 절감폭이 훨씬 큼 — grok composer-2.5-fast 30패스: **토큰 −53~60%, 검색 페이로드 −71~78%**; codex+라우팅 skill: **−34~54%**. |
+| 🧭 **라우팅이 레버** | 에이전트는 스스로 `read`를 잘 안 씀(~17%). 동봉 **plugin/skill**이 그걸 시킴: discovery를 *손해*에서 **−31%**로 뒤집고(이중호출 제거), 들쭉날쭉한 사용(한 시나리오 **+61%** 손해)을 안정적 승리로(**30/30 pass**). |
+| 🧩 **가볍고 drop-in** | Node + 의존성 **1개**(`oxc-parser`), 빌드 단계 없음. TS/JS **그리고** Python. MCP 서버 + 한 줄 skill — Claude·Codex·grok·Antigravity에 설치. |
 
 > **경계에 대해 정직하게** (이 레포의 핵심): code-map은 *검색*에서 `grep`을 못 이깁니다 —
-> 동급이라 grep은 그냥 쓰세요. 그리고 *어디서나* 토큰을 줄이는 마법도 아닙니다 — 기지 심볼
-> 읽기에선 진짜 이득이고, 발견(discovery) 중심 과제나 이미 효율적인 에이전트에선 줄거나
-> 역전됩니다. 모든 수치·철회·1-커맨드 검증기는
+> 동급이라 grep은 그냥 쓰세요. 그리고 *어디서나* 토큰을 줄이는 마법도 아닙니다 — 기지 ref
+> 읽기에선 **라우팅과 함께** 크게 이득, 이미 린한 read 과제에선 ~0, 순수 discovery에선
+> skill이 라우팅하지 않으면 *손해*. 모든 수치·철회·모델/지표 주의·1-커맨드 검증기는
 > **[code-map-bench](https://github.com/annyeong844/code-map-bench)** 에 있어요.
 
 **한 줄 요약 — grep은 찾고, `read`는 읽는다.**
@@ -81,6 +82,34 @@ claude mcp add code-map --scope user -- map-mcp   # Claude Code
 - 더 나은 *검색*을 원함 — `grep`/ripgrep이 이미 동급, code-map은 *읽기*용
 - 파일 1~2개짜리 프로젝트 — 읽기 절감이 안 보임
 - "auth는 어디서 처리되지?" 같은 개념 검색 — 그건 임베딩(여기선 *측정된* 비-목표)
+
+---
+
+## 비교 — Serena
+
+가장 잘 알려진 인접 도구가 [**Serena**](https://github.com/oraios/serena)라 정직하게 견줘봅니다.
+둘은 **같은 도구가 아니라 다른 베팅**이고, 이건 기능·철학 비교지 **헤드투헤드 벤치마크가 아니에요**
+(code-map 수치는 `grep`+에이전트와 순진한 baseline 대비지, Serena 대비가 아님).
+
+| | **code-map** | **Serena** |
+|---|---|---|
+| 정체 | grep 옆에 붙는 얇은 **드리프트-안전 좌표 캐시**(`read`) | 완전한 **LSP "에이전트용 IDE"** |
+| 핵심 베팅 | *좌표지 의미가 아니다* — grep이 찾고 `read`가 읽고 LLM이 raw 해석 | 풍부한 시맨틱 추상(심볼 트리·참조·리팩터) |
+| 도구 수 | **1개** (`read`; 편집은 `aim`; `code-oracle`는 별도 형제) | **~25개** (find_symbol, find_referencing_symbols, get_symbols_overview, replace_symbol_body, rename/move/inline, search_for_pattern, memories …) |
+| 찾기/참조 | **grep에 위임**; 타입-확인 호출자는 별도 `code-oracle`(tsgo) | **네이티브** find_symbol / find_referencing_symbols / find_implementations (LSP) |
+| 편집 | `aim`: 드리프트-안전 **패치 타겟팅**(스니펫→현재 char 범위) | 심볼 단위: replace_symbol_body, insert_before/after, safe_delete |
+| 언어 | TS/JS **+ Python** (oxc AST) | **40+** (언어서버, 또는 유료 JetBrains) |
+| 설치/비용 | `map index`(~ms), **의존성 1개, LSP 없음, 워밍업 없음** | uv + **언어서버**(언어별 의존성·워밍업), 프로젝트 init/온보딩 |
+| 드리프트 | **stale 좌표 재앵커 → 처닝에도 silent 0** (차별점) | 라이브 LSP=항상 최신(캐시가 없으니 드리프트도 없음; LSP는 떠 있어야 함) |
+| 컨텍스트 부담 | 도구 정의 **1개** | 도구 정의 다수 — 풍부하지만 프롬프트가 무거움 |
+
+**정직한 결론:** Serena가 **더 넓고 강력**해요 — 진짜 시맨틱 내비게이션, 교차파일 참조, 리팩터,
+40+ 언어 (라이브 언어서버 덕분). *에이전트용 IDE*를 원하면 Serena가 더 많이 합니다. **code-map은
+의도적으로 좁아요**: 드리프트-안전 `read` 하나, LSP 0, 즉시, TS/JS+Python. 강점은 **처닝 속 무결성
+보장**(좌표를 턴 너머 재사용 — 재앵커 또는 거부, 절대 틀린 바이트 안 줌)과 **거의 0인 오버헤드**(언어서버
+없음, 도구 1개). 겹치는 부분도 정중해요 — code-map은 *검색/참조*를 grep(과 타입-확인은 tsgo)에 넘기는데,
+거기가 바로 Serena가 LSP에 기대는 지점이죠. **넓이·시맨틱 파워·다언어**면 Serena, **얇고 드리프트-안전·무설정
+read 레이어**(특히 TS/JS/Python)면 code-map — 둘은 충돌 안 하니 같이 써도 됩니다.
 
 ---
 
@@ -190,20 +219,23 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
 ```
 
 **효율 이득엔 *채택*이 필요해요.** 에이전트는 스스로 grep 대신 code-map을 안 골라요
-(측정: ~17%). **100% 신뢰** 채택을 주는 배선 두 가지 — 택1:
+(측정: ~17%). **100% 신뢰** 채택을 주는 배선 — 택1:
 
-- **skill (프로젝트별 설정 0):** `~/.codex/skills/`에 `code-map` skill을 두면 Codex가
-  어디서나 자동 라우팅. 세션당 1회 skill-load 비용.
+- **동봉 plugin/skill (권장):** 이 레포가 `skills/code-map-retrieval/`에 라우팅 skill을
+  `.claude-plugin/plugin.json` 매니페스트와 함께 동봉해 plugin으로 설치돼요.
   ```bash
-  mkdir -p ~/.codex/skills/code-map
-  curl -sL https://raw.githubusercontent.com/annyeong844/code-map-bench/main/integrations/codex-skill/SKILL.md \
-    -o ~/.codex/skills/code-map/SKILL.md
+  grok plugin install annyeong844/map          # Grok (또는 로컬 경로)
+  claude plugin install code-map@code-map        # Claude Code (marketplace add 후)
+  codex plugin add code-map@code-map             # Codex (marketplace add 후)
+  # Antigravity: GEMINI.md를 ~/.gemini/GEMINI.md(전역) 또는 워크스페이스에 복사
   ```
+  **discovery 이중호출 가드** 포함 — 발견은 grep으로 하고 *멈춰라*, 위에 `read` 얹지 마라 —
+  3-arm 벤치에서 discovery를 손해→승리로 뒤집은 그 규칙이에요.
 - **`AGENTS.md` 한 줄 (레포별, 로드 비용 0):** `bench/codex-headless/AGENTS.code-map.md` 참고.
 
 둘 다 결국: *"기지 심볼은 code-map `read`로 읽어라(독립 ref는 한 콜에 batch); grep은 발견에만
-써라."* MCP 서버도 시작 시 이를 스스로 광고하지만(무설정 baseline↑), *신뢰성*은 프로젝트/skill
-지시가 줍니다.
+쓰고 이중 fetch 금지."* MCP 서버도 시작 시 이를 스스로 광고하지만(무설정 baseline↑), *신뢰성*은
+plugin/skill/규칙 지시가 줍니다.
 
 </details>
 

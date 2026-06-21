@@ -1,20 +1,34 @@
 # code-map
 
-**좌표만 정밀하게. 의미는 LLM이 raw를 보고 매번 새로 판정한다.**
+**Hand your AI agent the exact slice of code it needs — by coordinate, not by guessing.**
+*좌표만 정밀하게. 의미는 LLM이 raw를 보고 매번 새로 판정한다.*
 
-A **drift-safe coordinate cache**: hand it a symbol's coordinate and `read` returns
-that symbol's exact slice — re-anchoring on the signature line when the file has
-changed, so a **stale coordinate never silently returns the wrong bytes** (measured: 0
-silent at heavy churn scale; a naive line-cache is ~100 % wrong). It stores
-**coordinates, never meaning** — the consumer judges the raw bytes fresh, every time.
+code-map is a tiny, drift-safe code index with **one tool: `read`**. Your agent uses its
+normal `grep` to *find* things; code-map hands back the **exact symbol slice** — cheaply,
+and still correct even after the file moved underneath it. It stores **coordinates, never
+meaning**, so there's nothing to keep "up to date" — the model reads the raw bytes and
+judges them fresh, every time.
 
-code-map is deliberately small: **one tool, `read`.** Search with your normal `grep`;
-reuse a symbol's coordinate across turns and `read` keeps it honest (and lands it in
-fewer agent turns than grep-then-read).
+### What you actually get — measured, not promised
+
+| | |
+|---|---|
+| 🎯 **Never silently wrong** | After heavy edits with no re-index, `read` re-anchors on the signature line: **0 silently-wrong bytes** (a naive "line number" cache is ~100% wrong). It returns the right code or tells you it can't — never the wrong bytes. |
+| ⚡ **Fewer tokens, fewer steps** | Wired into a coding agent (codex, 150-task pass@30, real plugin run): **−19% tokens, −67% shell commands, same success rate.** Strongest when reading *known* symbols across files (−44% wall-clock there). |
+| 🧩 **Tiny & drop-in** | Node + one dependency (`oxc-parser`), no build step. TS/JS **and** Python. Add it as an MCP server and go. |
+
+> **Honest about the edges** (this repo's whole point): code-map does **not** beat `grep` at
+> *searching* — it ties, so don't replace grep with it. And it's **not** a magic token-saver
+> everywhere — the win is real when reading known symbols, and fades (or reverses) on
+> discovery-heavy tasks or an already-lean agent. Every number, every retraction, and a
+> one-command verifier live in **[code-map-bench](https://github.com/annyeong844/code-map-bench)**.
+
+**TL;DR — grep finds, `read` reads.** code-map makes the *read* small, drift-proof, and cheap.
+[Jump to install →](#install)
 
 ---
 
-## What this is — and what the measurements say it isn't
+## The honest scorecard — what the measurements say it is, and isn't
 
 This started broad (locate, grep, graph, hotspots, semantic search) and was then
 **benchmarked honestly against `grep` + a strong agent** (Sonnet/Opus, headless, on

@@ -1,0 +1,19 @@
+{
+  "name": "code-map",
+  "interface": {
+    "displayName": "code-map"
+  },
+  "plugins": [
+    {
+      "name": "code-map",
+      "source": {
+        "source": "local",
+        "path": "./plugins/code-map"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

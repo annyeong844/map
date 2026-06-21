@@ -1,15 +1,28 @@
 {
   "name": "code-map",
   "version": "0.1.0",
-  "description": "Token-efficient, drift-resistant code reads. grep finds, code-map read reads. Ships the retrieval-routing skill that prevents the discovery double-call (grep to find AND read on top).",
-  "license": "MIT",
+  "description": "Token-efficient, drift-resistant code reads. grep finds, code-map read reads.",
+  "author": {
+    "name": "annyeong844"
+  },
   "repository": "https://github.com/annyeong844/map",
-  "homepage": "https://github.com/annyeong844/map#readme",
+  "license": "MIT",
   "keywords": ["code-map", "retrieval", "mcp", "code-navigation", "codex", "skill"],
   "skills": "./skills/",
   "interface": {
     "displayName": "code-map",
     "shortDescription": "grep finds, code-map read reads — token-efficient, drift-resistant reads.",
-    "category": "Tools"
+    "longDescription": "code-map ships a retrieval-routing skill: read known symbols with code-map read (batch independent refs in one call), use grep only to discover, and never double-fetch (grep to find AND read on top). Reading known symbols is the win; the routing keeps discovery a win too.",
+    "developerName": "annyeong844",
+    "category": "Productivity",
+    "capabilities": [
+      "Token-efficient retrieval",
+      "Drift-resistant reads"
+    ],
+    "defaultPrompt": [
+      "Read these symbols with code-map.",
+      "Where is X defined?",
+      "Refresh my working set after these edits."
+    ]
   }
 }

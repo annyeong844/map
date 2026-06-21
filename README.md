@@ -31,7 +31,7 @@ baseline* — is the point.
 | **Caller precision** (`code-oracle`, separate) | **31% fewer files to read** for blast-radius (40–75% on common/colliding names); grep can't say *which* class's method, the type checker can. LSP-warmup cost → a separate sibling. | **kept (sibling)** |
 | **Read — turns** (`read`) | **Win (K=30, CI clear of 0).** −25–30% agent *turns* at N=6, both models. | **kept** |
 | **Read — single-read tokens** (`read`) | **Retracted.** The K=5 "−16–35% tokens" was noise; *single* read at K=30 ~0 (Opus −11%, worse). | corrected |
-| **Read — `refs` batch tokens** (`read`) | **Win, wired & model-dependent.** Batch many known symbols in one call → **−30% logical / −26% cost / −72% turns vs grep on codex** (corrected metric incl. cache_read); ~−30% Sonnet; **a loss on Opus** (native read already lean). The cut tracks the symbols' *grep-noise*, not count. | **kept** |
+| **Read — `refs` batch tokens** (`read`) | **Win, wired & task-dependent.** Pass@30, 150 tasks, real plugin env (codex): **−18.6% effective tokens, −67% shell commands, tied pass@30, 0 MCP fails.** Biggest where it fully replaces grep (known-cross-file −25% tokens / −44% time); a wash/slower where it only supplements (discovery, multi-symbol batch). Single read-heavy task: up to −30% wired / −55% forced. **A loss on Opus** (native already lean). | **kept** |
 | **Search / semantic / light call-graph** | Tie or lose to `grep` (search ties; embeddings rejected 3 ways; structural graph loses on recall). | removed |
 
 So code-map is, honestly: **a guess-free coordinate layer that stays correct under

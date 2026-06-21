@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
 import { locate } from '../src/core/locate.ts';
-import { read } from '../src/core/read.ts';
+import { changed, read } from '../src/core/read.ts';
 import { dispatch, TOOLS } from '../src/mcp/server.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
@@ -40,6 +40,20 @@ test('index extracts coordinates + an anchor from real source, no meaning, no ex
   const helper = index.entries.find((e) => e.name === 'helper')!;
   assert.ok(helper, 'private fn indexed');
   assert.equal(helper.visibility, 'module-private');
+});
+
+test('changed: working-set delta — symbols in untouched files are unchanged, churned files re-anchor', async () => {
+  const root = repo({ 'src/m.ts': SRC, 'src/other.ts': 'export function beta(): number {\n  return 9;\n}\n' });
+  const { index } = await buildIndex({ root });
+  // Churn ONLY m.ts (shift alpha down); leave other.ts untouched.
+  writeFileSync(join(root, 'src/m.ts'), '// pushed down\n// by two lines\n' + SRC);
+  const d = changed(index, ['alpha', 'beta']);
+  assert.equal(d.filesChanged, 1, 'one file (m.ts) changed');
+  assert.deepEqual(d.unchanged, ['src/other.ts#beta'], 'beta in the untouched file → unchanged, no slice');
+  assert.equal(d.changed.length, 1);
+  assert.equal(d.changed[0].id, 'src/m.ts#alpha');
+  assert.equal(d.changed[0].status, 'relocated');
+  assert.match(d.changed[0].raw ?? '', /function alpha/, 'changed symbol carries its current slice');
 });
 
 test('locate ranks exact above fuzzy', async () => {

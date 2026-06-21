@@ -14,7 +14,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { read } from '../core/read.ts';
+import { changed, read } from '../core/read.ts';
 import { loadIndex } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
 
@@ -91,6 +91,7 @@ export const TOOLS = [
       properties: {
         ref: { type: 'string', description: 'A symbol id, or a bare name / "path#name".' },
         refs: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 64, uniqueItems: true, description: 'Read several INDEPENDENT, already-known symbols in one call (ids or names). One result per ref. Use sequential single reads when later reads depend on earlier ones.' },
+        changedOnly: { type: 'boolean', description: 'With `refs`: a working-set DELTA — return current slices only for symbols whose file changed since indexing, plus an `unchanged` id list. Refresh what you read earlier without re-paying tokens for the stable parts (a "git status" for your reads).' },
         snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s). Applies when reading a single `ref`.' },
       },
     },
@@ -115,6 +116,12 @@ export function dispatch(index: MapIndex, name: string, args: Record<string, unk
       if (hasRefs && hasRef) return JSON.stringify({ error: 'Pass `ref` (single) OR `refs` (batch), not both.' }, null, 2);
       if (hasRefs) {
         if (!Array.isArray(args.refs) || args.refs.length === 0) return JSON.stringify({ error: '`refs` must be a non-empty array of symbol ids or names.' }, null, 2);
+        // Working-set drift delta: of a set you read earlier, return current slices only for
+        // the ones whose file changed since indexing — refresh the delta, not the whole set.
+        if (args.changedOnly) {
+          const refs = [...new Set(args.refs.map((r: unknown) => String(r)))].slice(0, 256);
+          return JSON.stringify(changed(index, refs));
+        }
         // Batch: one round-trip for many symbols — same slices, fewer turns. Dedupe (keep
         // first occurrence) and cap so a stray huge array can't blow up the context window.
         const MAX = 64;

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolve as resolvePath } from 'node:path';
 import { buildIndex, type BuildReport } from '../core/build-index.ts';
-import { read } from '../core/read.ts';
+import { changed, read } from '../core/read.ts';
 import { DEFAULT_INDEX_PATH, loadIndex, saveIndex } from '../core/store.ts';
 
 function parseArgs(argv: string[]): { _: string[]; flags: Record<string, string | boolean> } {
@@ -110,6 +110,23 @@ async function main(): Promise<void> {
         console.log('candidates:');
         for (const c of r.candidates) console.log(`  ${String(c.line).padStart(6)}  ${c.preview}`);
       }
+      return;
+    }
+
+    case 'changed': {
+      // Working-set drift delta: which of these symbols moved since the index, with the
+      // current slice for only the changed ones. `--refs "a,b,c"`.
+      const refs = typeof flags.refs === 'string' ? flags.refs.split(',').map((s) => s.trim()).filter(Boolean) : _.slice(1);
+      if (!refs.length) die('changed needs --refs "a,b,c" (or space-separated ids).');
+      const idx = loadIndex(indexPath);
+      const d = changed(idx, refs);
+      if (json) return void console.log(JSON.stringify(d, null, 2));
+      console.log(`# unchanged: ${d.unchanged.length}  ·  changed: ${d.changed.length}  (files: ${d.filesChanged}/${d.filesChecked} changed)`);
+      for (const r of d.changed) {
+        console.log(`# ${r.id}  [${r.status}]  ${r.file}:${r.line}${r.endLine ? `-${r.endLine}` : ''}`);
+        if (r.raw != null) { console.log('---'); console.log(r.raw); }
+      }
+      if (d.unchanged.length) console.log(`# (unchanged, no re-read needed: ${d.unchanged.join(', ')})`);
       return;
     }
 

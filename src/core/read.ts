@@ -85,6 +85,38 @@ function computeAim(index: MapIndex, entry: MapEntry, snippet: string): ReadResu
   return { status: matches.length > 1 ? 'ambiguous' : 'hit', matches };
 }
 
+/**
+ * Working-set drift delta — "git status for the agent's reads". Given the symbols an agent
+ * read earlier (`refs`), report which are UNCHANGED vs which CHANGED since the index, and
+ * return the current slice ONLY for the changed ones. Cheap: the per-file content token is
+ * checked once per file (not per symbol), so a stable file skips all its symbols with no
+ * slice work. Conservative + correct: a symbol is "unchanged" only if its whole file's token
+ * still matches (no false negatives — if the symbol moved, its file changed → it's CHANGED).
+ * The point: in a long session most of the working set sits in untouched files, so the agent
+ * refreshes only the delta instead of re-reading everything.
+ */
+export function changed(index: MapIndex, refs: string[]): { unchanged: string[]; changed: ReadResult[]; filesChecked: number; filesChanged: number } {
+  const unchanged: string[] = [];
+  const changedOut: ReadResult[] = [];
+  const fileFresh = new Map<string, boolean>(); // token check cached per file
+  for (const ref of refs) {
+    const entry = resolve(index, ref);
+    if (!entry) {
+      changedOut.push(readCore(index, ref)); // unresolved/renamed → surface it as a delta
+      continue;
+    }
+    if (!fileFresh.has(entry.file)) {
+      const path = fileWithinRoot(index.meta.root, entry.file);
+      const text = path == null ? null : tryReadFile(path);
+      fileFresh.set(entry.file, text != null && token(text) === index.fileTokens[entry.file]);
+    }
+    if (fileFresh.get(entry.file)) unchanged.push(entry.id);
+    else changedOut.push(readCore(index, ref)); // file moved → re-anchor + current slice
+  }
+  const filesChanged = [...fileFresh.values()].filter((f) => !f).length;
+  return { unchanged, changed: changedOut, filesChecked: fileFresh.size, filesChanged };
+}
+
 function readCore(index: MapIndex, ref: string): ReadResult {
   const entry = resolve(index, ref);
   if (!entry) {

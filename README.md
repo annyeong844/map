@@ -1,5 +1,7 @@
 # code-map
 
+> 🇰🇷 **한국어로 읽으시려면 → [README.ko.md](./README.ko.md)** &nbsp;·&nbsp; 🇬🇧 English below.
+
 > **Hand your AI agent the exact slice of code it needs — by coordinate, not by guessing.**
 > *좌표만 정밀하게. 의미는 LLM이 raw를 보고 매번 새로 판정한다.*
 

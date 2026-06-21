@@ -99,7 +99,7 @@ baseline, not vs Serena).
 | What it is | a thin **drift-safe coordinate cache** (`read`) that rides alongside grep | a full **LSP "IDE for your agent"** |
 | Core bet | *coordinates, not meaning* — grep finds, `read` reads, the LLM interprets raw | rich semantic abstractions (symbol tree, references, refactors) |
 | Tools | **1** (`read`; `aim` for edit-targeting; `code-oracle` is a separate sibling) | **~25** (find_symbol, find_referencing_symbols, get_symbols_overview, replace_symbol_body, rename/move/inline, search_for_pattern, memories, …) |
-| Find / references | **defers to grep**; type-confirmed callers via the separate `code-oracle` (tsgo) | **native** find_symbol / find_referencing_symbols / find_implementations (LSP) |
+| Find / references | plain finds → **grep**; **who-calls / definition / implementations → `code-oracle`** (type-aware sibling: `callers`/`definition`/`implementations`, **tsgo** for TS/JS + **ty** for Python, checker-grade), which the skill spins up by repo size/name-collision | **native** find_symbol / find_referencing_symbols / find_implementations (LSP) |
 | Editing | `aim`: drift-safe **patch targeting** (snippet → current char range) | symbol-level: replace_symbol_body, insert_before/after, safe_delete |
 | Languages | TS/JS **+ Python** (oxc AST) | **40+** via language servers (or JetBrains, paid) |
 | Setup / cost | `map index` (~ms), **1 dep, no LSP, no warmup** | uv + **language servers** (per-lang deps, warmup), project init/onboarding |
@@ -111,11 +111,16 @@ references, refactoring, 40+ languages — because it rides live language server
 for your agent*, Serena does more. **code-map is deliberately narrow**: one drift-safe `read`, zero
 LSP, instant, TS/JS+Python. Its edges are the **integrity guarantee under churn** (reuse a coordinate
 across turns — it re-anchors or refuses, never returns wrong bytes) and **near-zero overhead** (no
-language servers, one tool def). They even overlap politely: code-map punts *search/references* to
-grep (and tsgo for type-confirmed callers), exactly where Serena leans on the LSP. **Pick Serena** for
-breadth and semantic power across many languages; **pick code-map** for a thin, drift-safe, zero-setup
-read layer (especially TS/JS/Python) that rides alongside grep — and run both if you like; they don't
-conflict.
+language servers, one tool def). The one place Serena clearly leads — semantic **references** — is
+exactly where the sibling **`code-oracle`** answers back: type-aware `callers`/`definition`/
+`implementations` over **tsgo** (TS/JS) and **ty** (Python), checker-grade, and the routing skill
+turns it on **by judgment** (large repo / colliding name → oracle; tiny repo / distinctive name →
+grep). tsgo is the *native* TS compiler, so on TS/JS that path is fast. So the real shape is: **Serena**
+= one broad always-on LSP toolkit across 40+ languages; **code-map (+ code-oracle)** = a thin
+zero-setup `read` that's drift-safe, plus a type-aware references engine spun up only when it pays —
+TS/JS-first, Python partial (`ty` references are intra-file). Pick Serena for always-on breadth; pick
+code-map for a lean, drift-safe core that escalates to checker-grade references on demand — and run
+both if you like; they don't conflict.
 
 ---
 

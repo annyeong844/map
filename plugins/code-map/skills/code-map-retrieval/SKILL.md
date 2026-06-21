@@ -38,6 +38,26 @@ is lost it says so. It does **not search** — grep does the finding, `read` doe
    only for symbols whose file changed, plus an `unchanged` id list — a "git status for your reads."
    Don't re-read the unchanged ones; don't re-grep the tree.
 
+## References / callers / definitions — escalate to code-oracle (type-aware), by judgment
+
+`read` and grep don't answer **"who calls X / where is X defined / what implements this"**
+precisely — grep drowns in name collisions on common method names. If the type-aware sibling
+**code-oracle** is available (an MCP with `callers`, `definition`, `implementations`; engine =
+**tsgo for TS/JS**, **ty for Python**), route those questions to it instead of grep — *but weigh
+the one-time warmup against repo size and how common the name is:*
+
+- **who calls / blast-radius** of a **common or colliding** name (`createMessage`, `getModel`) →
+  `callers` (checker-grade, type-confirmed). Measured: ~31 % fewer files to read overall, **40–75 %
+  on common names**. A **distinctive** name in a **small** repo → grep is already precise, stay on grep.
+- **where does this actually resolve** (the precise callee, through interfaces / DI) → `definition`.
+- **what implements this interface/abstract** → `implementations` (sound over-approx for blast radius).
+- **When to spin it up (your judgment):** code-oracle warms a session once (~seconds up to ~20 s by
+  repo size). Worth it when the repo is large and/or the name collides; skip it (use grep) for tiny
+  repos or distinctive names. It's a TS/JS-first win — tsgo is the native TS compiler, so it's fast.
+- **Honest limits:** truly dynamic dispatch (Proxy, `obj[k]()`, token-only DI) is invisible — read
+  those by hand; Python (`ty`) references are currently intra-file only. If code-oracle isn't
+  installed, fall back to grep (and `code-map read` for the bodies).
+
 ## Why this matters (measured)
 
 - Reading **known** symbols is the strong win: code-map sharply cuts retrieved tokens and tool

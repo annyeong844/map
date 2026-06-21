@@ -17,3 +17,9 @@
 
 Reading **known** symbols is the win. On pure **discovery**, grep alone wins — the double-call
 (grep to find *and* read on top) loses; the rules above are what keep discovery a win.
+
+**Who-calls / where-defined / what-implements:** grep drowns on common names. If the type-aware
+sibling **code-oracle** is available (`callers`/`definition`/`implementations`; tsgo for TS/JS,
+ty for Python), escalate to it for a **common/colliding** name in a **large** repo (checker-grade,
+~31 %/40–75 % fewer files than grep) — it warms once (~seconds–20 s by repo size), so for a tiny
+repo or a distinctive name, just grep. Dynamic dispatch is invisible (read by hand); ty is intra-file.

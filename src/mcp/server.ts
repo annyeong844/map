@@ -21,7 +21,7 @@ import type { MapIndex } from '../core/types.ts';
 const PROTOCOL = '2025-06-18';
 const SERVER_INSTRUCTIONS = [
   'ROUTING RULES: for indexed repos, do not read known symbol bodies with shell commands. If a file:line, symbol id, or path#name is known, call code-map read for source.',
-  'Use shell search only to discover candidate refs, names, or line numbers; after discovery, stop shell body reads and inspect exact code with read.',
+  'code-map read resolves a bare name or path#name directly — for any symbol you can already name, call read; do NOT grep first to locate a name read can resolve (grepping to find a known symbol is a redundant double-call). Use shell search only to discover a name you do not know yet, then read the body — never grep/cat it.',
   'For two or more independent known refs, make one read call with refs: [...] before answering. Split only when a later ref depends on earlier output or the batch exceeds 64 refs.',
   'Never answer from index metadata alone; answer from raw code returned by read.',
 ].join(' ');

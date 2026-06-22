@@ -12,6 +12,8 @@ const allowPathPatterns = [
   /^src\/(?:cli|core|mcp)\/[A-Za-z0-9_-]+\.ts$/,
   /^src\/py\/extract\.py$/,
   /^skills\/[A-Za-z0-9_-]+\/SKILL\.md$/,
+  /^hooks\/hooks\.json$/,
+  /^hooks\/code-map-guard\.mjs$/,
   /^\.claude-plugin\/(?:plugin|marketplace)\.json$/,
   /^\.grok-plugin\/marketplace\.json$/,
   /^\.agents\/plugins\/marketplace\.json$/,

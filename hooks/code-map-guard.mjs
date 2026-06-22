@@ -60,7 +60,7 @@ try { writeFileSync(state, JSON.stringify({ last: now })); } catch {}
 
 const reminder = bodyRead
   ? 'code-map routing — this repo is indexed (.map-index.json). Read a known symbol body with the code-map `read` tool (by `path#name` or id), not cat/sed/head/tail: `read` re-anchors when the file has drifted and returns just the symbol. For several known refs, make one batched `read` (refs: [...]). Do not shell-read a body you can fetch by coordinate.'
-  : "code-map routing — this repo is indexed (.map-index.json). Using grep to DISCOVER names/lines is correct. Once it finds a name, read the body with the code-map `read` tool (one batched call for multiple refs) — do not add a second grep/cat on top to read the body, and do not re-grep to assemble refs. Answer from `read`'s raw bytes, not from grep snippets.";
+  : "code-map routing — this repo is indexed (.map-index.json). The code-map `read` tool resolves a bare symbol name or `path#name` directly. If you ALREADY KNOW which symbol you want, call `read <name>` (or one batched `read` for several) and SKIP this grep — grepping first to locate a name you already know is the redundant double-call this routing removes. Use grep ONLY to discover a name you genuinely don't know yet; once you have it, read the body with `read`, never with grep/cat. Answer from `read`'s bytes, not grep snippets.";
 
 process.stdout.write(
   JSON.stringify({

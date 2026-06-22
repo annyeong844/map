@@ -175,6 +175,45 @@ class LspSession {
     return arr.map((l: any) => ({ uri: l.uri ?? l.targetUri, line: (l.range ?? l.targetRange)?.start?.line ?? 0 })).filter((x: any) => x.uri);
   }
 
+  /** Resolve a symbol NAME to its DECLARATION position via the LSP's documentSymbol —
+   * the name's own range (selectionRange), so we anchor on the real declaration and never
+   * on a comment/string/import the way a raw text scan can. Returns null if `name` isn't a
+   * declared symbol in this file (caller then falls back to the comment-skipping text scan).
+   * Among same-name symbols, prefer declaration kinds (function/method/class/…) over vars. */
+  async documentSymbolPosition(file: string, name: string): Promise<{ line: number; character: number } | null> {
+    await this.initDone;
+    const uri = this.syncFile(file);
+    await this.waitReady();
+    const r = (await this.request('textDocument/documentSymbol', { textDocument: { uri } })) as any;
+    if (!Array.isArray(r)) return null;
+    let fileLines: string[] | null = null;
+    const lineText = (ln: number): string => {
+      if (!fileLines) { try { fileLines = readFileSync(file, 'utf8').split('\n'); } catch { fileLines = []; } }
+      return fileLines[ln] ?? '';
+    };
+    const out: { name: string; line: number; character: number; kind: number }[] = [];
+    const walk = (nodes: any[]): void => {
+      for (const n of nodes) {
+        if (n?.name) {
+          const sel = n.selectionRange?.start; // DocumentSymbol: range of the name itself
+          if (sel) out.push({ name: n.name, line: sel.line, character: sel.character, kind: n.kind ?? 0 });
+          else if (n.location?.range?.start) { // SymbolInformation: refine column to the identifier
+            const ln = n.location.range.start.line;
+            const col = lineText(ln).indexOf(n.name);
+            out.push({ name: n.name, line: ln, character: col >= 0 ? col : n.location.range.start.character, kind: n.kind ?? 0 });
+          }
+        }
+        if (Array.isArray(n?.children)) walk(n.children);
+      }
+    };
+    walk(r);
+    const matches = out.filter((s) => s.name === name);
+    if (!matches.length) return null;
+    const PREF = new Set([5, 6, 9, 10, 11, 12, 23]); // Class/Method/Constructor/Enum/Interface/Function/Struct
+    matches.sort((a, b) => (PREF.has(b.kind) ? 1 : 0) - (PREF.has(a.kind) ? 1 : 0));
+    return { line: matches[0].line, character: matches[0].character };
+  }
+
   /** Eagerly load the project (open a seed file + wait for quiescence) so the first
    * real query doesn't pay the cold warmup. Fire-and-forget at startup. */
   async prewarm(seedFile: string): Promise<void> {
@@ -188,17 +227,26 @@ class LspSession {
   dispose(): void { try { this.proc.kill(); } catch { /* ignore */ } }
 }
 
-// ── symbol → position (find a whole-word occurrence of `name` in the file) ──
+// ── symbol → position, TEXT fallback (used only when the LSP can't resolve the name).
+// Prefer the first occurrence on a line that is NOT a comment or an import — a raw
+// first-hit scan anchored on the word inside a doc comment and returned 0 callers
+// (firsthand 2026-06). Keep the first raw hit as a last resort so we never regress to null. ──
 function findPosition(file: string, name?: string, line?: number, character?: number): { line: number; character: number } | null {
   if (line != null && character != null) return { line, character };
   if (!name) return null;
   const lines = readFileSync(file, 'utf8').split('\n');
   const re = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+  const isComment = (s: string) => /^\s*(\/\/|\/\*|\*|#)/.test(s);
+  const isImport = (s: string) => /^\s*import\b/.test(s) || /^\s*(export\b.*\bfrom\b)/.test(s);
+  let firstHit: { line: number; character: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const c = lines[i].search(re);
-    if (c >= 0) return { line: i, character: c };
+    if (c < 0) continue;
+    if (firstHit == null) firstHit = { line: i, character: c };
+    if (isComment(lines[i]) || isImport(lines[i])) continue;
+    return { line: i, character: c }; // first non-comment, non-import occurrence
   }
-  return null;
+  return firstHit; // everything was comment/import — better than nothing
 }
 
 // ── one warm session per (language, project root). The working root is pre-warmed
@@ -314,12 +362,12 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   if (!lang) return { error: `unsupported file type: ${file} (expected TS/JS or Python).` };
   const be = backend(lang);
   if (!be) return { error: lang === 'ts' ? 'tsgo not found — set TSGO_BIN or `npm install` in code-oracle/.' : 'ty not found — install ty or uvx, or set TY_CMD.' };
-  const pos = findPosition(file, args.name, args.line, args.character);
-  if (!pos) return { error: `could not locate symbol "${args.name}" in ${file}; pass line/character.` };
+  const explicit = args.line != null && args.character != null ? { line: args.line as number, character: args.character as number } : null;
+  if (!explicit && !args.name) return { error: `${tool} needs \`name\` or line/character.` };
 
   const root = args.root ? resolve(args.root) : projectRoot(file, lang);
   const relFile = relative(root, file).replace(/\\/g, '/');
-  const cacheKey = `${tool}:${relFile}#${args.name ?? `${pos.line}:${pos.character}`}`;
+  const cacheKey = `${tool}:${relFile}#${args.name ?? `${explicit!.line}:${explicit!.character}`}`;
 
   // Cache gate: serve instantly (no LSP warmup) when the project hasn't changed.
   const epoch = await projectEpoch(root);
@@ -328,7 +376,14 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
     return { ...(cache.entries[cacheKey] as object), cached: true };
   }
 
-  const locs = await session(root, lang, be).locate(METHOD[tool], file, pos.line, pos.character);
+  // Resolve the symbol position. Explicit coords win; otherwise anchor on the DECLARATION
+  // via the LSP's documentSymbol (skips comments/strings/imports), falling back to the
+  // comment-skipping text scan only if the LSP doesn't know the name.
+  const sess = session(root, lang, be);
+  const pos = explicit ?? (args.name ? ((await sess.documentSymbolPosition(file, args.name)) ?? findPosition(file, args.name)) : null);
+  if (!pos) return { error: `could not locate symbol "${args.name}" in ${relFile}; pass line/character.` };
+
+  const locs = await sess.locate(METHOD[tool], file, pos.line, pos.character);
   const seen = new Set<string>();
   const out: { file: string; line: number; preview: string }[] = [];
   for (const r of locs) {
@@ -362,7 +417,7 @@ const INPUT = {
   type: 'object',
   properties: {
     file: { type: 'string', description: 'Source file (absolute, or relative to root/cwd).' },
-    name: { type: 'string', description: 'Symbol name (its first occurrence in the file is used).' },
+    name: { type: 'string', description: 'Symbol name; resolved to its DECLARATION via the language server (comments/strings/imports are skipped). For overloaded or duplicated names, pass line/character to disambiguate.' },
     line: { type: 'number', description: 'Optional 0-based line of the symbol (use with character).' },
     character: { type: 'number', description: 'Optional 0-based column of the symbol.' },
     root: { type: 'string', description: 'Optional project root; default = nearest ancestor tsconfig.json.' },

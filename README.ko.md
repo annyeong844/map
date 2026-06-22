@@ -203,7 +203,7 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
   ```
   **discovery 이중호출 가드** 포함 — 발견은 grep으로 하고 *멈춰라*, 위에 `read` 얹지 마라 —
   3-arm 벤치에서 discovery를 손해→승리로 뒤집은 그 규칙이에요.
-- **`AGENTS.md` 한 줄 (레포별, 로드 비용 0):** `bench/codex-headless/AGENTS.code-map.md` 참고.
+- **`AGENTS.md` 한 줄 (레포별, 로드 비용 0):** [code-map-bench/integrations/AGENTS.code-map.md](https://github.com/annyeong844/code-map-bench/blob/main/integrations/AGENTS.code-map.md) 참고.
 
 둘 다 결국: *"기지 심볼은 code-map `read`로 읽어라(독립 ref는 한 콜에 batch); grep은 발견에만
 쓰고 이중 fetch 금지."* MCP 서버도 시작 시 이를 스스로 광고하지만(무설정 baseline↑), *신뢰성*은
@@ -229,11 +229,12 @@ WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** �
 <summary><b>📊 직접 벤치마크</b></summary>
 
 ```bash
+git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench
 codex login --device-auth
-map-bench --run --passes 30 --auth chatgpt --strategies native,map-batch
+node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --strategies native,map-batch
 ```
 
-하네스(`bench/codex-headless/`)는 다양한 태스크셋에 pass@30을 돌리고, `codex exec --json`의
+하네스([code-map-bench](https://github.com/annyeong844/code-map-bench))는 다양한 태스크셋에 pass@30을 돌리고, `codex exec --json`의
 사용량을 캡처하며, **경로를 채점**(native 행은 MCP를 건드리면 실패; map-batch 행은
 `read({ refs: [...] })`를 완료 못 하면 실패). raw, `adjusted = input − cached`, 캐시-인지
 `effective = uncached + cached×weight`를 보고해 실제 프롬프트 캐시 하에서의 이득을 봅니다.

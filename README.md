@@ -208,7 +208,7 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
   ```
   It carries the **discovery double-call guard** — for discovery, grep and *stop*; don't add a
   `read` on top — which a 3-arm benchmark showed flips discovery from a loss to a win.
-- **An `AGENTS.md` line (per-repo, zero load cost):** see `bench/codex-headless/AGENTS.code-map.md`.
+- **An `AGENTS.md` line (per-repo, zero load cost):** see [code-map-bench/integrations/AGENTS.code-map.md](https://github.com/annyeong844/code-map-bench/blob/main/integrations/AGENTS.code-map.md).
 - **Antigravity / Gemini:** Antigravity reads rules from `GEMINI.md` (global `~/.gemini/GEMINI.md`
   or workspace) and `AGENTS.md`. This repo ships a ready `GEMINI.md` — copy it into your global
   `~/.gemini/GEMINI.md` (or a workspace) for the routing. Wire the MCP via the IDE's
@@ -244,11 +244,12 @@ can serve WSL clients too, dodging the `/mnt/c` drvfs penalty (~38s → ~4s on t
 <summary><b>📊 Benchmark it yourself</b></summary>
 
 ```bash
+git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench
 codex login --device-auth
-map-bench --run --passes 30 --auth chatgpt --strategies native,map-batch
+node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --strategies native,map-batch
 ```
 
-The harness (`bench/codex-headless/`) runs pass@30 over a diverse task set, captures usage
+The harness (in [code-map-bench](https://github.com/annyeong844/code-map-bench)) runs pass@30 over a diverse task set, captures usage
 from `codex exec --json`, and **scores the route** (native rows fail if they touch MCP;
 map-batch rows fail if they don't complete a `read({ refs: [...] })`). It reports raw,
 `adjusted = input − cached`, and cache-aware `effective = uncached + cached×weight` so you

@@ -5,11 +5,18 @@ import { readFileSync } from 'node:fs';
 const allowPathPatterns = [
   /^LICENSE$/,
   /^README\.md$/,
+  /^README\.ko\.md$/,
+  /^GEMINI\.md$/,
   /^package\.json$/,
-  /^bench\/codex-headless\/(?:README\.md|AGENTS\.code-map\.md|tasks\.(?:example|diverse)\.json)$/,
-  /^scripts\/(?:bench-codex-headless|check-package-safety)\.mjs$/,
+  /^scripts\/check-package-safety\.mjs$/,
   /^src\/(?:cli|core|mcp)\/[A-Za-z0-9_-]+\.ts$/,
   /^src\/py\/extract\.py$/,
+  /^skills\/[A-Za-z0-9_-]+\/SKILL\.md$/,
+  /^\.claude-plugin\/(?:plugin|marketplace)\.json$/,
+  /^\.grok-plugin\/marketplace\.json$/,
+  /^\.agents\/plugins\/marketplace\.json$/,
+  /^plugins\/code-map\/\.codex-plugin\/plugin\.json$/,
+  /^plugins\/code-map\/skills\/[A-Za-z0-9_-]+\/SKILL\.md$/,
 ];
 
 const denyPathPatterns = [

@@ -12,17 +12,21 @@
     "url": "https://github.com/annyeong844/map/issues"
   },
   "files": [
-    "bench",
-    "scripts/bench-codex-headless.mjs",
-    "scripts/check-package-safety.mjs",
     "src",
+    "skills",
+    ".claude-plugin",
+    ".grok-plugin",
+    ".agents",
+    "plugins",
+    "GEMINI.md",
+    "scripts/check-package-safety.mjs",
     "README.md",
+    "README.ko.md",
     "LICENSE"
   ],
   "bin": {
     "map": "./src/cli/main.ts",
-    "map-mcp": "./src/mcp/server.ts",
-    "map-bench": "./scripts/bench-codex-headless.mjs"
+    "map-mcp": "./src/mcp/server.ts"
   },
   "scripts": {
     "map": "node src/cli/main.ts",

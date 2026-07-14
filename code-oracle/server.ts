@@ -180,7 +180,7 @@ class LspSession {
    * on a comment/string/import the way a raw text scan can. Returns null if `name` isn't a
    * declared symbol in this file (caller then falls back to the comment-skipping text scan).
    * Among same-name symbols, prefer declaration kinds (function/method/class/…) over vars. */
-  async documentSymbolPosition(file: string, name: string): Promise<{ line: number; character: number } | null> {
+  async documentSymbolPosition(file: string, name: string): Promise<{ line: number; character: number } | { ambiguous: OracleSym[] } | null> {
     await this.initDone;
     const uri = this.syncFile(file);
     await this.waitReady();
@@ -191,27 +191,23 @@ class LspSession {
       if (!fileLines) { try { fileLines = readFileSync(file, 'utf8').split('\n'); } catch { fileLines = []; } }
       return fileLines[ln] ?? '';
     };
-    const out: { name: string; line: number; character: number; kind: number }[] = [];
-    const walk = (nodes: any[]): void => {
+    const out: OracleSym[] = [];
+    const walk = (nodes: any[], container: string | null): void => {
       for (const n of nodes) {
         if (n?.name) {
           const sel = n.selectionRange?.start; // DocumentSymbol: range of the name itself
-          if (sel) out.push({ name: n.name, line: sel.line, character: sel.character, kind: n.kind ?? 0 });
+          if (sel) out.push({ name: n.name, container, line: sel.line, character: sel.character, kind: n.kind ?? 0 });
           else if (n.location?.range?.start) { // SymbolInformation: refine column to the identifier
             const ln = n.location.range.start.line;
             const col = lineText(ln).indexOf(n.name);
-            out.push({ name: n.name, line: ln, character: col >= 0 ? col : n.location.range.start.character, kind: n.kind ?? 0 });
+            out.push({ name: n.name, container: n.containerName ?? container, line: ln, character: col >= 0 ? col : n.location.range.start.character, kind: n.kind ?? 0 });
           }
         }
-        if (Array.isArray(n?.children)) walk(n.children);
+        if (Array.isArray(n?.children)) walk(n.children, n?.name ?? container);
       }
     };
-    walk(r);
-    const matches = out.filter((s) => s.name === name);
-    if (!matches.length) return null;
-    const PREF = new Set([5, 6, 9, 10, 11, 12, 23]); // Class/Method/Constructor/Enum/Interface/Function/Struct
-    matches.sort((a, b) => (PREF.has(b.kind) ? 1 : 0) - (PREF.has(a.kind) ? 1 : 0));
-    return { line: matches[0].line, character: matches[0].character };
+    walk(r, null);
+    return resolveNamePosition(out, name);
   }
 
   /** Eagerly load the project (open a seed file + wait for quiescence) so the first
@@ -225,6 +221,43 @@ class LspSession {
   get ready(): boolean { return this.warmed; }
 
   dispose(): void { try { this.proc.kill(); } catch { /* ignore */ } }
+}
+
+// ── name → declaration position, from the LSP's documentSymbol tree ──
+// A flattened documentSymbol entry: the symbol's name, its immediate container
+// (parent symbol name, e.g. the class/interface holding a method), and the position
+// of the name token itself.
+export interface OracleSym { name: string; container: string | null; line: number; character: number; kind: number; }
+
+// LSP SymbolKind values that name a real DECLARATION we'd want to anchor a query on.
+const DECL_KINDS = new Set([5, 6, 9, 10, 11, 12, 23]); // Class/Method/Constructor/Enum/Interface/Function/Struct
+
+/** Resolve a symbol NAME to a declaration position among a file's documentSymbol entries.
+ *  Accepts a bare name (`send`) or a qualified `Container.name` (`RunChannelClient.send`).
+ *  - Returns `{ line, character }` when the name resolves to a single declaration
+ *    (declarations sharing one container — e.g. overload signatures — collapse to one).
+ *  - Returns `{ ambiguous: [...] }` when a BARE name matches declarations in more than
+ *    one container (e.g. `interface WebSocketLike.send` AND `class RunChannelClient.send`):
+ *    silently anchoring on the first returns the wrong callers, so surface the choices.
+ *  - Returns `null` when the name isn't a declared symbol here (caller falls back to a
+ *    comment/import-skipping text scan). */
+export function resolveNamePosition(
+  symbols: OracleSym[],
+  name: string,
+): { line: number; character: number } | { ambiguous: OracleSym[] } | null {
+  const dot = name.lastIndexOf('.');
+  const wantContainer = dot > 0 ? name.slice(0, dot) : null;
+  const wantName = dot > 0 ? name.slice(dot + 1) : name;
+  const matches = symbols.filter((s) => s.name === wantName && (wantContainer == null || s.container === wantContainer));
+  if (!matches.length) return null;
+  const preferred = matches.filter((s) => DECL_KINDS.has(s.kind));
+  const pool = preferred.length ? preferred : matches;
+  // Collapse to one declaration per container (overloads / split signatures are one symbol).
+  const byContainer = new Map<string, OracleSym>();
+  for (const s of pool) { const k = s.container ?? ''; if (!byContainer.has(k)) byContainer.set(k, s); }
+  const cands = [...byContainer.values()];
+  if (cands.length > 1) return { ambiguous: cands };
+  return { line: cands[0].line, character: cands[0].character };
 }
 
 // ── symbol → position, TEXT fallback (used only when the LSP can't resolve the name).
@@ -380,7 +413,22 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   // via the LSP's documentSymbol (skips comments/strings/imports), falling back to the
   // comment-skipping text scan only if the LSP doesn't know the name.
   const sess = session(root, lang, be);
-  const pos = explicit ?? (args.name ? ((await sess.documentSymbolPosition(file, args.name)) ?? findPosition(file, args.name)) : null);
+  let pos: { line: number; character: number } | null = explicit ?? null;
+  if (!pos && args.name) {
+    const resolved = await sess.documentSymbolPosition(file, args.name);
+    if (resolved && 'ambiguous' in resolved) {
+      const candidates = resolved.ambiguous.map((c) => ({
+        name: c.container ? `${c.container}.${c.name}` : c.name,
+        line: c.line,
+        character: c.character,
+      }));
+      return {
+        error: `"${args.name}" matches ${candidates.length} declarations in ${relFile}. Re-query with a qualified name (Container.name) or line/character (0-based).`,
+        candidates,
+      };
+    }
+    pos = resolved ?? findPosition(file, args.name);
+  }
   if (!pos) return { error: `could not locate symbol "${args.name}" in ${relFile}; pass line/character.` };
 
   const locs = await sess.locate(METHOD[tool], file, pos.line, pos.character);
@@ -417,7 +465,7 @@ const INPUT = {
   type: 'object',
   properties: {
     file: { type: 'string', description: 'Source file (absolute, or relative to root/cwd).' },
-    name: { type: 'string', description: 'Symbol name; resolved to its DECLARATION via the language server (comments/strings/imports are skipped). For overloaded or duplicated names, pass line/character to disambiguate.' },
+    name: { type: 'string', description: 'Symbol name, resolved to its DECLARATION via the language server (comments/strings/imports are skipped). Accepts a qualified "Container.name" (e.g. "RunChannelClient.send"). If a bare name matches declarations in more than one container (e.g. an interface method and a same-named class method), the tool returns the candidates instead of guessing — re-query with the qualified name or line/character.' },
     line: { type: 'number', description: 'Optional 0-based line of the symbol (use with character).' },
     character: { type: 'number', description: 'Optional 0-based column of the symbol.' },
     root: { type: 'string', description: 'Optional project root; default = nearest ancestor tsconfig.json.' },

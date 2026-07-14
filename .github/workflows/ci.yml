@@ -7,14 +7,34 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: Node 24 / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '24' # needs >=23.6 for native TS type-stripping (no build step)
-      - run: npm install
+          node-version: '24' # source tests need >=23.6 native TS type-stripping; the package ships JS
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: npm ci
       - run: npm run typecheck # tsc --noEmit, strict
-      - run: npm test # node --test; ubuntu-latest ships python3, so the Python backend test runs
+      - run: npm test
       - run: npm run lint # oxlint (correctness)
-      - run: cd code-oracle && npm run typecheck # sibling oracle: strict (no tsgo needed for typecheck)
+      - run: npm run check:versions
+      - run: npm run check:package
+      - run: npm run smoke:package # install the tarball in a fresh prefix; exercise CLI + real stdio MCP schema/call
+      - run: npm audit --omit=dev
+      - run: npm ci
+        working-directory: code-oracle
+      - run: npm run typecheck
+        working-directory: code-oracle
+      - run: npm test
+        working-directory: code-oracle
+      - run: npm audit --omit=dev
+        working-directory: code-oracle

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,6 +11,8 @@ import { locate } from '../src/core/locate.ts';
 import { changed, read } from '../src/core/read.ts';
 import { getPreparedLookup, loadIndex, saveIndex } from '../src/core/store.ts';
 import { callTool, dispatch, resolveIndexPath, toHostPath, TOOLS } from '../src/mcp/server.ts';
+import { applySetup, setupPlan } from '../src/cli/setup.ts';
+import { VERSION } from '../src/version.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
 function repo(files: Record<string, string>): string {
@@ -31,6 +33,48 @@ function helper(): number {
   return 2;
 }
 `;
+
+test('CLI and MCP expose the package version from one source', () => {
+  const cli = spawnSync(process.execPath, [fileURLToPath(new URL('../src/cli/main.ts', import.meta.url)), '--version'], {
+    encoding: 'utf8',
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(cli.stdout.trim(), VERSION);
+});
+
+test('setup plans wire both routing and MCP without mutating by default', () => {
+  const root = join('tmp', 'code map');
+  const codex = setupPlan('codex', root);
+  assert.deepEqual(codex.steps.map((step) => step.args), [
+    ['plugin', 'marketplace', 'add', root],
+    ['plugin', 'add', 'code-map@code-map'],
+    ['mcp', 'add', 'code-map', '--', 'map-mcp'],
+  ]);
+  const claude = setupPlan('claude', root);
+  assert.ok(claude.steps.some((step) => step.args.includes('code-map@code-map')));
+  assert.ok(claude.steps.some((step) => step.args.includes('map-mcp')));
+  const gemini = setupPlan('gemini', root, join('home', 'user'));
+  assert.equal(gemini.steps.length, 0);
+  assert.equal(gemini.files?.length, 2);
+});
+
+test('Gemini setup merges config and routing rules idempotently', () => {
+  const home = repo({
+    '.gemini/config/mcp_config.json': JSON.stringify({ mcpServers: { existing: { command: 'keep-me' } } }),
+    '.gemini/GEMINI.md': '# Personal rules\n',
+  });
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const plan = setupPlan('gemini', root, home);
+  applySetup(plan);
+  applySetup(plan);
+
+  const config = JSON.parse(readFileSync(join(home, '.gemini/config/mcp_config.json'), 'utf8'));
+  assert.equal(config.mcpServers.existing.command, 'keep-me');
+  assert.ok(config.mcpServers['code-map']);
+  const rules = readFileSync(join(home, '.gemini/GEMINI.md'), 'utf8');
+  assert.equal(rules.match(/<!-- code-map setup:start -->/gu)?.length, 1);
+  assert.match(rules, /# Personal rules/);
+});
 
 test('index extracts coordinates + an anchor from real source, no meaning, no external graph', async () => {
   const { index } = await buildIndex({ root: repo({ 'src/m.ts': SRC }) });

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { changed, read, readMany } from '../core/read.ts';
 import { loadIndex, prepareLookup } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
+import { VERSION } from '../version.ts';
 
 const PROTOCOL = '2025-06-18';
 const SERVER_INSTRUCTIONS = [
@@ -246,7 +247,7 @@ function handle(req: JsonRpcRequest): void {
           result: {
             protocolVersion: params?.protocolVersion ?? PROTOCOL,
             capabilities: { tools: {} },
-            serverInfo: { name: 'code-map', version: '0.1.0' },
+            serverInfo: { name: 'code-map', version: VERSION },
             instructions: SERVER_INSTRUCTIONS,
           },
         });

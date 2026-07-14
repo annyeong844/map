@@ -9,6 +9,7 @@
 ![langs](https://img.shields.io/badge/TS%2FJS-%2B%20Python-blue)
 ![deps](https://img.shields.io/badge/runtime%20deps-1%20(oxc--parser)-brightgreen)
 ![tool](https://img.shields.io/badge/tools-just%20%60read%60-ff69b4)
+![release](https://img.shields.io/badge/release-0.9.0--rc.1-orange)
 
 ---
 
@@ -47,24 +48,24 @@ code-map이 옆에 있으면 에이전트는 그냥:
 
 **한 줄 요약 — grep은 찾고, `read`는 읽는다.**
 
+> **릴리스 상태:** `0.9.0-rc.1`은 공개 릴리스 후보입니다. 코어는 실제 프로젝트에서 쓸
+> 준비가 됐고, RC 표시는 1.0 계약을 얼리기 전에 설치 피드백을 마지막으로 받기 위한 거예요.
+
 ---
 
 ## 빠른 시작
 
 ```bash
-# 1. 설치 (npm 퍼블리시 전까진 GitHub에서 바로)
-npm install -g github:annyeong844/map        # `map` + `map-mcp` 제공
+# 1. 릴리스 후보 설치 (첫 npm 릴리스 뒤에는 `next` 채널)
+npm install -g @annyeong844/code-map@next
+# 그 전에는: npm install -g github:annyeong844/map
 
-# 2. 에이전트가 읽을 레포를 인덱싱
+# 2. 라우팅 plugin/rules와 MCP를 함께 배선 (--apply 없이는 dry-run)
+map setup codex --apply
+# 다른 호스트: map setup claude --apply  |  map setup gemini --apply
+
+# 3. 에이전트가 읽을 레포를 인덱싱
 cd /path/to/your-repo && map index --root .  # ./.map-index.json 생성
-
-# 3. Codex에 배선 (레포에 Codex marketplace 항목이 들어 있어요)
-codex plugin marketplace add /path/to/map
-codex plugin add code-map@code-map
-codex mcp add code-map -- map-mcp
-
-# 다른 호스트
-claude mcp add code-map --scope user -- map-mcp   # Claude Code
 ```
 
 끝 — 이제 에이전트엔 도구 하나 `read`가 생겼어요. Codex에서 **−19% / −67%** 효율 이득까지
@@ -179,11 +180,17 @@ LLM이 raw 바이트를 매 콜마다 새로 읽고 판정해요.
 <summary><b>🔌 실전 배선 (설치 옵션 + 효율 이득)</b></summary>
 
 **요구사항:** Node ≥ 23.6(TypeScript 직접 실행, 빌드 없음), 런타임 의존성 1개(`oxc-parser`);
-파일 walk엔 `ripgrep`이 있으면 사용; Python은 `python3`가 `PATH`에 필요.
+파일 walk엔 `ripgrep`이 있으면 사용. Python 3은 Unix에서 `python3`/`python`, Windows에서
+`py -3`/`python3`/`python` 순으로 자동 탐지하며 `CODE_MAP_PYTHON`으로 덮어쓸 수 있어요.
+네이티브 WSL 설치라면 WSL *안에서* `node --version`을 확인하세요. Windows Node가 최신이어도
+낡은 WSL Node는 그대로이고, 실제 실행 환경의 Node가 23.6 이상이어야 합니다.
 
-**설치:** `npm install -g @annyeong844/code-map`(퍼블리시 후) ·
-`npm install -g github:annyeong844/map`(지금) · 또는 clone + `npm install && npm link`.
+**설치:** `npm install -g @annyeong844/code-map@next`(RC 채널) ·
+`npm install -g github:annyeong844/map`(npm 릴리스 전) · 또는 clone + `npm install && npm link`.
 모두 `map`과 `map-mcp`를 제공.
+
+그다음 `map setup codex|claude|gemini`를 쓰세요. 기본은 검토 가능한 dry-run이고 `--apply`를
+붙일 때만 사용자 설정을 바꿉니다. 측정상 둘 다 필요한 라우팅 규칙/plugin과 MCP를 함께 설치해요.
 
 **MCP 설정** — 전역 서버 하나가 호출별로 레포를 전환:
 
@@ -214,15 +221,15 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
   `plugins/code-map/skills/code-map-retrieval/`에 Codex용 라우팅 skill을,
   `.codex-plugin/plugin.json`과 `.agents/plugins/marketplace.json`에 매니페스트를 동봉해요.
   ```bash
-  codex plugin marketplace add /path/to/map
-  codex plugin add code-map@code-map             # Codex
+  map setup codex --apply
+  map setup claude --apply
   grok plugin install annyeong844/map          # Grok (또는 로컬 경로)
-  claude plugin install code-map@code-map        # Claude Code (marketplace add 후)
-  # Antigravity: GEMINI.md를 ~/.gemini/GEMINI.md(전역) 또는 워크스페이스에 복사
   ```
   **discovery 이중호출 가드** 포함 — 발견은 grep으로 하고 *멈춰라*, 위에 `read` 얹지 마라 —
   3-arm 벤치에서 discovery를 손해→승리로 뒤집은 그 규칙이에요.
 - **`AGENTS.md` 한 줄 (레포별, 로드 비용 0):** [code-map-bench/integrations/AGENTS.code-map.md](https://github.com/annyeong844/code-map-bench/blob/main/integrations/AGENTS.code-map.md) 참고.
+- **Antigravity / Gemini:** `map setup gemini --apply`가 동봉 `GEMINI.md` 라우팅 블록과
+  `~/.gemini/config/mcp_config.json`의 MCP 항목을 기존 설정을 보존하며 병합합니다.
 
 둘 다 결국: *"기지 심볼은 code-map `read`로 읽어라(독립 ref는 한 콜에 batch); grep은 발견에만
 쓰고 이중 fetch 금지."* MCP 서버도 시작 시 이를 스스로 광고하지만(무설정 baseline↑), *신뢰성*은
@@ -236,6 +243,15 @@ plugin/skill/규칙 지시가 줍니다.
 codex  mcp add code-oracle -- node /abs/path/to/map/code-oracle/server.ts
 claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/server.ts
 ```
+
+**RC 배포 정책:** `code-oracle`은 코어 npm tarball에 들어가지 않고 아직 별도 퍼블리시하지도
+않습니다. 이 레포를 clone하고 `code-oracle/`에서 `npm ci`한 뒤 위 checkout 경로로 배선하세요.
+코어 code-map은 그대로 독립 설치 가능하고 런타임 의존성 하나만 유지합니다.
+
+GA `typescript@7.0.2`는 빌드 컴파일러 `tsc`만 노출하고, code-oracle가 LSP 서버로 쓰는
+`tsgo` launcher는 아직 제공하지 않습니다. 그래서 code-oracle는 최신
+`@typescript/native-preview` LSP 빌드를 정확히 핀합니다. launcher가 `bin/tsgo.js`에서
+확장자 없는 `bin/tsgo`로 바뀌었지만 둘 다 자동 감지하며, `TSGO_BIN`으로 직접 덮어쓸 수도 있습니다.
 
 tsgo 세션을 1회 워밍(~수초~20s, 레포 크기별)하니 스킬은 값어치 있을 때만(큰 레포·충돌 이름) 호출해요.
 **크로스플랫폼:** code-oracle가 `/mnt/c/…` ↔ `C:\…` 경로를 정규화해서 **서버 하나가 Windows IDE와
@@ -300,7 +316,7 @@ node harnesses/bench-codex-headless.mjs --run --passes 30 --repo ../map --strate
 src/
   core/    types · files · extract-symbols (oxc) · fan-in · build-index · locate · read · store
   py/      extract.py   (Python: stdlib ast →같은 per-file 기본형)
-  cli/     main.ts      (index / read / stats)
+  cli/     main.ts      (index / read / changed / stats / setup / version)
   mcp/     server.ts    (유일한 `read` 도구, 자동 리로드)
 test/      extract · exact-slice · methods · relocation · anchor-lost · incremental · fan-in
            · snippet-aim · batch · path-traversal 거부 · Python
@@ -327,14 +343,20 @@ stateful — code-map의 1-dep 가벼움과 정반대. 정직한 범위(측정):
 <summary><b>🔧 메인테이너 / 퍼블리싱</b></summary>
 
 ```bash
-npm test                 # 24 tests
+npm test                 # 49 tests
 npm run typecheck        # tsc --noEmit, strict (에러 0; src/는 any-free)
-npm run lint             # npx oxlint (devDep 없음)
-npm run check:package    # dry-run 패키지 파일목록 안전 검사
-npm publish --access public   # prepublishOnly로 check:package 실행
+npm run lint             # 핀한 oxlint
+npm run release:check    # 전체 검사 + 새 tarball CLI/MCP smoke
 ```
 
 `check:package`는 dry-run 파일 목록을 검사해 로컬 env/config 경로(`.env`, `.codex`,
 `auth.json`, `config.toml`, …)나 토큰성 값이 실리면 *실패*시킵니다.
+GitHub release는 npm Trusted Publishing(OIDC + provenance)으로 배포하고, prerelease는 `next`,
+stable은 `latest` dist-tag로 갑니다.
+
+첫 npm 퍼블리시만 1회 부트스트랩입니다. `0.9.0-rc.1`을 2FA로 수동 퍼블리시한 뒤 npm의
+GitHub Trusted Publisher를 `annyeong844/map` · workflow `publish.yml` · environment `npm` ·
+허용 액션 `npm publish`로 설정하고 GitHub environment를 보호하세요. 그다음 릴리스부터는
+OIDC와 자동 provenance를 쓰며, Actions에 장기 npm token을 넣지 않습니다.
 
 </details>

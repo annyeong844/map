@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { extractSymbols, type ImportEdge, isPython, type SymbolRec } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
 import { listSourceFiles } from './files.ts';
+import { resolvePythonCommand } from './python-command.ts';
 import { INDEX_VERSION, type FileStat, type MapEntry, type MapIndex } from './types.ts';
 import { buildLineIndex, firstLine, indexedLineAt, token } from './util.ts';
 
@@ -14,7 +15,9 @@ import { buildLineIndex, firstLine, indexedLineAt, token } from './util.ts';
  * shared entry/fan-in pipeline runs over Python unchanged. A backend failure
  * aborts the build: silently replacing valid Python entries with an empty set
  * would corrupt an incremental index. */
-const PY_BACKEND = fileURLToPath(new URL('../py/extract.py', import.meta.url));
+// Both src/core/build-index.ts and dist/core/build-index.js resolve this to the
+// package's single shipped Python source file.
+const PY_BACKEND = fileURLToPath(new URL('../../src/py/extract.py', import.meta.url));
 interface PySymbolRec extends SymbolRec { file: string; line: number; endLine: number; searchText: string }
 interface PyParse {
   entries: PySymbolRec[];
@@ -25,8 +28,14 @@ interface PyParse {
 }
 function runPyBackend(root: string, files: string[], targets: string[]): Promise<PyParse> {
   return new Promise((res, rej) => {
-    const cmd = process.env.CODE_MAP_PYTHON ?? 'python3';
-    const p = spawn(cmd, [PY_BACKEND, root], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let python;
+    try {
+      python = resolvePythonCommand();
+    } catch (error) {
+      rej(error);
+      return;
+    }
+    const p = spawn(python.command, [...python.args, PY_BACKEND, root], { stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
@@ -35,7 +44,7 @@ function runPyBackend(root: string, files: string[], targets: string[]): Promise
     const fail = (reason: string): void => {
       if (settled) return;
       settled = true;
-      rej(new Error(`Python backend failed (${cmd}): ${reason}. Set CODE_MAP_PYTHON to a working Python 3 executable.`));
+      rej(new Error(`Python backend failed (${python.display}): ${reason}. Set CODE_MAP_PYTHON to a working Python 3 executable.`));
     };
     p.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); stdoutBytes += chunk.length; });
     p.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); stderrBytes += chunk.length; });

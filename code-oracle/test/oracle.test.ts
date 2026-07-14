@@ -1,21 +1,43 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
-import { ContentLengthDecoder, disposeAll, query, resolveNamePosition, scanProjectEpoch, TOOLS, type OracleSym } from '../server.ts';
+import { ContentLengthDecoder, disposeAll, query, resolveNamePosition, scanProjectEpoch, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const installedTsgo = ['tsgo', 'tsgo.js']
+  .map((name) => join(HERE, '../node_modules/@typescript/native-preview/bin', name))
+  .some((candidate) => existsSync(candidate));
 const hasTsgo =
   (!!process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN)) ||
-  (existsSync(join(HERE, '../node_modules/@typescript/native-preview/bin/tsgo.js')) &&
+  (installedTsgo &&
     existsSync(join(HERE, '../node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`)));
 
 after(() => disposeAll());
 
 test('the three tools are exposed', () => {
   assert.deepEqual(TOOLS.map((t) => t.name).sort(), ['callers', 'definition', 'implementations']);
+});
+
+test('tsgo spawn accepts the new extensionless Node launcher and legacy/native binaries', () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-tsgo-'));
+  try {
+    const extensionless = join(root, 'tsgo');
+    const legacy = join(root, 'tsgo.js');
+    const native = join(root, 'tsgo-native');
+    writeFileSync(extensionless, '#!/usr/bin/env node\n');
+    writeFileSync(legacy, '/* legacy Node launcher */\n');
+    writeFileSync(native, 'native executable placeholder\n');
+
+    const args = ['--lsp', '--stdio'];
+    assert.deepEqual(tsgoSpawnCommand(extensionless), { cmd: process.execPath, args: [extensionless, ...args] });
+    assert.deepEqual(tsgoSpawnCommand(legacy), { cmd: process.execPath, args: [legacy, ...args] });
+    assert.deepEqual(tsgoSpawnCommand(native), { cmd: native, args });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('Content-Length decoding is linear-safe across byte splits and packed frames', () => {

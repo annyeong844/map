@@ -1,6 +1,6 @@
 {
   "name": "@annyeong844/code-map",
-  "version": "0.1.0",
+  "version": "0.9.0-rc.1",
   "description": "A code map that routes to coordinates, not meaning. Guides an LLM to the crate; the LLM interprets the raw from there.",
   "type": "module",
   "homepage": "https://github.com/annyeong844/map#readme",
@@ -12,7 +12,8 @@
     "url": "https://github.com/annyeong844/map/issues"
   },
   "files": [
-    "src",
+    "dist",
+    "src/py/extract.py",
     "skills",
     "hooks",
     ".claude-plugin",
@@ -21,23 +22,36 @@
     "plugins",
     "GEMINI.md",
     "scripts/check-package-safety.mjs",
+    "scripts/check-versions.mjs",
+    "scripts/package-smoke.mjs",
+    "scripts/build.mjs",
+    "scripts/prepare-package.mjs",
     "scripts/benchmark.mjs",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "README.md",
     "README.ko.md",
     "LICENSE"
   ],
   "bin": {
-    "map": "src/cli/main.ts",
-    "map-mcp": "src/mcp/server.ts"
+    "map": "dist/cli/main.js",
+    "map-mcp": "dist/mcp/server.js"
   },
   "scripts": {
     "map": "node src/cli/main.ts",
     "mcp": "node src/mcp/server.ts",
-    "check:package": "node scripts/check-package-safety.mjs",
-    "prepublishOnly": "npm run check:package",
+    "build": "node scripts/build.mjs",
+    "check:package": "npm run build && node scripts/check-package-safety.mjs",
+    "check:versions": "node scripts/check-versions.mjs",
+    "smoke:package": "npm run build && node scripts/package-smoke.mjs",
+    "release:check": "npm run typecheck && npm test && npm run lint && npm run check:versions && npm run check:package && npm run smoke:package",
+    "prepublishOnly": "npm run release:check",
+    "prepack": "npm run build",
+    "prepare": "node scripts/prepare-package.mjs",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
-    "lint": "npx --yes oxlint src test",
+    "lint": "oxlint src test",
     "bench": "node --expose-gc scripts/benchmark.mjs"
   },
   "engines": {
@@ -65,6 +79,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
+    "oxlint": "1.74.0",
     "typescript": "^7.0.2"
   }
 }

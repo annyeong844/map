@@ -34,7 +34,7 @@ small, exact, drift-proof. That's the whole idea.
 | | |
 |---|---|
 | 🎯 **Never silently wrong** | After heavy edits with no re-index, `read` re-anchors on the signature line: **0 silently-wrong bytes** (a naive "line number" cache is ~100% wrong). It returns the right code or tells you it can't — never the wrong bytes. |
-| ⚡ **Fewer tokens, fewer steps** | Latest direct known-ref run (**GPT-5.6 Sol, pass@30, 180 tasks, forced real-`rg` baseline**): **−22.4% effective input, −26.3% raw input, −14.7% time, −67.9% calls**, with semantic correctness tied. The older diverse codex plugin run measured −19% / −67% shell commands; grok known-ref reads measured −53…−60% tokens. |
+| ⚡ **Fewer tokens, fewer steps** | Direct known-ref run (**GPT-5.6 Sol, pass@30, 180 tasks, forced real-`rg` baseline**): **−22.4% effective input, −26.3% raw input, −14.7% time, −67.9% calls**, with semantic correctness tied. A newer **paired n=10 multi-stage pilot** measured **−31.8% effective / −40.4% raw input, −14.7% time, and −74.6% calls** across 240 scored stages; pass@30 confirmation is pending. |
 | 🧭 **Routing is the lever** | Agents won't reach for `read` on their own (~17%). The bundled **plugin/skill** makes them: it flips discovery from a *loss* to **−31%** by killing the double-call, and turns vague usage (erratic, **+61%** worse on one task) into a steady win — **30/30 pass**. |
 | 🧩 **Tiny & drop-in** | Node + **one** dependency (`oxc-parser`), no build step. TS/JS **and** Python. MCP server + a one-line skill — install for Claude, Codex, grok, or Antigravity. |
 
@@ -118,6 +118,7 @@ cut to match. Keeping only what beat the baseline *is the point*.
 | **Drift-safe EDIT** (`read --snippet`) | Quoted snippet → its *current* char range after churn: **0 silent mistargets** vs naive **100%**. | **kept** |
 | **`refs` batch tokens** | Pass@30, 150 tasks, real plugin env (codex): **−18.6% effective tokens, −67% shell commands, tied pass@30, 0 MCP fails.** Biggest where it fully replaces grep (known-cross-file −25% tok / −44% time); a wash/slower where it only supplements (discovery, multi-symbol batch). **A loss on Opus** (native already lean). | **kept** |
 | **GPT-5.6 Sol known refs** | Pass@30, 180 tasks vs forced real `rg`: **−22.4% effective / −26.3% raw input, −14.7% time, −67.9% calls, −58.4% retrieval payload**; semantic answers tied 90/90 per strategy. Known-single alone: **−20.0% effective input**. | **kept** |
+| **GPT-5.6 Sol multi-stage workflows** | Paired **n=10 pilot**, 3 four-stage workflows / 240 scored stages: **−31.8% effective / −40.4% raw input, −14.7% time, −74.6% calls, −25.5% payload**; semantic answers tied 120/120 per strategy. **Not pass@30 yet.** | **promising pilot** |
 | **Read — turns** | −25–30% agent *turns* (K=30, both models, CI clear of 0). | **kept** |
 | **Caller precision** (`code-oracle`, separate sibling) | **31% fewer files to read** for blast-radius (40–75% on common names); the type checker disambiguates which class's method. LSP-warmup cost. | **kept (sibling)** |
 | **Single-read tokens** | The early blanket "−16–35%" was K=5 noise and was correctly retracted for its Sonnet/Opus task (~0 / worse). It was too broad to imply no savings generally: GPT-5.6 Sol known-single now measures **−20.0% effective / −24.1% raw input**. | **scope corrected** |
@@ -270,6 +271,12 @@ The newer GPT-5.6 Sol forced-`rg` known-ref run (3 scenarios × 30) measures **�
 effective input, −26.3% raw input, and −14.7% time overall**. Its known-single cell is
 **−20.0% effective input**, correcting the older wording that could be read as a universal
 "single read saves ~0" claim. Full report: [GPT-5.6 Sol pass@30](https://github.com/annyeong844/code-map-bench/blob/main/results/gpt56-sol-pass30.md).
+
+A continuous-workflow follow-up (orient → trace → impact analysis → tool-free
+synthesis) kept the savings across 10 paired passes: **−31.8% effective input, −40.4%
+raw input, −14.7% elapsed, and −74.6% calls**, with semantic correctness tied at
+120/120 stages per strategy. This is explicitly an **n=10 pilot**, not a pass@30 result;
+see the [multi-stage workflow report](https://github.com/annyeong844/code-map-bench/blob/main/results/gpt56-sol-workflow-pilot10.md).
 
 It is **not** a token-saver everywhere — strongest when the agent already knows the refs and
 code-map can *replace* (not augment) the search.

@@ -34,13 +34,14 @@ code-map이 옆에 있으면 에이전트는 그냥:
 | | |
 |---|---|
 | 🎯 **조용히 틀리지 않음** | 대량 편집 후 재인덱싱 없이도 `read`는 시그니처 줄로 재앵커링: **조용히-틀린 바이트 0개** (순진한 "줄번호" 캐시는 ~100% 틀림). 맞는 코드를 주거나 *못 준다고 말할 뿐*, 절대 엉뚱한 바이트를 안 줍니다. |
-| ⚡ **토큰·단계 절감** | 코딩 에이전트 배선 시(codex, 150-태스크 pass@30): **토큰 −19%, 셸 명령 −67%, 성공률 동일.** *기지(known) ref* 읽기에선 절감폭이 훨씬 큼 — grok composer-2.5-fast 30패스: **토큰 −53~60%, 검색 페이로드 −71~78%**; codex+라우팅 skill: **−34~54%**. |
+| ⚡ **토큰·단계 절감** | 최신 직접 기지-ref 실험(**GPT-5.6 Sol, pass@30, 180태스크, 실제 `rg` 강제 기준선**): **effective 입력 −22.4%, raw 입력 −26.3%, 시간 −14.7%, 호출 −67.9%**, 의미 정답률 동률. 이전 codex 실 plugin 실험은 −19% / 셸 −67%, grok 기지-ref는 토큰 −53~60%였음. |
 | 🧭 **라우팅이 레버** | 에이전트는 스스로 `read`를 잘 안 씀(~17%). 동봉 **plugin/skill**이 그걸 시킴: discovery를 *손해*에서 **−31%**로 뒤집고(이중호출 제거), 들쭉날쭉한 사용(한 시나리오 **+61%** 손해)을 안정적 승리로(**30/30 pass**). |
 | 🧩 **가볍고 drop-in** | Node + 의존성 **1개**(`oxc-parser`), 빌드 단계 없음. TS/JS **그리고** Python. MCP 서버 + 한 줄 skill — Claude·Codex·grok·Antigravity에 설치. |
 
 > **경계에 대해 정직하게** (이 레포의 핵심): code-map은 *검색*에서 `grep`을 못 이깁니다 —
 > 동급이라 grep은 그냥 쓰세요. 그리고 *어디서나* 토큰을 줄이는 마법도 아닙니다 — 기지 ref
-> 읽기에선 **라우팅과 함께** 크게 이득, 이미 린한 read 과제에선 ~0, 순수 discovery에선
+> 읽기에선 **라우팅과 함께** 크게 이득이지만 모델·과제에 따라 다릅니다(이전 Sonnet/Opus
+> 단발 과제는 ~0/손해, GPT-5.6 Sol known-single은 effective −20%). 순수 discovery에선
 > skill이 라우팅하지 않으면 *손해*. 모든 수치·철회·모델/지표 주의·1-커맨드 검증기는
 > **[code-map-bench](https://github.com/annyeong844/code-map-bench)** 에 있어요.
 
@@ -113,9 +114,10 @@ code-map은 넓게 시작했고(locate, grep, graph, hotspots, 시맨틱 검색)
 | **드리프트-안전 READ** (`read`) | 대량 churn 후 재인덱싱 없이: **조용히-틀린 바이트 0**, 94.5% 복구 vs 순진한 줄-캐시 **100% silent**. 재현됨. | **유지** |
 | **드리프트-안전 EDIT** (`read --snippet`) | 인용 스니펫 → churn 후의 *현재* char 범위: **조용한 오타게팅 0** vs 순진한 방식 **100%**. | **유지** |
 | **`refs` batch 토큰** | pass@30, 150 태스크, 실 plugin(codex): **effective 토큰 −18.6%, 셸 명령 −67%, pass@30 동률, MCP fail 0.** grep을 완전 대체할 때 최대(known-cross-file 토큰 −25% / 시간 −44%); 보완만 할 땐 동률/느림(discovery, multi-symbol batch). **Opus에선 손해**(native가 이미 린). | **유지** |
+| **GPT-5.6 Sol 기지 ref** | pass@30, 실제 `rg` 강제 기준선과 180태스크: **effective 입력 −22.4% / raw −26.3%, 시간 −14.7%, 호출 −67.9%, 검색 페이로드 −58.4%**; 의미 답변은 전략별 90/90 동률. known-single만도 **effective −20.0%**. | **유지** |
 | **Read — turns** | 에이전트 *턴* −25–30% (K=30, 양 모델, CI가 0에서 떨어짐). | **유지** |
 | **Caller 정밀도** (`code-oracle`, 별도 sibling) | blast-radius에서 **읽을 파일 31% 감소**(흔한 이름 40–75%); 타입 체커가 *어느 클래스 메서드*인지 가림. LSP 워밍업 비용. | **유지(sibling)** |
-| **단발-read 토큰** | 초기 "−16–35%"는 K=5 노이즈; K=30 단발은 ~0. | 철회 |
+| **단발-read 토큰** | 초기 포괄적 "−16–35%"는 K=5 노이즈라 해당 Sonnet/Opus 과제(~0/손해)에 대해 올바르게 철회. 그러나 일반적 무절감을 뜻하진 않음: GPT-5.6 Sol known-single은 **effective −20.0% / raw −24.1%**. | **범위 수정** |
 | **검색 / `locate`** | `grep`과 **동급**(100% recall). | 제거 |
 | **시맨틱 임베딩** | **더 나쁨** — 3가지로 독립 기각, grep 에이전트를 *오히려 악화*. | 안 만듦 |
 | **경량 call-graph** | recall에서 **grep에 패배**(dispatch/타입에 눈멈). | 제거 |
@@ -231,7 +233,9 @@ WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** �
 ```bash
 git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench
 codex login --device-auth
-node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --strategies native,map-batch
+node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --repo ../map --strategies native,map-batch
+# 중첩 셸이 제한되면 실제 rg 기준선을 강제:
+node harnesses/bench-codex-headless.mjs --run --passes 30 --repo ../map --strategies grep-mcp,map-batch --model gpt-5.6-sol
 ```
 
 하네스([code-map-bench](https://github.com/annyeong844/code-map-bench))는 다양한 태스크셋에 pass@30을 돌리고, `codex exec --json`의
@@ -246,6 +250,11 @@ node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --strat
 | file-wide / known-single | 토큰 −15~21%, 시간 −28~35% | 기지 심볼, grep 대체 |
 | discovery-first | 토큰 ↓ but **시간 ↑** | 먼저 grep으로 찾아야 → code-map은 보완만 |
 | multi-symbol batch | ~동률 | native가 거기선 이미 batch |
+
+더 최신 GPT-5.6 Sol 실제-`rg` 강제 기지-ref 실험(3 시나리오 × 30)은 전체 **effective 입력
+−22.4%, raw 입력 −26.3%, 시간 −14.7%**를 측정했습니다. known-single 셀도 **effective
+−20.0%**로, 이전 문구가 "단발 read는 보편적으로 ~0"처럼 읽히던 부분을 바로잡습니다.
+전체 보고서: [GPT-5.6 Sol pass@30](https://github.com/annyeong844/code-map-bench/blob/main/results/gpt56-sol-pass30.md).
 
 *어디서나* 토큰을 줄이는 게 **아니에요** — 에이전트가 ref를 이미 알고 code-map이 검색을
 *대체*(보완 아님)할 수 있을 때 가장 강합니다.

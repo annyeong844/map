@@ -34,14 +34,15 @@ small, exact, drift-proof. That's the whole idea.
 | | |
 |---|---|
 | 🎯 **Never silently wrong** | After heavy edits with no re-index, `read` re-anchors on the signature line: **0 silently-wrong bytes** (a naive "line number" cache is ~100% wrong). It returns the right code or tells you it can't — never the wrong bytes. |
-| ⚡ **Fewer tokens, fewer steps** | Wired into a coding agent (codex, 150-task pass@30): **−19% tokens, −67% shell commands, same success rate.** On **known-ref** reads the cut is much larger — grok composer-2.5-fast, 30 passes: **−53…−60% tokens, −71…−78% retrieval payload**; codex with the routing skill: **−34…−54%**. |
+| ⚡ **Fewer tokens, fewer steps** | Latest direct known-ref run (**GPT-5.6 Sol, pass@30, 180 tasks, forced real-`rg` baseline**): **−22.4% effective input, −26.3% raw input, −14.7% time, −67.9% calls**, with semantic correctness tied. The older diverse codex plugin run measured −19% / −67% shell commands; grok known-ref reads measured −53…−60% tokens. |
 | 🧭 **Routing is the lever** | Agents won't reach for `read` on their own (~17%). The bundled **plugin/skill** makes them: it flips discovery from a *loss* to **−31%** by killing the double-call, and turns vague usage (erratic, **+61%** worse on one task) into a steady win — **30/30 pass**. |
 | 🧩 **Tiny & drop-in** | Node + **one** dependency (`oxc-parser`), no build step. TS/JS **and** Python. MCP server + a one-line skill — install for Claude, Codex, grok, or Antigravity. |
 
 > **Honest about the edges** (this repo's whole point): code-map does **not** beat `grep` at
 > *searching* — it ties, so keep grepping. And it's **not** a universal token-saver — the win
-> is large for reading *known* symbols **with routing**, ~0 on an already-lean read task, and a
-> *loss* on raw discovery unless the skill routes it. Every number, every retraction, the
+> is large for reading *known* symbols **with routing**, but model/task-dependent (an older
+> Sonnet/Opus isolated read was ~0 or worse; GPT-5.6 Sol known-single is now −20% effective),
+> and a *loss* on raw discovery unless the skill routes it. Every number, every retraction, the
 > model/metric caveats, and a one-command verifier:
 > **[code-map-bench](https://github.com/annyeong844/code-map-bench)**.
 
@@ -116,9 +117,10 @@ cut to match. Keeping only what beat the baseline *is the point*.
 | **Drift-safe READ** (`read`) | After heavy churn, no re-index: **0 silently-wrong bytes**, 94.5% recovery vs naive line-caching at **100% silent**. Reproduced. | **kept** |
 | **Drift-safe EDIT** (`read --snippet`) | Quoted snippet → its *current* char range after churn: **0 silent mistargets** vs naive **100%**. | **kept** |
 | **`refs` batch tokens** | Pass@30, 150 tasks, real plugin env (codex): **−18.6% effective tokens, −67% shell commands, tied pass@30, 0 MCP fails.** Biggest where it fully replaces grep (known-cross-file −25% tok / −44% time); a wash/slower where it only supplements (discovery, multi-symbol batch). **A loss on Opus** (native already lean). | **kept** |
+| **GPT-5.6 Sol known refs** | Pass@30, 180 tasks vs forced real `rg`: **−22.4% effective / −26.3% raw input, −14.7% time, −67.9% calls, −58.4% retrieval payload**; semantic answers tied 90/90 per strategy. Known-single alone: **−20.0% effective input**. | **kept** |
 | **Read — turns** | −25–30% agent *turns* (K=30, both models, CI clear of 0). | **kept** |
 | **Caller precision** (`code-oracle`, separate sibling) | **31% fewer files to read** for blast-radius (40–75% on common names); the type checker disambiguates which class's method. LSP-warmup cost. | **kept (sibling)** |
-| **Single-read tokens** | The early "−16–35%" was K=5 noise; single read at K=30 ~0. | retracted |
+| **Single-read tokens** | The early blanket "−16–35%" was K=5 noise and was correctly retracted for its Sonnet/Opus task (~0 / worse). It was too broad to imply no savings generally: GPT-5.6 Sol known-single now measures **−20.0% effective / −24.1% raw input**. | **scope corrected** |
 | **Search / `locate`** | **Ties** `grep` (100% recall). | removed |
 | **Semantic embeddings** | **Worse** — rejected three independent ways; degraded a grep agent. | not built |
 | **Light call-graph** | **Loses to `grep` on recall** (blind to dispatch/types). | removed |
@@ -246,7 +248,9 @@ can serve WSL clients too, dodging the `/mnt/c` drvfs penalty (~38s → ~4s on t
 ```bash
 git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench
 codex login --device-auth
-node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --strategies native,map-batch
+node harnesses/bench-codex-headless.mjs --run --passes 30 --auth chatgpt --repo ../map --strategies native,map-batch
+# Restricted nested shell? Force the reproducible real-rg baseline instead:
+node harnesses/bench-codex-headless.mjs --run --passes 30 --repo ../map --strategies grep-mcp,map-batch --model gpt-5.6-sol
 ```
 
 The harness (in [code-map-bench](https://github.com/annyeong844/code-map-bench)) runs pass@30 over a diverse task set, captures usage
@@ -261,6 +265,11 @@ can see the win under real prompt caching. The honest takeaway, by scenario:
 | file-wide / known-single | −15–21% tokens, −28–35% time | known symbols, grep replaced |
 | discovery-first | tokens ↓ but **time ↑** | must grep to find first → code-map only supplements |
 | multi-symbol batch | ~tie | native already batches there |
+
+The newer GPT-5.6 Sol forced-`rg` known-ref run (3 scenarios × 30) measures **−22.4%
+effective input, −26.3% raw input, and −14.7% time overall**. Its known-single cell is
+**−20.0% effective input**, correcting the older wording that could be read as a universal
+"single read saves ~0" claim. Full report: [GPT-5.6 Sol pass@30](https://github.com/annyeong844/code-map-bench/blob/main/results/gpt56-sol-pass30.md).
 
 It is **not** a token-saver everywhere — strongest when the agent already knows the refs and
 code-map can *replace* (not augment) the search.

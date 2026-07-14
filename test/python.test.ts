@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { buildIndex } from '../src/core/build-index.ts';
+import { resolvePythonCommand } from '../src/core/python-command.ts';
 import { read } from '../src/core/read.ts';
 
 function repo(files: Record<string, string>): string {
@@ -18,17 +18,28 @@ function repo(files: Record<string, string>): string {
 }
 
 const pythonCommand = (() => {
-  for (const c of [process.env.CODE_MAP_PYTHON, 'python3', 'python'].filter(Boolean) as string[]) {
-    try {
-      execFileSync(c, ['--version'], { stdio: 'ignore' });
-      return c;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
+  try { return resolvePythonCommand(); } catch { return null; }
 })();
 const hasPython = pythonCommand !== null;
+
+test('Python launcher uses the platform-native candidates and preserves an override', () => {
+  const windowsProbes: string[] = [];
+  const windows = resolvePythonCommand({
+    platform: 'win32',
+    probe: (command, args) => {
+      windowsProbes.push([command, ...args].join(' '));
+      return command === 'python';
+    },
+  });
+  assert.deepEqual(windowsProbes, ['py -3', 'python3', 'python']);
+  assert.deepEqual(windows, { command: 'python', args: [], display: 'python' });
+
+  const linux = resolvePythonCommand({ platform: 'linux', probe: (command) => command === 'python3' });
+  assert.deepEqual(linux, { command: 'python3', args: [], display: 'python3' });
+  assert.deepEqual(resolvePythonCommand({ override: '/opt/python' }), {
+    command: '/opt/python', args: [], display: '/opt/python',
+  });
+});
 
 const MOD = `def shared_util(x):
     """A helper imported across the package."""
@@ -93,7 +104,6 @@ test('Python backend failure aborts instead of silently deleting prior symbols',
   const root = repo({ 'mod.py': 'def alpha():\n    return 1\n' });
   const previousCommand = process.env.CODE_MAP_PYTHON;
   try {
-    process.env.CODE_MAP_PYTHON = pythonCommand!;
     const first = await buildIndex({ root });
     assert.ok(first.index.entries.some((e) => e.name === 'alpha'));
     writeFileSync(join(root, 'mod.py'), 'def beta():\n    return 2\n');

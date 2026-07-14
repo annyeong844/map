@@ -7,6 +7,6 @@
   "bin": { "code-oracle-mcp": "./server.ts" },
   "scripts": { "start": "node server.ts", "test": "node --test \"test/*.test.ts\"", "typecheck": "npx -y -p typescript@5 -p @types/node tsc --noEmit -p ." },
   "engines": { "node": ">=23.6" },
-  "_dependencyNote": "tsgo is a daily preview build (preview churn) — pinned EXACT to a known-good day, not a floating caret, so a standalone install reproduces. Bump deliberately. Python uses ty via `uvx ty server` + python3 (no npm pin).",
-  "dependencies": { "@typescript/native-preview": "7.0.0-dev.20260618.1" }
+  "_dependencyNote": "The tsgo LSP still ships via @typescript/native-preview, not GA typescript (tsc only). Pin EXACT to a known-good day; the resolver accepts current bin/tsgo and legacy bin/tsgo.js. Python uses ty via `uvx ty server` + python3 (no npm pin).",
+  "dependencies": { "@typescript/native-preview": "7.0.0-dev.20260707.2" }
 }

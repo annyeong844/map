@@ -9,6 +9,7 @@
 ![langs](https://img.shields.io/badge/TS%2FJS-%2B%20Python-blue)
 ![deps](https://img.shields.io/badge/runtime%20deps-1%20(oxc--parser)-brightgreen)
 ![tool](https://img.shields.io/badge/tools-just%20%60read%60-ff69b4)
+![release](https://img.shields.io/badge/release-0.9.0--rc.1-orange)
 
 ---
 
@@ -48,24 +49,24 @@ small, exact, drift-proof. That's the whole idea.
 
 **TL;DR — grep finds, `read` reads.**
 
+> **Release status:** `0.9.0-rc.1` is the public release candidate. The core is ready for
+> real projects; the RC label leaves room to harden installation reports before freezing 1.0.
+
 ---
 
 ## Quick start
 
 ```bash
-# 1. install (until npm publish, straight from GitHub)
-npm install -g github:annyeong844/map        # gives you `map` + `map-mcp`
+# 1. install the release candidate (`next` after the first npm release)
+npm install -g @annyeong844/code-map@next
+# Before that release exists: npm install -g github:annyeong844/map
 
-# 2. index the repo you want your agent to read
+# 2. wire both the routing plugin/rules and MCP (dry-run without --apply)
+map setup codex --apply
+# Other hosts: map setup claude --apply  |  map setup gemini --apply
+
+# 3. index the repo you want your agent to read
 cd /path/to/your-repo && map index --root .  # writes ./.map-index.json
-
-# 3. wire it into Codex (the repo ships a Codex marketplace entry)
-codex plugin marketplace add /path/to/map
-codex plugin add code-map@code-map
-codex mcp add code-map -- map-mcp
-
-# Other hosts
-claude mcp add code-map --scope user -- map-mcp   # Claude Code
 ```
 
 That's it — your agent now has one tool, `read`. For the **−19% / −67%** efficiency win on
@@ -184,11 +185,18 @@ symbol. Honest scope: namespace / `export *` / alias imports aren't attributed.
 <summary><b>🔌 Wiring it for real (install options + the efficiency win)</b></summary>
 
 **Requirements:** Node ≥ 23.6 (runs TypeScript directly, no build), one runtime dep
-(`oxc-parser`); `ripgrep` used for the file walk when present; Python needs `python3` on `PATH`.
+(`oxc-parser`); `ripgrep` used for the file walk when present. Python 3 is auto-detected as
+`python3`/`python` on Unix and `py -3`/`python3`/`python` on Windows; `CODE_MAP_PYTHON` overrides it.
+For a native WSL install, check `node --version` *inside WSL*—a current Windows Node does not
+upgrade a stale WSL Node, and code-map requires ≥23.6 in the environment that launches it.
 
-**Install:** `npm install -g @annyeong844/code-map` (once published) ·
-`npm install -g github:annyeong844/map` (now) · or clone + `npm install && npm link`.
+**Install:** `npm install -g @annyeong844/code-map@next` (RC channel) ·
+`npm install -g github:annyeong844/map` (before npm release) · or clone + `npm install && npm link`.
 All expose `map` and `map-mcp`.
+
+Then use `map setup codex|claude|gemini`. It prints an inspectable dry run; add `--apply` to
+make the idempotent user-level changes. This installs both halves that measurements require:
+the routing rules/plugin and the MCP server.
 
 **MCP config** — one global server can switch repositories per call:
 
@@ -219,18 +227,16 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
   Codex-first routing skill at `plugins/code-map/skills/code-map-retrieval/`, a
   `.codex-plugin/plugin.json` manifest, and `.agents/plugins/marketplace.json`.
   ```bash
-  codex plugin marketplace add /path/to/map
-  codex plugin add code-map@code-map
+  map setup codex --apply
+  map setup claude --apply
   grok plugin install annyeong844/map          # Grok (or a local path)
-  claude plugin install annyeong844/map         # Claude Code
   ```
   It carries the **discovery double-call guard** — for discovery, grep and *stop*; don't add a
   `read` on top — which a 3-arm benchmark showed flips discovery from a loss to a win.
 - **An `AGENTS.md` line (per-repo, zero load cost):** see [code-map-bench/integrations/AGENTS.code-map.md](https://github.com/annyeong844/code-map-bench/blob/main/integrations/AGENTS.code-map.md).
-- **Antigravity / Gemini:** Antigravity reads rules from `GEMINI.md` (global `~/.gemini/GEMINI.md`
-  or workspace) and `AGENTS.md`. This repo ships a ready `GEMINI.md` — copy it into your global
-  `~/.gemini/GEMINI.md` (or a workspace) for the routing. Wire the MCP via the IDE's
-  **Manage MCP Servers → View raw config** (`~/.gemini/config/mcp_config.json`):
+- **Antigravity / Gemini:** `map setup gemini --apply` merges the bundled `GEMINI.md` routing
+  block into `~/.gemini/GEMINI.md` and the MCP into `~/.gemini/config/mcp_config.json` without
+  replacing unrelated settings. The resulting MCP entry is:
   ```jsonc
   { "mcpServers": { "code-map": { "command": "map-mcp" } } }
   ```
@@ -251,6 +257,15 @@ checker-grade). It's a separate MCP (kept out of the zero-dep core); wire it whe
 codex  mcp add code-oracle -- node /abs/path/to/map/code-oracle/server.ts
 claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/server.ts
 ```
+
+**RC distribution policy:** `code-oracle` is intentionally not inside the core npm tarball and
+is not separately published yet. Clone this repository, run `npm ci` in `code-oracle/`, and wire
+that checkout as above. Core code-map remains independently installable and one-dependency light.
+
+GA `typescript@7.0.2` exposes the build compiler as `tsc`, but not the `tsgo` launcher that
+code-oracle uses for its LSP server. Code-oracle therefore pins the current
+`@typescript/native-preview` LSP build. Its launcher changed from `bin/tsgo.js` to
+extensionless `bin/tsgo`; both layouts are detected, and `TSGO_BIN` remains an explicit override.
 
 It warms a tsgo session once (~seconds–20s by repo size), so the skill only calls it when it pays
 (large repo / colliding name). **Cross-platform:** code-oracle normalizes `/mnt/c/…` ↔ `C:\…` paths,
@@ -316,7 +331,7 @@ code-map can *replace* (not augment) the search.
 src/
   core/    types · files · extract-symbols (oxc) · fan-in · build-index · locate · read · store
   py/      extract.py   (Python: stdlib ast → the same per-file primitives)
-  cli/     main.ts      (index / read / stats)
+  cli/     main.ts      (index / read / changed / stats / setup / version)
   mcp/     server.ts    (the single `read` tool, auto-reload)
 test/      extract · exact-slice · methods · relocation · anchor-lost · incremental · fan-in
            · snippet-aim · batch · path-traversal refusal · Python
@@ -344,14 +359,20 @@ dynamic dispatch (token-only DI, `Proxy`, `obj[k]()`) is invisible to any checke
 <summary><b>🔧 Maintainer / publishing</b></summary>
 
 ```bash
-npm test                 # 24 tests
+npm test                 # 49 tests
 npm run typecheck        # tsc --noEmit, strict (0 errors; src/ is any-free)
-npm run lint             # npx oxlint (no devDep)
-npm run check:package    # dry-run package file-list safety check
-npm publish --access public   # runs check:package via prepublishOnly
+npm run lint             # pinned oxlint
+npm run release:check    # all checks + fresh-tarball CLI/MCP smoke
 ```
 
 `check:package` inspects the exact dry-run file list and fails if local env/config paths
 (`.env`, `.codex`, `auth.json`, `config.toml`, …) or likely token values would ship.
+GitHub releases publish through npm Trusted Publishing (OIDC + provenance); prereleases go to
+the `next` dist-tag and stable versions to `latest`.
+
+The first npm publication is the one-time bootstrap: publish `0.9.0-rc.1` manually with 2FA,
+then configure npm's GitHub trusted publisher for `annyeong844/map`, workflow `publish.yml`,
+environment `npm`, and allowed action `npm publish`. Protect that GitHub environment. Every later
+release uses OIDC and automatic provenance; never add a long-lived npm token to Actions.
 
 </details>

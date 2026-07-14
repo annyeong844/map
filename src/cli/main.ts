@@ -3,6 +3,8 @@ import { resolve as resolvePath } from 'node:path';
 import { buildIndex, type BuildReport } from '../core/build-index.ts';
 import { changed, read, readMany } from '../core/read.ts';
 import { DEFAULT_INDEX_PATH, loadIndex, saveIndex } from '../core/store.ts';
+import { VERSION } from '../version.ts';
+import { applySetup, formatSetupPlan, setupPlan, type SetupHost } from './setup.ts';
 
 function parseArgs(argv: string[]): { _: string[]; flags: Record<string, string | boolean> } {
   const _: string[] = [];
@@ -30,9 +32,12 @@ const USAGE = `code-map — token-efficient, drift-resistant reads. Coordinates,
 
   map index  [--root <dir>] [--out <.map-index.json>] [--force]   (root defaults to .)
   map read   <id|query> [--snippet "<text>"]              [--json]   (exact symbol slice; snippet → sub-symbol char range)
+  map changed --refs "a,b,c" [--json]                                 (refresh only drifted working-set symbols)
   map stats
+  map setup  <codex|claude|gemini> [--apply] [--json]                 (wire plugin/rules + MCP; dry-run by default)
+  map version
 
-  Global: --index <path>   (default ./.map-index.json)
+  Global: --index <path>   (default ./.map-index.json)   --version, -v
 
 'read' takes a symbol id or a bare name/path-scoped name (it resolves the name to one
 symbol internally). Use your normal grep to SEARCH; use 'read' to pull the exact slice
@@ -43,6 +48,11 @@ async function main(): Promise<void> {
   const cmd = _[0];
   const indexPath = (flags.index as string) ?? DEFAULT_INDEX_PATH;
   const json = !!flags.json;
+
+  if (flags.version || cmd === 'version' || cmd === '-v') {
+    console.log(VERSION);
+    return;
+  }
 
   switch (cmd) {
     case 'index': {
@@ -141,6 +151,28 @@ async function main(): Promise<void> {
       console.log(`  symbols: ${idx.meta.entryCount}   files: ${out.files}`);
       for (const [k, n] of Object.entries(byKind).sort((a, b) => b[1] - a[1])) {
         console.log(`    ${String(n).padStart(6)}  ${k}`);
+      }
+      return;
+    }
+
+    case 'setup': {
+      const host = _[1];
+      if (host !== 'codex' && host !== 'claude' && host !== 'gemini') {
+        die('setup needs one host: codex, claude, or gemini.');
+      }
+      const plan = setupPlan(host as SetupHost);
+      if (!flags.apply) {
+        console.log(json ? JSON.stringify(plan, null, 2) : formatSetupPlan(plan));
+        return;
+      }
+      const changed = applySetup(plan);
+      const result = { host, changed, alreadyConfigured: changed.length === 0 };
+      if (json) console.log(JSON.stringify(result, null, 2));
+      else if (changed.length) {
+        console.log(`Configured code-map for ${host}:`);
+        for (const item of changed) console.log(`  - ${item}`);
+      } else {
+        console.log(`code-map is already configured for ${host}.`);
       }
       return;
     }

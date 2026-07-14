@@ -16,7 +16,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -40,6 +40,28 @@ function langOf(file: string): Lang | null {
   return null;
 }
 
+/** Build the tsgo spawn command for either a native executable or a Node
+ * launcher. New native-preview releases use an extensionless `bin/tsgo`
+ * Node wrapper; older releases used `bin/tsgo.js`. */
+export function tsgoSpawnCommand(bin: string): { cmd: string; args: string[] } {
+  let nodeLauncher = /\.[cm]?js$/i.test(bin);
+  if (!nodeLauncher) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(bin, 'r');
+      const prefix = Buffer.alloc(64);
+      const bytes = readSync(fd, prefix, 0, prefix.length, 0);
+      nodeLauncher = /^#![^\r\n]*\bnode(?:\s|$)/i.test(prefix.subarray(0, bytes).toString('utf8'));
+    } catch {
+      nodeLauncher = false;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  const args = ['--lsp', '--stdio'];
+  return nodeLauncher ? { cmd: process.execPath, args: [bin, ...args] } : { cmd: bin, args };
+}
+
 /** The LSP backend for a language: how to spawn it + the LSP `languageId`. tsgo
  * for TS/JS, ty for Python — both speak the same LSP, so everything downstream
  * (framing, readiness, references/definition/implementation, cache) is shared. */
@@ -47,15 +69,14 @@ function backend(lang: Lang): { cmd: string; args: string[]; languageId: string 
   if (lang === 'ts') {
     if (process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN)) {
       const override = process.env.TSGO_BIN;
-      return /\.[cm]?js$/i.test(override)
-        ? { cmd: process.execPath, args: [override, '--lsp', '--stdio'], languageId: 'typescript' }
-        : { cmd: override, args: ['--lsp', '--stdio'], languageId: 'typescript' };
+      return { ...tsgoSpawnCommand(override), languageId: 'typescript' };
     }
-    const bin = join(HERE, 'node_modules/@typescript/native-preview/bin/tsgo.js');
+    const packageBin = join(HERE, 'node_modules/@typescript/native-preview/bin');
+    const bin = [join(packageBin, 'tsgo'), join(packageBin, 'tsgo.js')].find((candidate) => existsSync(candidate));
     const platform = join(HERE, 'node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`);
     // npm can leave a wrapper plus another OS's optional package in a shared
     // checkout. Treat that as unavailable now, not as two 40-second LSP timeouts.
-    return existsSync(bin) && existsSync(platform) ? { cmd: process.execPath, args: [bin, '--lsp', '--stdio'], languageId: 'typescript' } : null;
+    return bin && existsSync(platform) ? { ...tsgoSpawnCommand(bin), languageId: 'typescript' } : null;
   }
   // Python via ty's language server. TY_CMD overrides (e.g. an absolute `ty`); default runs via uvx.
   return process.env.TY_CMD ? { cmd: process.env.TY_CMD, args: ['server'], languageId: 'python' } : { cmd: 'uvx', args: ['ty', 'server'], languageId: 'python' };

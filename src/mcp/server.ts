@@ -11,16 +11,17 @@
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { changed, read } from '../core/read.ts';
-import { loadIndex } from '../core/store.ts';
+import { changed, read, readMany } from '../core/read.ts';
+import { loadIndex, prepareLookup } from '../core/store.ts';
 import type { MapIndex } from '../core/types.ts';
 
 const PROTOCOL = '2025-06-18';
 const SERVER_INSTRUCTIONS = [
   'ROUTING RULES: for indexed repos, do not read known symbol bodies with shell commands. If a file:line, symbol id, or path#name is known, call code-map read for source.',
+  'Pass root as the absolute current repository directory on every read so a global server can select the right index. Windows C:\\... and WSL /mnt/c/... spellings are both accepted.',
   'code-map read resolves a bare name or path#name directly — for any symbol you can already name, call read; do NOT grep first to locate a name read can resolve (grepping to find a known symbol is a redundant double-call). Use shell search only to discover a name you do not know yet, then read the body — never grep/cat it.',
   'For two or more independent known refs, make one read call with refs: [...] before answering. Split only when a later ref depends on earlier output or the batch exceeds 64 refs.',
   'Never answer from index metadata alone; answer from raw code returned by read.',
@@ -37,14 +38,60 @@ function findUp(name: string, start: string): string | null {
   }
 }
 
-// Index location, in order: explicit env/flag, else auto-detected by walking up
-// from the working directory — so one global server serves whatever project it is
-// launched in — else the cwd default. No absolute path is baked into any config.
-const indexPath = process.env.MAP_INDEX ?? argIndex() ?? findUp('.map-index.json', process.cwd()) ?? resolve('.map-index.json');
+// Default index location: explicit env/flag, else auto-detected by walking up
+// from the server cwd. Per-call `root` selection overrides this default below.
+const configuredIndexPath = process.env.MAP_INDEX ?? argIndex();
+const MAX_INDEX_RUNTIMES = 8;
 
-let index: MapIndex | null = null;
-let indexMtimeMs = 0;
-let indexSize = -1;
+/** Resolve an explicit index, or discover the nearest one from `start`. Kept as
+ * a function because an index may be created after the long-lived server starts. */
+export function resolveIndexPath(start: string, explicit = configuredIndexPath): string {
+  const hostStart = toHostPath(start);
+  const hostExplicit = explicit ? toHostPath(explicit) : explicit;
+  return hostExplicit ? resolve(hostStart, hostExplicit) : findUp('.map-index.json', hostStart) ?? resolve(hostStart, '.map-index.json');
+}
+
+/** Accept either side's spelling when a Windows-hosted server serves WSL (or a
+ * WSL-hosted server receives a Windows path). Native Linux paths pass through. */
+export function toHostPath(path: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') {
+    const wsl = /^\/mnt\/([a-zA-Z])\/(.*)$/.exec(path);
+    return wsl ? `${wsl[1].toUpperCase()}:\\${wsl[2].replace(/\//g, '\\')}` : path;
+  }
+  if (platform === 'linux') {
+    const windows = /^([a-zA-Z]):[\\/](.*)$/.exec(path);
+    return windows ? `/mnt/${windows[1].toLowerCase()}/${windows[2].replace(/\\/g, '/')}` : path;
+  }
+  return path;
+}
+
+interface IndexRuntime {
+  index: MapIndex | null;
+  mtimeMs: number;
+  size: number;
+  ctimeMs: number;
+  ino: number;
+}
+
+// A global MCP can serve several workspaces. Keep the warmed lookup tables for
+// the most recent few, but bound them so arbitrary roots cannot grow memory forever.
+const indexRuntimes = new Map<string, IndexRuntime>();
+
+function runtimeFor(indexPath: string): IndexRuntime {
+  const cached = indexRuntimes.get(indexPath);
+  if (cached) {
+    indexRuntimes.delete(indexPath);
+    indexRuntimes.set(indexPath, cached);
+    return cached;
+  }
+  const runtime: IndexRuntime = { index: null, mtimeMs: 0, size: -1, ctimeMs: 0, ino: -1 };
+  indexRuntimes.set(indexPath, runtime);
+  if (indexRuntimes.size > MAX_INDEX_RUNTIMES) {
+    const oldest = indexRuntimes.keys().next().value as string | undefined;
+    if (oldest !== undefined) indexRuntimes.delete(oldest);
+  }
+  return runtime;
+}
 
 /**
  * (Re)load the index when its file appears or changes. Called before every tool
@@ -52,33 +99,45 @@ let indexSize = -1;
  * picked up with no client reconnect. A missing/half-written index is non-fatal:
  * the server stays up and retries on the next call.
  */
-function ensureFresh(): void {
+function ensureFresh(indexPath: string): IndexRuntime {
+  const runtime = runtimeFor(indexPath);
   let mtimeMs: number;
   let size: number;
+  let ctimeMs: number;
+  let ino: number;
   try {
     const s = statSync(indexPath);
     mtimeMs = s.mtimeMs;
     size = s.size;
+    ctimeMs = s.ctimeMs;
+    ino = s.ino;
   } catch {
-    return; // no index yet (or mid-write) — keep whatever we have (possibly none)
+    return runtime; // no index yet (or mid-write) — keep the prior good copy, if any
   }
-  // mtime can be coarse on some mounts; size almost always shifts too, so check both.
-  if (index && mtimeMs === indexMtimeMs && size === indexSize) return;
+  // ctime/inode catch same-size rewrites with a restored/coarse mtime.
+  if (runtime.index && mtimeMs === runtime.mtimeMs && size === runtime.size && ctimeMs === runtime.ctimeMs && ino === runtime.ino) return runtime;
   try {
-    index = loadIndex(indexPath);
-    indexMtimeMs = mtimeMs;
-    indexSize = size;
-    process.stderr.write(`code-map MCP: loaded index (${index.meta.entryCount} symbols) from ${indexPath}\n`);
+    const loaded = loadIndex(indexPath);
+    // The server is long-lived, so one O(entries) lookup build is amortized over
+    // every later read. One-shot CLI commands deliberately skip this warm-up.
+    prepareLookup(loaded);
+    runtime.index = loaded;
+    runtime.mtimeMs = mtimeMs;
+    runtime.size = size;
+    runtime.ctimeMs = ctimeMs;
+    runtime.ino = ino;
+    process.stderr.write(`code-map MCP: loaded index (${loaded.meta.entryCount} symbols) from ${indexPath}\n`);
   } catch {
     // half-written index — keep the prior good copy, retry on the next call
   }
+  return runtime;
 }
 
 export const TOOLS = [
   {
     name: 'read',
     description:
-      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. **Batch: pass `refs` (an array) to read several symbols in ONE call** — one round-trip instead of N, which cuts agent turns/latency. Batch only INDEPENDENT symbols whose refs you already know; use a single `ref` when a later read depends on what an earlier one shows (sequential reads preserve your chance to course-correct, and cost fewer tokens than loading everything at once). Pass `ref` OR `refs`, not both. Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice(s) cheaply.)',
+      'Return the RAW source slice of a symbol — its own bytes (a function/method/class body), NOT the whole file, so it is token-efficient. Pass `root` as the indexed repository\'s absolute directory so one global MCP can serve multiple workspaces; Windows and WSL spellings are interchangeable. Pass a symbol id or a bare name / path-scoped name ("alias-map#buildAliasMap"); it resolves the name to one symbol internally. **Batch: pass `refs` (an array) to read several symbols in ONE call** — one round-trip instead of N, which cuts agent turns/latency. Batch only INDEPENDENT symbols whose refs you already know; use a single `ref` when a later read depends on what an earlier one shows (sequential reads preserve your chance to course-correct, and cost fewer tokens than loading everything at once). Pass `ref` OR `refs`, not both. Drift-resistant: if the file changed since indexing it re-anchors on the signature line and flags the result; if the anchor is lost it says so (re-index to refresh). Optionally pass `snippet` (text you quote from inside the symbol) to also get its exact char range(s) within the symbol — `aim.status:"ambiguous"` means the snippet occurs more than once, so do not target blindly. Coordinates, not meaning: read the raw and judge it yourself. (Search with your normal grep; use this to pull the slice(s) cheaply.)',
     annotations: {
       title: 'Read symbol source',
       readOnlyHint: true,
@@ -93,17 +152,43 @@ export const TOOLS = [
         refs: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 64, uniqueItems: true, description: 'Read several INDEPENDENT, already-known symbols in one call (ids or names). One result per ref. Use sequential single reads when later reads depend on earlier ones.' },
         changedOnly: { type: 'boolean', description: 'With `refs`: a working-set DELTA — return current slices only for symbols whose file changed since indexing, plus an `unchanged` id list. Refresh what you read earlier without re-paying tokens for the stable parts (a "git status" for your reads).' },
         snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s). Applies when reading a single `ref`.' },
+        root: { type: 'string', description: 'Absolute path to the indexed repository. Pass this on every call when the MCP server is global or starts outside the repo. Accepts native Windows/Linux paths and Windows↔WSL spellings.' },
       },
     },
   },
 ];
 
-function callTool(name: string, args: Record<string, unknown>): string {
-  ensureFresh();
-  if (!index) {
-    return JSON.stringify({ error: `No code-map index found at ${indexPath}. Run \`map index --root <repo>\` to build one; it will be picked up automatically.` }, null, 2);
+export function callTool(name: string, args: Record<string, unknown>): string {
+  let indexPath: string;
+  if (args.root !== undefined) {
+    if (typeof args.root !== 'string' || !args.root.trim()) {
+      return JSON.stringify({ error: '`root` must be a non-empty absolute repository path.' }, null, 2);
+    }
+    const root = toHostPath(args.root);
+    if (!isAbsolute(root)) {
+      return JSON.stringify({ error: '`root` must be absolute so a global MCP server does not resolve it against its own working directory.' }, null, 2);
+    }
+    indexPath = resolveIndexPath(root, '');
+  } else {
+    indexPath = resolveIndexPath(process.cwd());
   }
-  return dispatch(index, name, args);
+  const runtime = ensureFresh(indexPath);
+  if (!runtime.index) {
+    return JSON.stringify({ error: `No code-map index found at ${indexPath}. Run \`map index --root <repo>\`, then pass \`root\` as that repository's absolute path.` }, null, 2);
+  }
+  return dispatch(runtime.index, name, args);
+}
+
+function uniqueRefs(values: unknown[], max = 64): { refs: string[]; total: number } {
+  const seen = new Set<string>();
+  const refs: string[] = [];
+  for (const value of values) {
+    const ref = String(value);
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    if (refs.length < max) refs.push(ref);
+  }
+  return { refs, total: seen.size };
 }
 
 /** Pure tool dispatch over a given index — exported so the protocol layer can be
@@ -119,17 +204,15 @@ export function dispatch(index: MapIndex, name: string, args: Record<string, unk
         // Working-set drift delta: of a set you read earlier, return current slices only for
         // the ones whose file changed since indexing — refresh the delta, not the whole set.
         if (args.changedOnly) {
-          const refs = [...new Set(args.refs.map((r: unknown) => String(r)))].slice(0, 256);
+          const { refs } = uniqueRefs(args.refs);
           return JSON.stringify(changed(index, refs));
         }
         // Batch: one round-trip for many symbols — same slices, fewer turns. Dedupe (keep
         // first occurrence) and cap so a stray huge array can't blow up the context window.
         const MAX = 64;
-        const seen = new Set<string>();
-        const uniq = args.refs.map((r: unknown) => String(r)).filter((r) => (seen.has(r) ? false : (seen.add(r), true)));
-        const capped = uniq.slice(0, MAX);
-        const out: Record<string, unknown> = { results: capped.map((r) => read(index, r, {})) };
-        if (uniq.length > MAX) out.note = `Read first ${MAX} of ${uniq.length} refs; split the rest into another call.`;
+        const { refs, total } = uniqueRefs(args.refs, MAX);
+        const out: Record<string, unknown> = { results: readMany(index, refs) };
+        if (total > MAX) out.note = `Read first ${MAX} of ${total} refs; split the rest into another call.`;
         // Compact (no pretty-print indentation) — leaner in context than N single pretty reads.
         return JSON.stringify(out);
       }
@@ -189,8 +272,9 @@ function handle(req: JsonRpcRequest): void {
 /** Start the stdio JSON-RPC loop — only when run as the entry point, so importing
  * this module (e.g. from tests) never consumes stdin or eagerly loads an index. */
 function main(): void {
-  ensureFresh();
-  if (!index) process.stderr.write(`code-map MCP: no index at ${indexPath} yet — run \`map index\`; tools will pick it up on the next call.\n`);
+  const indexPath = resolveIndexPath(process.cwd());
+  const runtime = ensureFresh(indexPath);
+  if (!runtime.index) process.stderr.write(`code-map MCP: no index at ${indexPath} yet — pass \`root\` on read or run \`map index\`; tools will pick it up on the next call.\n`);
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     const trimmed = line.trim();

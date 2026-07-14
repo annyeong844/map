@@ -1,18 +1,59 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
-import { disposeAll, query, resolveNamePosition, TOOLS, type OracleSym } from '../server.ts';
+import { ContentLengthDecoder, disposeAll, query, resolveNamePosition, scanProjectEpoch, TOOLS, type OracleSym } from '../server.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const hasTsgo = !!process.env.TSGO_BIN || existsSync(join(HERE, '../node_modules/@typescript/native-preview/bin/tsgo.js'));
+const hasTsgo =
+  (!!process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN)) ||
+  (existsSync(join(HERE, '../node_modules/@typescript/native-preview/bin/tsgo.js')) &&
+    existsSync(join(HERE, '../node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`)));
 
 after(() => disposeAll());
 
 test('the three tools are exposed', () => {
   assert.deepEqual(TOOLS.map((t) => t.name).sort(), ['callers', 'definition', 'implementations']);
+});
+
+test('Content-Length decoding is linear-safe across byte splits and packed frames', () => {
+  const frame = (value: unknown): Buffer => {
+    const body = Buffer.from(JSON.stringify(value));
+    return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
+  };
+  const first = { jsonrpc: '2.0', id: 1, result: '한글🙂' };
+  const second = { jsonrpc: '2.0', id: 2, result: [1, 2, 3] };
+  const bytes = Buffer.concat([frame(first), frame(second)]);
+  const decoder = new ContentLengthDecoder();
+  const messages: Buffer[] = [];
+  // Worst fragmentation: one byte per chunk. The former Buffer.concat loop
+  // repeatedly copied the entire accumulated body here.
+  for (const byte of bytes) messages.push(...decoder.push(Buffer.from([byte])));
+  assert.deepEqual(messages.map((body) => JSON.parse(body.toString())), [first, second]);
+
+  const packed = new ContentLengthDecoder().push(bytes);
+  assert.deepEqual(packed.map((body) => JSON.parse(body.toString())), [first, second]);
+});
+
+test('project fingerprint catches additions, deletions, and restored-mtime edits', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-epoch-'));
+  const source = join(root, 'a.ts');
+  writeFileSync(source, 'export const a = 1\n');
+  const first = await scanProjectEpoch(root);
+
+  const added = join(root, 'b.ts');
+  writeFileSync(added, 'export const b = 2\n');
+  const withAddition = await scanProjectEpoch(root);
+  assert.notEqual(withAddition, first);
+  unlinkSync(added);
+  assert.equal(await scanProjectEpoch(root), first, 'deleting the added source restores the original fingerprint');
+
+  const before = statSync(source);
+  writeFileSync(source, 'export const z = 1\n'); // equal size
+  utimesSync(source, before.atime, before.mtime);
+  assert.notEqual(await scanProjectEpoch(root), first, 'ctime catches an equal-size edit with restored mtime');
 });
 
 // Pure resolver, no LSP: the name→declaration decision behind the interface-vs-class

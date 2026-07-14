@@ -113,6 +113,34 @@ function isDeclNode(t: string): boolean {
   return t === 'FunctionDeclaration' || t === 'ClassDeclaration' || t === 'VariableDeclaration' || TYPE_DECL.has(t);
 }
 
+/** `function local() {}; export { local }` reaches the extractor twice: once as
+ * a declaration and once as an export specifier pointing at the same range.
+ * Keep the real declaration kind and promote it to exported. Aliases have a
+ * different name, so `export { local as publicName }` remains independently routable. */
+function consolidateLocalExports(symbols: SymbolRec[]): SymbolRec[] {
+  const out: SymbolRec[] = [];
+  const byCoordinate = new Map<string, number>();
+  for (const symbol of symbols) {
+    const key = `${symbol.name}\0${symbol.charStart}\0${symbol.charEnd}`;
+    const existingAt = byCoordinate.get(key);
+    if (existingAt === undefined) {
+      byCoordinate.set(key, out.length);
+      out.push(symbol);
+      continue;
+    }
+    const existing = out[existingAt];
+    const preferred = existing.kind === 'ExportSpecifier' && symbol.kind !== 'ExportSpecifier' ? symbol : existing;
+    const exported = existing.exported || symbol.exported;
+    out[existingAt] = {
+      ...preferred,
+      exported,
+      visibility: exported ? undefined : preferred.visibility,
+      default: existing.default || symbol.default || undefined,
+    };
+  }
+  return out;
+}
+
 export function extractSymbols(file: string, text: string): FileParse {
   let res: ReturnType<typeof parseSync>;
   try {
@@ -222,7 +250,7 @@ export function extractSymbols(file: string, text: string): FileParse {
     if (isDeclNode(node.type)) pushDecl(node, false, symbols);
   }
   const { refs } = walkProgram(res.program);
-  return { symbols, imports, refs };
+  return { symbols: consolidateLocalExports(symbols), imports, refs };
 }
 
 function pushDecl(declNode: unknown, exported: boolean, out: SymbolRec[]): void {

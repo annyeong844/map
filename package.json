@@ -21,6 +21,7 @@
     "plugins",
     "GEMINI.md",
     "scripts/check-package-safety.mjs",
+    "scripts/benchmark.mjs",
     "README.md",
     "README.ko.md",
     "LICENSE"
@@ -34,9 +35,10 @@
     "mcp": "node src/mcp/server.ts",
     "check:package": "node scripts/check-package-safety.mjs",
     "prepublishOnly": "npm run check:package",
-    "test": "node --test \"test/*.test.ts\"",
+    "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
-    "lint": "npx --yes oxlint src test"
+    "lint": "npx --yes oxlint src test",
+    "bench": "node --expose-gc scripts/benchmark.mjs"
   },
   "engines": {
     "node": ">=23.6"
@@ -63,6 +65,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }

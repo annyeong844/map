@@ -4,16 +4,16 @@
 code-map's core is language-neutral: it stores coordinates (path + char span +
 content token + searchText anchor) and judges meaning never. This backend gives
 it Python by emitting the same per-file primitives the oxc/TS path does —
-symbols, imports, calls — which build-index then runs through the SHARED pipeline
-(stable ids, native fan-in, the Level-1 call graph). Char offsets match read's
+symbols, imports, refs — which build-index then runs through the shared pipeline
+(stable ids, native fan-in, dead-code counters). Char offsets match read's
 slice and the token matches code-map's sha256[:16], so Python reads come back
 `exact`, same as TS.
 
 Invocation (by build-index, not usually by hand):
     python3 extract.py <repo-root>
-Restrict to specific files for INCREMENTAL rebuilds by writing newline-separated
-repo-relative paths to stdin; the full tree is still walked for import resolution,
-but only the requested files are parsed and emitted. No stdin → emit every file.
+For incremental builds Node sends one JSON object on stdin with the already
+enumerated, gitignore-aware `files` plus changed `targets`. Legacy newline-separated
+targets and empty stdin remain accepted for direct use.
 
 Scope: direct + from-import call edges (like the TS path); obj.method() / self.m()
 dispatch is left unresolved — that is where the `ty` oracle adds value (sibling
@@ -40,15 +40,8 @@ def list_py(root):
             if fn.endswith((".py", ".pyi")):
                 rel = os.path.relpath(os.path.join(dp, fn), root).replace("\\", "/")
                 out.append(rel)
+    out.sort()
     return out
-
-
-def line_starts(src):
-    starts = [0]
-    for i, ch in enumerate(src):
-        if ch == "\n":
-            starts.append(i + 1)
-    return starts
 
 
 def to_module_file(from_file, node, fileset):
@@ -68,48 +61,87 @@ def to_module_file(from_file, node, fileset):
     return None
 
 
-def extract(root, only):
-    fileset = set(list_py(root))                       # full tree → import resolution
-    targets = [f for f in sorted(fileset) if not only or f in only]
-    entries, file_imports, file_calls, file_tokens = [], {}, {}, {}
+def extract(root, only, files=None):
+    all_files = list_py(root) if files is None else [f.replace("\\", "/") for f in files if f.endswith((".py", ".pyi"))]
+    fileset = set(all_files)
+    targets = [f for f in all_files if not only or f in only]
+    entries, file_imports, file_tokens, file_refs, files_missing = [], {}, {}, {}, []
 
     for file in targets:
         try:
-            src = open(os.path.join(root, file), encoding="utf-8").read()
-            tree = ast.parse(src)
+            with open(os.path.join(root, file), encoding="utf-8") as source:
+                src = source.read()
         except Exception:
+            files_missing.append(file)
             continue
         file_tokens[file] = token(src)
-        starts = line_starts(src)
+        imports = []
+        file_imports[file] = imports
+        try:
+            tree = ast.parse(src)
+        except Exception:
+            file_refs[file] = {}
+            continue
+
         lines = src.split("\n")
-        # Node's read slices by UTF-16 code UNITS, but Python indexes by code POINTS.
-        # A non-BMP char (e.g. an emoji) is 1 code point but 2 UTF-16 units, so a
-        # code-point offset would slice the wrong range past it — returning the wrong
-        # bytes while still claiming `exact`. Map every code-point offset to UTF-16.
-        u16 = [0] * (len(src) + 1)
-        _acc = 0
-        for _i, _ch in enumerate(src):
-            u16[_i] = _acc
-            _acc += 2 if ord(_ch) > 0xFFFF else 1
-        u16[len(src)] = _acc
+        # One UTF-16 base per line replaces the former `len(src)+1` Python-int
+        # array (tens of MB per large file). ASCII columns are then O(1); only a
+        # non-ASCII declaration line builds a small byte→UTF-16 boundary map.
+        line_u16 = []
+        total_u16 = 0
+        for i, line in enumerate(lines):
+            line_u16.append(total_u16)
+            total_u16 += len(line) if line.isascii() else len(line.encode("utf-16-le")) // 2
+            if i + 1 < len(lines):
+                total_u16 += 1  # `\n`
+        byte_to_u16 = {}
+
+        def u16_col(line_index, byte_col):
+            line = lines[line_index]
+            if line.isascii():
+                return min(max(byte_col, 0), len(line))
+            mapping = byte_to_u16.get(line_index)
+            if mapping is None:
+                mapping = {0: 0}
+                bcol = ucol = 0
+                for ch in line:
+                    bcol += len(ch.encode("utf-8"))
+                    ucol += 2 if ord(ch) > 0xFFFF else 1
+                    mapping[bcol] = ucol
+                byte_to_u16[line_index] = mapping
+            if byte_col in mapping:
+                return mapping[byte_col]
+            # AST columns are UTF-8 boundaries. Keep a defensive fallback for a
+            # future parser that hands us an interior byte position.
+            prefix = line.encode("utf-8")[:byte_col].decode("utf-8", "replace")
+            return len(prefix.encode("utf-16-le")) // 2
 
         def off(lineno, col):
-            ln = lines[lineno - 1] if 0 <= lineno - 1 < len(lines) else ""
-            char_col = len(ln.encode("utf-8")[:col].decode("utf-8", "replace"))
-            cp = starts[lineno - 1] + char_col
-            return u16[cp] if 0 <= cp < len(u16) else _acc
+            index = lineno - 1
+            if not 0 <= index < len(lines):
+                return total_u16
+            return line_u16[index] + u16_col(index, col)
 
         def sig(lineno):
             return (lines[lineno - 1].strip() if 0 <= lineno - 1 < len(lines) else "")[:200]
 
-        imports, calls = [], []
-        file_imports[file] = imports
-        file_calls[file] = calls
+        refs = {}
+        for ref_node in ast.walk(tree):
+            name = None
+            if isinstance(ref_node, ast.Name):
+                name = ref_node.id
+            elif isinstance(ref_node, ast.Attribute):
+                name = ref_node.attr
+            if name:
+                refs[name] = refs.get(name, 0) + 1
+        file_refs[file] = refs
 
         def emit(node, name, kind, classname=None, bases=None):
             cs, ce = off(node.lineno, node.col_offset), off(node.end_lineno, node.end_col_offset)
             rec = {"name": name, "kind": kind, "file": file, "charStart": cs, "charEnd": ce,
+                   "line": node.lineno, "endLine": node.end_lineno,
                    "searchText": sig(node.lineno) or name, "exported": not name.startswith("_")}
+            refs[name] = refs.get(name, 0) + 1  # declaration occurrence
             if name.startswith("_"):
                 rec["visibility"] = "module-private"
             if classname:
@@ -117,23 +149,6 @@ def extract(root, only):
             if bases:
                 rec["extends"] = bases[0]  # primary base — single string, matches TS `extends`
             return rec
-
-        def collect_calls(node, caller, klass=None):
-            for n in ast.walk(node):
-                if isinstance(n, ast.Call):
-                    fn = n.func
-                    if isinstance(fn, ast.Name):
-                        calls.append({"caller": caller, "callee": fn.id, "member": False})
-                    elif isinstance(fn, ast.Attribute):
-                        c = {"caller": caller, "callee": fn.attr, "member": True}
-                        # self.m() is Python's `this.m()` — deterministic to the enclosing class
-                        if isinstance(fn.value, ast.Name) and fn.value.id == "self":
-                            c["recv"] = "this"
-                            if klass:
-                                c["callerClass"] = klass
-                        else:
-                            c["recv"] = "other"
-                        calls.append(c)
 
         for node in tree.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -146,20 +161,30 @@ def extract(root, only):
                         imports.append({"source": a.name.replace(".", "/"), "name": a.asname or a.name})
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 entries.append(emit(node, node.name, "FunctionDeclaration"))
-                collect_calls(node, node.name)
             elif isinstance(node, ast.ClassDef):
                 bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
                 entries.append(emit(node, node.name, "ClassDeclaration", bases=bases))
                 for m in node.body:
                     if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         entries.append(emit(m, m.name, "ClassMethod", classname=node.name))
-                        collect_calls(m, m.name, klass=node.name)
 
-    return {"entries": entries, "fileImports": file_imports, "fileCalls": file_calls, "fileTokens": file_tokens}
+    return {"entries": entries, "fileImports": file_imports, "fileTokens": file_tokens,
+            "fileRefs": file_refs, "filesMissing": files_missing}
 
 
 if __name__ == "__main__":
     root = sys.argv[1]
     data = sys.stdin.read() if not sys.stdin.isatty() else ""
-    only = {ln.strip().replace("\\", "/") for ln in data.splitlines() if ln.strip()}
-    json.dump(extract(root, only), sys.stdout)
+    files = None
+    only = set()
+    if data.strip():
+        try:
+            request = json.loads(data)
+            if isinstance(request, dict) and isinstance(request.get("files"), list):
+                files = request["files"]
+                only = {str(f).replace("\\", "/") for f in request.get("targets", [])}
+            else:
+                raise ValueError("legacy input")
+        except Exception:
+            only = {ln.strip().replace("\\", "/") for ln in data.splitlines() if ln.strip()}
+    json.dump(extract(root, only, files), sys.stdout)

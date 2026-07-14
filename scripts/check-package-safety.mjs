@@ -9,6 +9,7 @@ const allowPathPatterns = [
   /^GEMINI\.md$/,
   /^package\.json$/,
   /^scripts\/check-package-safety\.mjs$/,
+  /^scripts\/benchmark\.mjs$/,
   /^src\/(?:cli|core|mcp)\/[A-Za-z0-9_-]+\.ts$/,
   /^src\/py\/extract\.py$/,
   /^skills\/[A-Za-z0-9_-]+\/SKILL\.md$/,

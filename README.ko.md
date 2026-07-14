@@ -57,14 +57,19 @@ npm install -g github:annyeong844/map        # `map` + `map-mcp` 제공
 # 2. 에이전트가 읽을 레포를 인덱싱
 cd /path/to/your-repo && map index --root .  # ./.map-index.json 생성
 
-# 3. 에이전트에 배선 (예시)
-codex mcp add code-map -- map-mcp             # Codex
+# 3. Codex에 배선 (레포에 Codex marketplace 항목이 들어 있어요)
+codex plugin marketplace add /path/to/map
+codex plugin add code-map@code-map
+codex mcp add code-map -- map-mcp
+
+# 다른 호스트
 claude mcp add code-map --scope user -- map-mcp   # Claude Code
 ```
 
 끝 — 이제 에이전트엔 도구 하나 `read`가 생겼어요. Codex에서 **−19% / −67%** 효율 이득까지
-보려면 *언제* code-map을 쓸지 한 줄로 알려줘야 합니다(아래 *실전 배선* 참고). MCP 서버는
-인덱스를 자동 탐지(`.map-index.json`을 위로 훑음)하고 재인덱싱 시 자동 리로드 — 재연결 불필요.
+보려면 *언제* code-map을 쓸지 한 줄로 알려줘야 합니다(아래 *실전 배선* 참고). 레포 안에서
+시작한 MCP는 인덱스를 자동 탐지하고, 전역 MCP 하나는 각 `read`의 `root`로 여러 레포를
+전환합니다(동봉 스킬이 전달). 재인덱싱도 자동 리로드 — 재연결 불필요.
 
 ---
 
@@ -96,7 +101,8 @@ map stats                                    # 인덱스 개요
 ```
 
 기계 출력은 `--json`. **검색은 직접 `grep`으로** — 찾은 `file:line`이나 심볼 이름을 `read`에
-넘기세요. MCP 도구로도 같은 `read`(단일 `ref`, batch용 `refs` 배열, 선택적 `snippet`).
+넘기세요. MCP 도구로도 같은 `read`(절대 레포 경로 `root`, 단일 `ref`, batch용 `refs` 배열,
+선택적 `snippet`). Windows 경로와 `/mnt/<드라이브>/...` WSL 표기를 서로 바꿔 써도 됩니다.
 
 ---
 
@@ -176,7 +182,14 @@ LLM이 raw 바이트를 매 콜마다 새로 읽고 판정해요.
 `npm install -g github:annyeong844/map`(지금) · 또는 clone + `npm install && npm link`.
 모두 `map`과 `map-mcp`를 제공.
 
-**MCP 설정** — 클라이언트가 레포 밖에서 서버를 띄우면 인덱스를 고정:
+**MCP 설정** — 전역 서버 하나가 호출별로 레포를 전환:
+
+```jsonc
+{ "root": "/absolute/path/to/repo", "refs": ["path#a", "path#b"] }
+```
+
+여러 레포에는 `root`가 권장 경로입니다. 도구 인자를 줄 수 없는 단일 레포 클라이언트에서만
+`MAP_INDEX`를 고정하세요:
 
 ```toml
 # ~/.codex/config.toml  (또는 프로젝트 .codex/config.toml)
@@ -194,12 +207,14 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
 **효율 이득엔 *채택*이 필요해요.** 에이전트는 스스로 grep 대신 code-map을 안 골라요
 (측정: ~17%). **100% 신뢰** 채택을 주는 배선 — 택1:
 
-- **동봉 plugin/skill (권장):** 이 레포가 `skills/code-map-retrieval/`에 라우팅 skill을
-  `.claude-plugin/plugin.json` 매니페스트와 함께 동봉해 plugin으로 설치돼요.
+- **Codex 동봉 plugin/skill (Codex에 권장):** 이 레포가
+  `plugins/code-map/skills/code-map-retrieval/`에 Codex용 라우팅 skill을,
+  `.codex-plugin/plugin.json`과 `.agents/plugins/marketplace.json`에 매니페스트를 동봉해요.
   ```bash
+  codex plugin marketplace add /path/to/map
+  codex plugin add code-map@code-map             # Codex
   grok plugin install annyeong844/map          # Grok (또는 로컬 경로)
   claude plugin install code-map@code-map        # Claude Code (marketplace add 후)
-  codex plugin add code-map@code-map             # Codex (marketplace add 후)
   # Antigravity: GEMINI.md를 ~/.gemini/GEMINI.md(전역) 또는 워크스페이스에 복사
   ```
   **discovery 이중호출 가드** 포함 — 발견은 grep으로 하고 *멈춰라*, 위에 `read` 얹지 마라 —
@@ -222,12 +237,21 @@ claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/ser
 tsgo 세션을 1회 워밍(~수초~20s, 레포 크기별)하니 스킬은 값어치 있을 때만(큰 레포·충돌 이름) 호출해요.
 **크로스플랫폼:** code-oracle가 `/mnt/c/…` ↔ `C:\…` 경로를 정규화해서 **서버 하나가 Windows IDE와
 WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** 빌드가 WSL 클라이언트까지 담당해
-`/mnt/c` drvfs 페널티를 피함(같은 레포 ~38s → ~4s).
+`/mnt/c` drvfs 페널티를 피함(같은 레포 ~38s → ~4s). 네이티브 **Linux/WSL도 지원**합니다.
+그 환경의 Node/npm으로 `code-oracle/`을 설치하면 `native-preview-linux-<arch>`를 고르고,
+다른 OS가 남긴 wrapper뿐인 설치는 요청당 40초씩 두 번 기다리지 않고 즉시 거부합니다.
 
 </details>
 
 <details>
 <summary><b>📊 직접 벤치마크</b></summary>
+
+레포 내부 복잡도 마이크로벤치는 full/no-op 인덱싱, cold/warm locate, line-only 64심볼 읽기,
+10,000파일 barrel 체인을 함께 잽니다:
+
+```bash
+npm run bench
+```
 
 ```bash
 git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench

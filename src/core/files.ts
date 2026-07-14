@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { isParseable } from './extract-symbols.ts';
 import { posix } from './util.ts';
 
@@ -17,7 +17,23 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', 'cove
  * Outside git, we walk and skip the usual generated directories.
  */
 export function listSourceFiles(root: string): string[] {
-  return (gitFiles(root) ?? walkFiles(root)).filter(isParseable).sort();
+  // A failed `git` process costs tens of milliseconds on Windows. Check the
+  // filesystem marker first so ordinary non-git folders go straight to the
+  // walker; linked worktrees/submodules are covered because `.git` may be a file.
+  const files = hasGitMarker(root) ? gitFiles(root) ?? walkFiles(root) : walkFiles(root);
+  files.sort();
+  return files;
+}
+
+function hasGitMarker(root: string): boolean {
+  if (process.env.GIT_DIR || process.env.GIT_WORK_TREE) return true;
+  let dir = resolve(root);
+  for (;;) {
+    if (existsSync(join(dir, '.git'))) return true;
+    const parent = dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
 }
 
 function gitFiles(root: string): string[] | null {
@@ -26,7 +42,13 @@ function gitFiles(root: string): string[] | null {
     maxBuffer: 64 * 1024 * 1024,
   });
   if (res.error || res.status !== 0) return null;
-  return (res.stdout || '').split('\0').filter(Boolean).map(posix);
+  const out: string[] = [];
+  for (const raw of (res.stdout || '').split('\0')) {
+    if (!raw) continue;
+    const file = posix(raw);
+    if (isParseable(file)) out.push(file);
+  }
+  return out;
 }
 
 function walkFiles(root: string): string[] {
@@ -42,7 +64,7 @@ function walkFiles(root: string): string[] {
       const childRel = rel ? `${rel}/${ent.name}` : ent.name;
       if (ent.isDirectory()) {
         if (!SKIP_DIRS.has(ent.name)) walk(join(dir, ent.name), childRel);
-      } else if (ent.isFile()) {
+      } else if (ent.isFile() && isParseable(childRel)) {
         out.push(childRel);
       }
     }

@@ -17,17 +17,18 @@ function repo(files: Record<string, string>): string {
   return root;
 }
 
-const hasPython = (() => {
+const pythonCommand = (() => {
   for (const c of [process.env.CODE_MAP_PYTHON, 'python3', 'python'].filter(Boolean) as string[]) {
     try {
       execFileSync(c, ['--version'], { stdio: 'ignore' });
-      return true;
+      return c;
     } catch {
       /* try next */
     }
   }
-  return false;
+  return null;
 })();
+const hasPython = pythonCommand !== null;
 
 const MOD = `def shared_util(x):
     """A helper imported across the package."""
@@ -57,12 +58,14 @@ test('Python is a first-class backend: symbols, exact reads, fan-in (incl. from-
   const shared = index.entries.find((e) => e.name === 'shared_util' && e.file === 'mod.py')!;
   const greeter = index.entries.find((e) => e.name === 'Greeter')!;
   const greet = index.entries.find((e) => e.name === 'greet')!;
+  const shout = index.entries.find((e) => e.name === 'shout')!;
   const run = index.entries.find((e) => e.name === 'run')!;
   assert.ok(shared && greeter && run, 'function + class + caller indexed');
   assert.equal(shared.kind, 'FunctionDeclaration');
   assert.equal(greeter.kind, 'ClassDeclaration');
   assert.equal(greet.kind, 'ClassMethod');
   assert.equal(greet.className, 'Greeter');
+  assert.ok((shout.intraRefs ?? 0) >= 2, 'one AST pass counts the declaration plus self.shout()');
 
   // Read comes back `exact` — char offsets + drift token agree with the slice.
   const r = read(index, shared.id);
@@ -84,4 +87,21 @@ test('Python offsets are UTF-16 — read stays exact past a non-BMP (astral) cha
   assert.equal(r.status, 'exact');
   assert.match(r.raw ?? '', /^def target\(\):/, 'slice starts exactly at the def, not shifted by the astral chars');
   assert.ok((r.raw ?? '').includes('return 42'), 'slice includes the whole body');
+});
+
+test('Python backend failure aborts instead of silently deleting prior symbols', { skip: hasPython ? false : 'Python 3 not available' }, async () => {
+  const root = repo({ 'mod.py': 'def alpha():\n    return 1\n' });
+  const previousCommand = process.env.CODE_MAP_PYTHON;
+  try {
+    process.env.CODE_MAP_PYTHON = pythonCommand!;
+    const first = await buildIndex({ root });
+    assert.ok(first.index.entries.some((e) => e.name === 'alpha'));
+    writeFileSync(join(root, 'mod.py'), 'def beta():\n    return 2\n');
+    process.env.CODE_MAP_PYTHON = join(root, 'missing-python-executable');
+    await assert.rejects(() => buildIndex({ root, previous: first.index }), /Python backend failed/);
+    assert.ok(first.index.entries.some((e) => e.name === 'alpha'), 'the prior good index remains intact');
+  } finally {
+    if (previousCommand === undefined) delete process.env.CODE_MAP_PYTHON;
+    else process.env.CODE_MAP_PYTHON = previousCommand;
+  }
 });

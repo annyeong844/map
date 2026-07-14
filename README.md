@@ -58,15 +58,20 @@ npm install -g github:annyeong844/map        # gives you `map` + `map-mcp`
 # 2. index the repo you want your agent to read
 cd /path/to/your-repo && map index --root .  # writes ./.map-index.json
 
-# 3. wire it into your agent (examples)
-codex mcp add code-map -- map-mcp             # Codex
+# 3. wire it into Codex (the repo ships a Codex marketplace entry)
+codex plugin marketplace add /path/to/map
+codex plugin add code-map@code-map
+codex mcp add code-map -- map-mcp
+
+# Other hosts
 claude mcp add code-map --scope user -- map-mcp   # Claude Code
 ```
 
 That's it — your agent now has one tool, `read`. For the **−19% / −67%** efficiency win on
 Codex you also tell it *when* to use code-map (one line); see *Wiring it for real* below.
-The MCP server auto-detects the index (walks up for `.map-index.json`) and auto-reloads
-when you re-index — no reconnect.
+When launched inside a repo, the MCP server auto-detects its index. A global server can serve
+many repos: each `read` selects one with `root` (the bundled skill supplies it). Re-indexed files
+auto-reload with no reconnect.
 
 ---
 
@@ -98,8 +103,9 @@ map stats                                    # index overview
 ```
 
 Add `--json` for machine output. **Search with your own `grep`** — feed the `file:line` or
-symbol name you find to `read`. As an MCP tool it's the same `read` (single `ref`, a `refs`
-array for batch, optional `snippet`).
+symbol name you find to `read`. As an MCP tool it's the same `read` (absolute repo `root`, single
+`ref`, a `refs` array for batch, optional `snippet`). Windows and `/mnt/<drive>/...` WSL root
+spellings are interchangeable.
 
 ---
 
@@ -181,7 +187,14 @@ symbol. Honest scope: namespace / `export *` / alias imports aren't attributed.
 `npm install -g github:annyeong844/map` (now) · or clone + `npm install && npm link`.
 All expose `map` and `map-mcp`.
 
-**MCP config** — pin the index if your client starts servers outside the repo:
+**MCP config** — one global server can switch repositories per call:
+
+```jsonc
+{ "root": "/absolute/path/to/repo", "refs": ["path#a", "path#b"] }
+```
+
+`root` is the recommended multi-repo path. Pin `MAP_INDEX` only for a single-repo client that
+cannot supply tool arguments:
 
 ```toml
 # ~/.codex/config.toml  (or project .codex/config.toml)
@@ -199,13 +212,14 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
 **The efficiency win needs adoption.** Agents won't pick code-map over grep on their own
 (measured: ~17%). Wirings that reach **100% reliable** use — pick one:
 
-- **The bundled plugin/skill (recommended):** this repo ships the routing skill at
-  `skills/code-map-retrieval/` with a `.claude-plugin/plugin.json` manifest, so it installs
-  as a plugin and self-routes everywhere.
+- **The bundled Codex plugin/skill (recommended for Codex):** this repo ships a
+  Codex-first routing skill at `plugins/code-map/skills/code-map-retrieval/`, a
+  `.codex-plugin/plugin.json` manifest, and `.agents/plugins/marketplace.json`.
   ```bash
+  codex plugin marketplace add /path/to/map
+  codex plugin add code-map@code-map
   grok plugin install annyeong844/map          # Grok (or a local path)
   claude plugin install annyeong844/map         # Claude Code
-  # any host: copy skills/code-map-retrieval/SKILL.md into ~/.codex/skills/ (or .grok/.claude)
   ```
   It carries the **discovery double-call guard** — for discovery, grep and *stop*; don't add a
   `read` on top — which a 3-arm benchmark showed flips discovery from a loss to a win.
@@ -218,7 +232,8 @@ MAP_INDEX = "/path/to/target-repo/.map-index.json"
   { "mcpServers": { "code-map": { "command": "map-mcp" } } }
   ```
   On Windows + WSL, install code-map with the *Windows* Node (≥23.6) so `map-mcp` is a native
-  command (`{ "command": "cmd", "args": ["/d","/c","map-mcp"] }`); it reads the same repo files.
+  command (`{ "command": "cmd", "args": ["/d","/c","map-mcp"] }`). `read.root` accepts either
+  `C:\...` or `/mnt/c/...`; native Linux servers and paths work directly too.
 
 Either says, in effect: *"read known symbols via code-map `read` (batch independent refs in
 one call); use grep only to discover, and don't double-fetch."* The MCP server also
@@ -238,11 +253,21 @@ It warms a tsgo session once (~seconds–20s by repo size), so the skill only ca
 (large repo / colliding name). **Cross-platform:** code-oracle normalizes `/mnt/c/…` ↔ `C:\…` paths,
 so *one* server serves both a Windows IDE and WSL agents (over interop) — e.g. a fast **win32** build
 can serve WSL clients too, dodging the `/mnt/c` drvfs penalty (~38s → ~4s on the same repo).
+Native **Linux/WSL is supported too**: install `code-oracle/` with that environment's Node/npm and
+it selects `native-preview-linux-<arch>`. A wrapper left by another OS is rejected immediately
+instead of burning two 40-second request timeouts.
 
 </details>
 
 <details>
 <summary><b>📊 Benchmark it yourself</b></summary>
+
+The in-repo complexity microbenchmark covers full/no-op indexing, cold/warm locate, 64-symbol
+line-only reads, and a 10,000-file barrel chain:
+
+```bash
+npm run bench
+```
 
 ```bash
 git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench

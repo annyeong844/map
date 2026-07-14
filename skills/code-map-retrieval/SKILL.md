@@ -18,11 +18,16 @@ not the whole file), by id or by name / `path#name`. It is **drift-resistant**: 
 moved since indexing it re-anchors on the signature line and flags the result; if the anchor
 is lost it says so. It does **not search** — grep does the finding, `read` does the reading.
 
+For MCP calls, always pass `root` as the indexed repository's absolute directory. A global
+server commonly starts in the user home and cannot infer which child workspace is active.
+Native Linux, Windows (`C:\...`), and equivalent WSL (`/mnt/c/...`) spellings are accepted.
+
 ## Decision rule
 
 1. **You already know the refs/names** (the task names them, or you have them from a prior step)
-   → make **one** `read` with `refs: [all of them]`. Do **not** grep first; do **not** `cat`/`sed`/`nl`
-   the bodies. One round-trip, exact slices, still correct after edits.
+   → make **one** `read` with `root: "/absolute/repo", refs: [all of them]`. Do **not** grep
+   first; do **not** `cat`/`sed`/`nl` the bodies. One round-trip, exact slices, still correct
+   after edits.
 
 2. **You must discover where something lives**
    → use **grep / rg**. If grep's output already answers the question, **answer from it and stop.**
@@ -34,9 +39,10 @@ is lost it says so. It does **not search** — grep does the finding, `read` doe
 4. **Never fetch the same target twice** — once by grep, once by `read`. Pick the single cheaper path.
 
 5. **Refreshing reads after the code changed**
-   → one `read` with `refs: [your working set]` and `changedOnly: true`. It returns current slices
-   only for symbols whose file changed, plus an `unchanged` id list — a "git status for your reads."
-   Don't re-read the unchanged ones; don't re-grep the tree.
+   → one `read` with `root: "/absolute/repo", refs: [your working set]` and
+   `changedOnly: true`. It returns current slices only for symbols whose file changed, plus an
+   `unchanged` id list — a "git status for your reads." Don't re-read the unchanged ones; don't
+   re-grep the tree.
 
 ## References / callers / definitions — escalate to code-oracle (type-aware), by judgment
 
@@ -75,5 +81,7 @@ the one-time warmup against repo size and how common the name is:*
   `read` when a later read depends on what an earlier one shows.
 - With `snippet`, `aim.status: "ambiguous"` means your quoted text occurs more than once — don't
   target blindly.
+- `No code-map index` means the call's `root` is missing or wrong (or the index has not been
+  built). Do not search the user home for child repos or pin one global server to a single repo.
 
 Coordinates, not meaning: pull the raw slice and judge it yourself.

@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { buildIndex } from '../src/core/build-index.ts';
 import { locate } from '../src/core/locate.ts';
 import { changed, read } from '../src/core/read.ts';
-import { dispatch, TOOLS } from '../src/mcp/server.ts';
+import { getPreparedLookup, loadIndex, saveIndex } from '../src/core/store.ts';
+import { callTool, dispatch, resolveIndexPath, toHostPath, TOOLS } from '../src/mcp/server.ts';
 
 /** A throwaway source tree (not a git repo, so the walker fallback enumerates it). */
 function repo(files: Record<string, string>): string {
@@ -40,6 +44,135 @@ test('index extracts coordinates + an anchor from real source, no meaning, no ex
   const helper = index.entries.find((e) => e.name === 'helper')!;
   assert.ok(helper, 'private fn indexed');
   assert.equal(helper.visibility, 'module-private');
+});
+
+test('a local declaration exported by list stays one real, unambiguous symbol', async () => {
+  const { index } = await buildIndex({ root: repo({ 'src/m.ts': 'function local(): number { return 1; }\nexport { local };\n' }) });
+  const locals = index.entries.filter((e) => e.name === 'local');
+  assert.equal(locals.length, 1);
+  assert.equal(locals[0].kind, 'FunctionDeclaration');
+  assert.equal(locals[0].visibility, undefined);
+  assert.equal(read(index, 'local').status, 'exact');
+});
+
+test('saved indexes rebase their root portably, including legacy conventional indexes', async () => {
+  const root = repo({ 'src/m.ts': SRC });
+  const path = join(root, '.map-index.json');
+  const { index } = await buildIndex({ root });
+  saveIndex(index, path);
+  const persisted = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(persisted.meta.rootRelativeToIndex, '.');
+  persisted.meta.root = 'Z:\\a-root-that-does-not-exist';
+  writeFileSync(path, JSON.stringify(persisted));
+  const portable = loadIndex(path);
+  assert.equal(getPreparedLookup(portable), undefined, 'one-shot loads stay allocation-light until a long-lived caller opts in');
+  assert.equal(portable.meta.root, root);
+  assert.equal(read(portable, 'alpha').status, 'exact');
+
+  delete persisted.meta.rootRelativeToIndex;
+  writeFileSync(path, JSON.stringify(persisted));
+  const legacy = loadIndex(path);
+  assert.equal(legacy.meta.root, root);
+  assert.equal(read(legacy, 'alpha').status, 'exact');
+});
+
+test('MCP index discovery sees an index created later in a deep parent', () => {
+  const root = repo({});
+  let nested = root;
+  for (let i = 0; i < 10; i++) nested = join(nested, `d${i}`);
+  mkdirSync(nested, { recursive: true });
+  assert.equal(resolveIndexPath(nested, ''), join(nested, '.map-index.json'));
+  writeFileSync(join(root, '.map-index.json'), '{}');
+  assert.equal(resolveIndexPath(nested, ''), join(root, '.map-index.json'));
+});
+
+test('MCP path bridge accepts Windows and WSL spellings on either host', () => {
+  assert.equal(toHostPath('/mnt/c/Users/endof/repo', 'win32'), 'C:\\Users\\endof\\repo');
+  assert.equal(toHostPath('C:\\Users\\endof\\repo', 'linux'), '/mnt/c/Users/endof/repo');
+  assert.equal(toHostPath('/home/endof/repo', 'linux'), '/home/endof/repo');
+});
+
+test('a global MCP routes reads across child repositories by absolute root', async () => {
+  const container = repo({});
+  const firstRoot = join(container, 'first');
+  const secondRoot = join(container, 'second');
+  mkdirSync(firstRoot, { recursive: true });
+  mkdirSync(secondRoot, { recursive: true });
+  writeFileSync(join(firstRoot, 'a.ts'), 'export function alpha(): number { return 1; }\n');
+  writeFileSync(join(secondRoot, 'b.ts'), 'export function beta(): number { return 2; }\n');
+  const first = await buildIndex({ root: firstRoot });
+  const second = await buildIndex({ root: secondRoot });
+  saveIndex(first.index, join(firstRoot, '.map-index.json'));
+  saveIndex(second.index, join(secondRoot, '.map-index.json'));
+
+  const alpha = JSON.parse(callTool('read', { root: firstRoot, ref: 'alpha' }));
+  const beta = JSON.parse(callTool('read', { root: secondRoot, ref: 'beta' }));
+  assert.equal(alpha.status, 'exact');
+  assert.match(alpha.raw ?? '', /function alpha/);
+  assert.equal(beta.status, 'exact');
+  assert.match(beta.raw ?? '', /function beta/);
+  assert.match(JSON.parse(callTool('read', { root: 'relative/repo', ref: 'alpha' })).error ?? '', /must be absolute/);
+});
+
+test('the global MCP bounds warmed repository runtimes', async () => {
+  const container = repo({});
+  const roots: string[] = [];
+  for (let i = 0; i < 9; i++) {
+    const root = join(container, `repo-${i}`);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'm.ts'), `export function symbol${i}(): number { return ${i}; }\n`);
+    const { index } = await buildIndex({ root });
+    saveIndex(index, join(root, '.map-index.json'));
+    roots.push(root);
+    assert.equal(JSON.parse(callTool('read', { root, ref: `symbol${i}` })).status, 'exact');
+  }
+  unlinkSync(join(roots[0], '.map-index.json'));
+  assert.match(JSON.parse(callTool('read', { root: roots[0], ref: 'symbol0' })).error ?? '', /No code-map index/);
+});
+
+test('a running MCP server loads an index created later in a parent', { timeout: 10_000 }, async () => {
+  const root = repo({ 'src/m.ts': SRC });
+  const nested = join(root, 'one', 'two');
+  mkdirSync(nested, { recursive: true });
+  const { index } = await buildIndex({ root });
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.MAP_INDEX;
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp/server.ts', import.meta.url))], {
+    cwd: nested,
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = createInterface({ input: child.stdout });
+  let id = 0;
+  const pending = new Map<number, (response: Record<string, unknown>) => void>();
+  lines.on('line', (line) => {
+    const response = JSON.parse(line) as { id?: number } & Record<string, unknown>;
+    if (response.id !== undefined) pending.get(response.id)?.(response);
+  });
+  const rpc = (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const requestId = ++id;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`MCP request timed out: ${method}`)), 3_000);
+      pending.set(requestId, (response) => {
+        clearTimeout(timer);
+        pending.delete(requestId);
+        resolve(response);
+      });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params }) + '\n');
+    });
+  };
+  try {
+    const before = await rpc('tools/call', { name: 'read', arguments: { ref: 'alpha' } });
+    const beforeText = ((before.result as { content: { text: string }[] }).content[0].text);
+    assert.match(JSON.parse(beforeText).error ?? '', /No code-map index/);
+    saveIndex(index, join(root, '.map-index.json'));
+    const after = await rpc('tools/call', { name: 'read', arguments: { ref: 'alpha' } });
+    const afterText = ((after.result as { content: { text: string }[] }).content[0].text);
+    assert.equal(JSON.parse(afterText).status, 'exact');
+  } finally {
+    lines.close();
+    child.kill();
+  }
 });
 
 test('changed: working-set delta — symbols in untouched files are unchanged, churned files re-anchor', async () => {
@@ -257,6 +390,7 @@ test('read flags ambiguous relocation when the signature anchor matches multiple
 test('mcp server: the only tool is read; dispatch routes it over a given index', async () => {
   assert.equal(TOOLS.length, 1);
   assert.equal(TOOLS[0].name, 'read');
+  assert.ok(TOOLS[0].inputSchema.properties.root, 'global clients can select the active repository per call');
   const { index } = await buildIndex({
     root: repo({
       'src/u.ts': 'export function helper(): number { return 1; }\n',

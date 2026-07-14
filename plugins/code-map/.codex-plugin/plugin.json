@@ -1,28 +1,39 @@
 {
   "name": "code-map",
-  "version": "0.1.0",
-  "description": "Token-efficient, drift-resistant code reads. grep finds, code-map read reads.",
+  "version": "0.1.0+codex.20260714073445",
+  "description": "Codex-first routing for exact, drift-resistant code-map symbol reads.",
   "author": {
-    "name": "annyeong844"
+    "name": "annyeong844",
+    "url": "https://github.com/annyeong844"
   },
+  "homepage": "https://github.com/annyeong844/map#readme",
   "repository": "https://github.com/annyeong844/map",
   "license": "MIT",
-  "keywords": ["code-map", "retrieval", "mcp", "code-navigation", "codex", "skill"],
+  "keywords": [
+    "code-map",
+    "codex",
+    "codex-plugin",
+    "retrieval",
+    "mcp",
+    "symbol-reading",
+    "code-navigation"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "code-map",
-    "shortDescription": "grep finds, code-map read reads — token-efficient, drift-resistant reads.",
-    "longDescription": "code-map ships a retrieval-routing skill: read known symbols with code-map read (batch independent refs in one call), use grep only to discover, and never double-fetch (grep to find AND read on top). Reading known symbols is the win; the routing keeps discovery a win too.",
+    "shortDescription": "Route known symbol reads through code-map's exact MCP tool.",
+    "longDescription": "A Codex-first retrieval skill for indexed repositories: use rg only to discover unknown locations, then read known symbols through code-map in one exact or batched call. It avoids redundant grep-then-read loops and refreshes working sets safely after edits.",
     "developerName": "annyeong844",
     "category": "Productivity",
     "capabilities": [
-      "Token-efficient retrieval",
-      "Drift-resistant reads"
+      "Exact symbol reads",
+      "Drift-resistant retrieval",
+      "Batch MCP reads"
     ],
     "defaultPrompt": [
-      "Read these symbols with code-map.",
-      "Where is X defined?",
-      "Refresh my working set after these edits."
+      "Read these known symbols with code-map.",
+      "Refresh this code-map working set after my edits.",
+      "Find this symbol with rg, then read its exact body with code-map."
     ]
   }
 }

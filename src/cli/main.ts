@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolve as resolvePath } from 'node:path';
 import { buildIndex, type BuildReport } from '../core/build-index.ts';
-import { changed, read } from '../core/read.ts';
+import { changed, read, readMany } from '../core/read.ts';
 import { DEFAULT_INDEX_PATH, loadIndex, saveIndex } from '../core/store.ts';
 
 function parseArgs(argv: string[]): { _: string[]; flags: Record<string, string | boolean> } {
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
       } else {
         console.log(`Indexed ${report.index.meta.entryCount} symbols across ${report.filesIndexed} files`);
         console.log(`  exported defs: ${report.defs}   methods: ${report.methods}   private defs: ${report.privateDefs}`);
-        console.log(`  reused: ${report.reused}   re-read: ${report.changed}${flags.force ? ' (forced full)' : ''}`);
+        console.log(`  reused: ${report.reused}   re-read: ${report.changed}${flags.force ? ' (forced full)' : ''}   fan-in: ${report.fanInReused ? 'reused' : 'recomputed'}`);
         if (report.filesMissing.length) console.log(`  ${report.filesMissing.length} files unreadable (anchors weakened) — first: ${report.filesMissing[0]}`);
         console.log(`  root: ${report.index.meta.root}`);
         console.log(`  -> ${out}`);
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
       if (typeof flags.refs === 'string') {
         const idx = loadIndex(indexPath);
         const refs = [...new Set(flags.refs.split(',').map((s) => s.trim()).filter(Boolean))].slice(0, 64);
-        const results = refs.map((rf) => read(idx, rf, {}));
+        const results = readMany(idx, refs);
         if (json) return void console.log(JSON.stringify({ results }, null, 2));
         for (const r of results) {
           console.log(`# ${r.id}  [${r.status}]  ${r.file}:${r.line}${r.endLine ? `-${r.endLine}` : ''}`);
@@ -166,6 +166,7 @@ function summary(report: BuildReport) {
     privateDefs: report.privateDefs,
     reused: report.reused,
     changed: report.changed,
+    fanInReused: report.fanInReused,
     filesMissing: report.filesMissing.length,
     root: report.index.meta.root,
   };

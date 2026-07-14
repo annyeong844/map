@@ -9,6 +9,10 @@
  * exact spot. What the spot *means* is never the map's claim.
  */
 
+export const INDEX_VERSION = 13;
+/** Entries have been globally ordered by file, then line, since this format. */
+export const ORDERED_ENTRIES_VERSION = 13;
+
 /** One routed location — a "착탄 지점" (impact point). */
 export interface MapEntry {
   /** Handle returned by locate(), accepted by read(). Unique within an index. */
@@ -73,7 +77,15 @@ export interface MapIndex {
     builtAtMs: number;
     /** Absolute source root these coordinates resolve against. */
     root: string;
+    /** Portable root persisted relative to the index file. `root` remains the
+     * resolved runtime path for consumers and older index compatibility. */
+    rootRelativeToIndex?: string;
     entryCount: number;
+    /** Parseable source files seen during the build. Enables an O(files) no-op
+     * rebuild without mistaking a deleted symbol-less file for "unchanged". */
+    fileCount?: number;
+    /** Cached report counters so a true no-op rebuild never scans every symbol. */
+    counts?: { defs: number; methods: number; privateDefs: number };
   };
   /**
    * file -> short content hash. This is the sourceVersionToken: read() compares

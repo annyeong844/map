@@ -16,7 +16,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -45,8 +45,17 @@ function langOf(file: string): Lang | null {
  * (framing, readiness, references/definition/implementation, cache) is shared. */
 function backend(lang: Lang): { cmd: string; args: string[]; languageId: string } | null {
   if (lang === 'ts') {
-    const bin = process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN) ? process.env.TSGO_BIN : join(HERE, 'node_modules/@typescript/native-preview/bin/tsgo.js');
-    return existsSync(bin) ? { cmd: process.execPath, args: [bin, '--lsp', '--stdio'], languageId: 'typescript' } : null;
+    if (process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN)) {
+      const override = process.env.TSGO_BIN;
+      return /\.[cm]?js$/i.test(override)
+        ? { cmd: process.execPath, args: [override, '--lsp', '--stdio'], languageId: 'typescript' }
+        : { cmd: override, args: ['--lsp', '--stdio'], languageId: 'typescript' };
+    }
+    const bin = join(HERE, 'node_modules/@typescript/native-preview/bin/tsgo.js');
+    const platform = join(HERE, 'node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`);
+    // npm can leave a wrapper plus another OS's optional package in a shared
+    // checkout. Treat that as unavailable now, not as two 40-second LSP timeouts.
+    return existsSync(bin) && existsSync(platform) ? { cmd: process.execPath, args: [bin, '--lsp', '--stdio'], languageId: 'typescript' } : null;
   }
   // Python via ty's language server. TY_CMD overrides (e.g. an absolute `ty`); default runs via uvx.
   return process.env.TY_CMD ? { cmd: process.env.TY_CMD, args: ['server'], languageId: 'python' } : { cmd: 'uvx', args: ['ty', 'server'], languageId: 'python' };
@@ -65,15 +74,63 @@ function projectRoot(file: string, lang: Lang): string {
   }
 }
 
+/** Incremental Content-Length decoder. Every input/body byte is copied at most
+ * once, even when a large JSON-RPC message arrives one tiny chunk at a time. */
+export class ContentLengthDecoder {
+  private headerBytes: number[] = [];
+  private bodyChunks: Buffer[] = [];
+  private bodyBytes = 0;
+  private bodyLength: number | null = null;
+
+  push(chunk: Buffer): Buffer[] {
+    const messages: Buffer[] = [];
+    let offset = 0;
+    while (offset < chunk.length) {
+      if (this.bodyLength == null) {
+        const byte = chunk[offset++];
+        this.headerBytes.push(byte);
+        const n = this.headerBytes.length;
+        if (n > 16 * 1024) { this.headerBytes = []; continue; }
+        if (n < 4 || this.headerBytes[n - 4] !== 13 || this.headerBytes[n - 3] !== 10 || this.headerBytes[n - 2] !== 13 || this.headerBytes[n - 1] !== 10) continue;
+        const header = Buffer.from(this.headerBytes).toString();
+        this.headerBytes = [];
+        const match = /Content-Length: (\d+)/i.exec(header);
+        const length = match ? Number(match[1]) : -1;
+        if (!Number.isSafeInteger(length) || length < 0 || length > 256 * 1024 * 1024) continue;
+        this.bodyLength = length;
+        this.bodyBytes = 0;
+        this.bodyChunks = [];
+        if (length === 0) {
+          this.bodyLength = null;
+          messages.push(Buffer.alloc(0));
+        }
+        continue;
+      }
+
+      const take = Math.min(this.bodyLength - this.bodyBytes, chunk.length - offset);
+      if (take > 0) this.bodyChunks.push(chunk.subarray(offset, offset + take));
+      this.bodyBytes += take;
+      offset += take;
+      if (this.bodyBytes !== this.bodyLength) continue;
+      messages.push(this.bodyChunks.length === 1 ? this.bodyChunks[0] : Buffer.concat(this.bodyChunks, this.bodyLength));
+      this.bodyLength = null;
+      this.bodyBytes = 0;
+      this.bodyChunks = [];
+    }
+    return messages;
+  }
+}
+
 /** A warm LSP session (tsgo or ty): Content-Length framed JSON-RPC, server-request
  * replies, quiescence warmup, live file sync. Language-agnostic — the backend just
  * supplies the spawn command and the LSP `languageId`. */
 class LspSession {
   private proc: ChildProcess;
-  private buf = Buffer.alloc(0);
-  private pending = new Map<number, (r: unknown) => void>();
+  private decoder = new ContentLengthDecoder();
+  private pending = new Map<number, { resolve: (r: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  private failure: Error | null = null;
   private nextId = 1;
-  private opened = new Map<string, number>(); // uri -> version
+  private opened = new Map<string, { version: number; mtimeMs: number; ctimeMs: number; size: number; ino: number }>();
   private initDone: Promise<void>;
   private warmed = false;
   private lastMsgAt = Date.now();
@@ -83,32 +140,38 @@ class LspSession {
     this.languageId = spec.languageId;
     this.proc = spawn(spec.cmd, spec.args, { stdio: ['pipe', 'pipe', 'ignore'] });
     this.proc.stdout!.on('data', (d: Buffer) => this.onData(d));
+    this.proc.on('error', (error) => this.fail(error));
+    this.proc.on('exit', (code, signal) => this.fail(new Error(`LSP backend exited before replying (${signal ?? `code ${code}`}).`)));
     this.initDone = this.initialize(root);
+  }
+
+  private fail(error: Error): void {
+    if (this.failure) return;
+    this.failure = error;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 
   private onData(d: Buffer): void {
     this.lastMsgAt = Date.now(); // bump on any server activity (logs/progress) — drives quiescence readiness
-    this.buf = Buffer.concat([this.buf, d]);
-    for (;;) {
-      const sep = this.buf.indexOf('\r\n\r\n');
-      if (sep < 0) break;
-      const m = /Content-Length: (\d+)/i.exec(this.buf.subarray(0, sep).toString());
-      if (!m) { this.buf = this.buf.subarray(sep + 4); continue; }
-      const len = Number(m[1]);
-      const start = sep + 4;
-      if (this.buf.length < start + len) break;
-      let msg: any;
-      try { msg = JSON.parse(this.buf.subarray(start, start + len).toString()); } catch { msg = null; }
-      this.buf = this.buf.subarray(start + len);
-      if (!msg) continue;
-      if (msg.id != null && this.pending.has(msg.id)) {
-        this.pending.get(msg.id)!(msg.result);
-        this.pending.delete(msg.id);
-      } else if (msg.id != null && msg.method) {
-        // server→client request: must answer or the server stalls (watcher/config).
-        const result = msg.method === 'workspace/configuration' ? (msg.params?.items ?? []).map(() => ({})) : null;
-        this.write({ jsonrpc: '2.0', id: msg.id, result });
-      }
+    for (const body of this.decoder.push(d)) this.handleMessage(body);
+  }
+
+  private handleMessage(body: Buffer): void {
+    let msg: any;
+    try { msg = JSON.parse(body.toString()); } catch { return; }
+    if (msg.id != null && this.pending.has(msg.id)) {
+      const pending = this.pending.get(msg.id)!;
+      this.pending.delete(msg.id);
+      clearTimeout(pending.timer);
+      pending.resolve(msg.result);
+    } else if (msg.id != null && msg.method) {
+      // server→client request: must answer or the server stalls (watcher/config).
+      const result = msg.method === 'workspace/configuration' ? (msg.params?.items ?? []).map(() => ({})) : null;
+      this.write({ jsonrpc: '2.0', id: msg.id, result });
     }
   }
 
@@ -121,10 +184,19 @@ class LspSession {
   }
   private request(method: string, params: unknown): Promise<unknown> {
     const id = this.nextId++;
-    this.write({ jsonrpc: '2.0', id, method, params });
-    return new Promise((res) => {
-      const t = setTimeout(() => { if (this.pending.delete(id)) res(null); }, REQ_TIMEOUT_MS);
-      this.pending.set(id, (r) => { clearTimeout(t); res(r); });
+    if (this.failure) return Promise.reject(this.failure);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) resolve(null);
+      }, REQ_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        this.write({ jsonrpc: '2.0', id, method, params });
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
 
@@ -142,9 +214,12 @@ class LspSession {
   /** Sync a file's current content into the session (didOpen first time, didChange after). */
   private syncFile(file: string): string {
     const uri = pathToFileURL(file).href;
+    const info = statSync(file);
+    const prior = this.opened.get(uri);
+    if (prior && prior.mtimeMs === info.mtimeMs && prior.ctimeMs === info.ctimeMs && prior.size === info.size && prior.ino === info.ino) return uri;
     const text = readFileSync(file, 'utf8');
-    const version = (this.opened.get(uri) ?? 0) + 1;
-    this.opened.set(uri, version);
+    const version = (prior?.version ?? 0) + 1;
+    this.opened.set(uri, { version, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, size: info.size, ino: info.ino });
     if (version === 1) this.notify('textDocument/didOpen', { textDocument: { uri, languageId: this.languageId, version, text } });
     else this.notify('textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text }] });
     return uri;
@@ -172,7 +247,12 @@ class LspSession {
     if (method === 'textDocument/references') params.context = { includeDeclaration: false };
     const r = (await this.request(method, params)) as any;
     const arr = Array.isArray(r) ? r : r ? [r] : [];
-    return arr.map((l: any) => ({ uri: l.uri ?? l.targetUri, line: (l.range ?? l.targetRange)?.start?.line ?? 0 })).filter((x: any) => x.uri);
+    const locations: { uri: string; line: number }[] = [];
+    for (const location of arr) {
+      const target = location.uri ?? location.targetUri;
+      if (target) locations.push({ uri: target, line: (location.range ?? location.targetRange)?.start?.line ?? 0 });
+    }
+    return locations;
   }
 
   /** Resolve a symbol NAME to its DECLARATION position via the LSP's documentSymbol —
@@ -248,13 +328,18 @@ export function resolveNamePosition(
   const dot = name.lastIndexOf('.');
   const wantContainer = dot > 0 ? name.slice(0, dot) : null;
   const wantName = dot > 0 ? name.slice(dot + 1) : name;
-  const matches = symbols.filter((s) => s.name === wantName && (wantContainer == null || s.container === wantContainer));
-  if (!matches.length) return null;
-  const preferred = matches.filter((s) => DECL_KINDS.has(s.kind));
-  const pool = preferred.length ? preferred : matches;
-  // Collapse to one declaration per container (overloads / split signatures are one symbol).
-  const byContainer = new Map<string, OracleSym>();
-  for (const s of pool) { const k = s.container ?? ''; if (!byContainer.has(k)) byContainer.set(k, s); }
+  const declarations = new Map<string, OracleSym>();
+  const fallback = new Map<string, OracleSym>();
+  // Match, prioritize and collapse overloads in one pass instead of allocating
+  // two full filtered arrays for a large documentSymbol tree.
+  for (const symbol of symbols) {
+    if (symbol.name !== wantName || (wantContainer != null && symbol.container !== wantContainer)) continue;
+    const key = symbol.container ?? '';
+    const bucket = DECL_KINDS.has(symbol.kind) ? declarations : fallback;
+    if (!bucket.has(key)) bucket.set(key, symbol);
+  }
+  const byContainer = declarations.size ? declarations : fallback;
+  if (!byContainer.size) return null;
   const cands = [...byContainer.values()];
   if (cands.length > 1) return { ambiguous: cands };
   return { line: cands[0].line, character: cands[0].character };
@@ -295,8 +380,8 @@ function session(root: string, lang: Lang, spec: { cmd: string; args: string[]; 
 // ── persistent answer cache (the practical "snapshot"): the checker's RAM can't be
 // serialized, but the ANSWERS can. Persisted per root, reloaded on start → after a
 // restart, queries with no project change are served INSTANTLY, without even warming
-// the LSP. Validity is gated by a project epoch (max source mtime): any change bumps
-// it and drops the stale answers, which then lazily recompute against the warm LSP. ──
+// the LSP. Validity is gated by an order-independent project fingerprint: edits,
+// additions and deletions all drop stale answers. ──
 const CACHE_DIR = join(HERE, '.cache');
 const sha16 = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 const SKIP_DIRS = new Set([
@@ -308,41 +393,77 @@ const SKIP_DIRS = new Set([
 const SRC_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|pyi)$/;
 const EPOCH_TTL_MS = Number(process.env.CODE_ORACLE_EPOCH_TTL_MS ?? 2000);
 
-const epochCache = new Map<string, { at: number; epoch: number }>();
-/** Project epoch = max source-file mtime; sampled ≤ once / EPOCH_TTL so repeat queries
- * are O(1). The walk + stats run CONCURRENTLY: on a high-latency FS (e.g. /mnt over WSL)
- * a serial scan of a 1000+ file tree took ~8s and dominated even cache hits; fanning the
- * readdir/stat out in parallel overlaps the syscall latency. (Also: .py was missing from
- * SRC_RE, so Python epochs were stuck at 0 — no change detection.) */
-async function projectEpoch(root: string): Promise<number> {
+type Epoch = string;
+const epochCache = new Map<string, { at: number; epoch: Epoch }>();
+
+function fnv1a32(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 0x01000193);
+  return hash >>> 0;
+}
+
+/** Sampled ≤ once / EPOCH_TTL, so repeat queries are O(1). A bounded breadth-first
+ * directory walk plus 64 stat workers stays O(files) without the old unbounded
+ * Promise tree / file-descriptor burst. The commutative fingerprint includes path,
+ * size, mtime, ctime and inode, so non-max edits and deletions cannot hide behind an
+ * unchanged "maximum mtime". */
+async function projectEpoch(root: string): Promise<Epoch> {
   const c = epochCache.get(root);
   if (c && Date.now() - c.at < EPOCH_TTL_MS) return c.epoch;
-  let max = 0;
-  const walk = async (d: string): Promise<void> => {
-    let ents;
-    try { ents = await readdir(d, { withFileTypes: true }); } catch { return; }
-    const tasks: Promise<unknown>[] = [];
-    for (const e of ents) {
-      if (SKIP_DIRS.has(e.name)) continue;
-      const p = join(d, e.name);
-      if (e.isDirectory()) tasks.push(walk(p));
-      else if (SRC_RE.test(e.name)) tasks.push(stat(p).then((s) => { if (s.mtimeMs > max) max = s.mtimeMs; }).catch(() => {}));
-    }
-    await Promise.all(tasks);
-  };
-  await walk(root);
-  const epoch = Math.floor(max);
+  const epoch = await scanProjectEpoch(root);
   epochCache.set(root, { at: Date.now(), epoch });
   return epoch;
 }
 
-type Cache = { epoch: number; entries: Record<string, unknown> };
+/** Uncached O(files) fingerprint pass, exported for deterministic regression tests. */
+export async function scanProjectEpoch(root: string): Promise<Epoch> {
+  const dirs = [root];
+  const sources: string[] = [];
+  for (let cursor = 0; cursor < dirs.length;) {
+    const batch = dirs.slice(cursor, cursor + 32);
+    cursor += batch.length;
+    const listings = await Promise.all(batch.map(async (dir) => {
+      try { return { dir, entries: await readdir(dir, { withFileTypes: true }) }; }
+      catch { return { dir, entries: [] }; }
+    }));
+    for (const { dir, entries } of listings) {
+      for (const entry of entries) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) dirs.push(path);
+        else if (SRC_RE.test(entry.name)) sources.push(path);
+      }
+    }
+  }
+
+  let cursor = 0;
+  let count = 0;
+  let xor = 0;
+  let sum = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < sources.length) {
+      const path = sources[cursor++];
+      try {
+        const info = await stat(path);
+        const signature = `${relative(root, path)}\0${info.size}\0${Math.trunc(info.mtimeMs * 1000)}\0${Math.trunc(info.ctimeMs * 1000)}\0${info.ino}`;
+        const hash = fnv1a32(signature);
+        xor = (xor ^ hash) >>> 0;
+        sum = (sum + hash) >>> 0;
+        count++;
+      } catch { /* file disappeared during the scan */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(64, sources.length) }, worker));
+  return `${count.toString(36)}:${xor.toString(36)}:${sum.toString(36)}`;
+}
+
+type Cache = { epoch: Epoch; entries: Record<string, unknown> };
 const caches = new Map<string, Cache>();
 const cacheFile = (root: string) => join(CACHE_DIR, `${sha16(root)}.json`);
 function loadCache(root: string): Cache {
   let c = caches.get(root);
   if (c) return c;
-  try { c = JSON.parse(readFileSync(cacheFile(root), 'utf8')) as Cache; } catch { c = { epoch: 0, entries: {} }; }
+  try { c = JSON.parse(readFileSync(cacheFile(root), 'utf8')) as Cache; } catch { c = { epoch: '', entries: {} }; }
   caches.set(root, c);
   return c;
 }
@@ -350,11 +471,36 @@ function persistCache(root: string): void {
   try { mkdirSync(CACHE_DIR, { recursive: true }); writeFileSync(cacheFile(root), JSON.stringify(caches.get(root))); } catch { /* best effort */ }
 }
 
-const lineCache = new Map<string, string[]>();
-function sourceLine(file: string, line0: number): string {
-  let ls = lineCache.get(file);
-  if (!ls) { try { ls = readFileSync(file, 'utf8').split('\n'); } catch { ls = []; } lineCache.set(file, ls); }
-  return (ls[line0] ?? '').trim().slice(0, 160);
+const dirtyCaches = new Set<string>();
+let persistTimer: NodeJS.Timeout | null = null;
+function flushCaches(): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = null;
+  for (const root of dirtyCaches) persistCache(root);
+  dirtyCaches.clear();
+}
+function schedulePersist(root: string): void {
+  dirtyCaches.add(root);
+  if (persistTimer) return;
+  // Coalesce a burst of checker queries. Rewriting the whole answer snapshot per
+  // result made Q distinct queries cost O(Q²) serialized bytes.
+  persistTimer = setTimeout(flushCaches, 5000);
+  persistTimer.unref();
+}
+
+const LINE_CACHE_MAX = 256;
+const lineCache = new Map<string, { epoch: Epoch; lines: string[] }>();
+function sourceLine(file: string, line0: number, epoch: Epoch): string {
+  let cached = lineCache.get(file);
+  if (!cached || cached.epoch !== epoch) {
+    let lines: string[];
+    try { lines = readFileSync(file, 'utf8').split('\n'); } catch { lines = []; }
+    cached = { epoch, lines };
+    lineCache.delete(file);
+    lineCache.set(file, cached);
+    if (lineCache.size > LINE_CACHE_MAX) lineCache.delete(lineCache.keys().next().value!);
+  }
+  return (cached.lines[line0] ?? '').trim().slice(0, 160);
 }
 
 const METHOD: Record<string, string> = {
@@ -439,7 +585,7 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
     const dk = `${f}\t${r.line}`;
     if (seen.has(dk)) continue;
     seen.add(dk);
-    out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line) });
+    out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line, epoch) });
   }
   out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
   // Honest guard (regression-verified 2026-06): ty 0.0.50's find-references is INTRA-FILE
@@ -456,7 +602,7 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note, ...(pyRefsCaveat ? { incomplete: true } : {}) };
   if (cache.epoch !== epoch) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
   cache.entries[cacheKey] = result;
-  persistCache(root);
+  schedulePersist(root);
   return result;
 }
 
@@ -527,8 +673,8 @@ async function firstSourceFile(root: string, lang: Lang): Promise<string | null>
   const re = lang === 'ts' ? /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/ : /\.(py|pyi)$/;
   const queue = [root];
   let scanned = 0;
-  while (queue.length && scanned < 4000) {
-    const dir = queue.shift()!;
+  for (let cursor = 0; cursor < queue.length && scanned < 4000; cursor++) {
+    const dir = queue[cursor];
     let ents;
     try { ents = await readdir(dir, { withFileTypes: true }); } catch { continue; }
     const subdirs: string[] = [];
@@ -576,7 +722,7 @@ function main(): void {
     try { req = JSON.parse(t); } catch { return; }
     void handle(req);
   });
-  const shutdown = () => { for (const root of caches.keys()) persistCache(root); for (const s of sessions.values()) s.dispose(); process.exit(0); };
+  const shutdown = () => { flushCaches(); for (const s of sessions.values()) s.dispose(); process.exit(0); };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 }
@@ -588,6 +734,7 @@ if (isEntry) main();
 /** Kill every warm LSP session — tests must call this or the live tsgo/ty child
  * keeps the process alive. */
 export function disposeAll(): void {
+  flushCaches();
   for (const s of sessions.values()) s.dispose();
   sessions.clear();
 }

@@ -32,7 +32,7 @@ const session = String(data?.session_id || 'nosession').replace(/[^A-Za-z0-9_-]/
 // Gate 1 — only act inside a code-map-indexed repo. Walk up for .map-index.json.
 function indexed(dir) {
   let d = dir;
-  for (let i = 0; i < 8; i++) {
+  for (;;) {
     if (existsSync(join(d, '.map-index.json'))) return true;
     const up = dirname(d);
     if (up === d) break;

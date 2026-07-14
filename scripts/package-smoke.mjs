@@ -2,19 +2,35 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const temp = mkdtempSync(join(tmpdir(), 'code-map-package-'));
+// Keep a space in every E2E path. Windows .cmd invocation is where quoting bugs
+// hide, and a normal user install under "Program Files" must work.
+const temp = mkdtempSync(join(tmpdir(), 'code map package-'));
+
+function windowsCommand(command, args, options = {}) {
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'Path';
+  const env = options.binDir
+    ? { ...process.env, [pathKey]: `${options.binDir}${delimiter}${process.env[pathKey] ?? ''}` }
+    : process.env;
+  return spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', command, ...args], {
+    cwd: options.cwd,
+    encoding: 'utf8',
+    env,
+    windowsHide: true,
+    timeout: options.timeout,
+  });
+}
 
 function npm(args, cwd = projectRoot) {
   const npmCli = process.env.npm_execpath;
   const result = npmCli
     ? spawnSync(process.execPath, [npmCli, ...args], { cwd, encoding: 'utf8', windowsHide: true })
-    : spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
-        cwd, encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32',
-      });
+    : process.platform === 'win32'
+      ? windowsCommand('npm.cmd', args, { cwd })
+      : spawnSync('npm', args, { cwd, encoding: 'utf8', windowsHide: true });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || `npm ${args[0]} failed`);
   return result.stdout;
 }
@@ -40,9 +56,7 @@ try {
   const runInstalledMap = (args) => {
     const bin = join(installRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'map.cmd' : 'map');
     const result = process.platform === 'win32'
-      ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', bin, ...args], {
-          cwd: temp, encoding: 'utf8', windowsHide: true, timeout: 30_000,
-        })
+      ? windowsCommand('map.cmd', args, { cwd: temp, binDir: dirname(bin), timeout: 30_000 })
       : spawnSync(bin, args, { cwd: temp, encoding: 'utf8', windowsHide: true, timeout: 30_000 });
     if (result.status !== 0) throw new Error(result.stderr || result.stdout || 'installed map binary failed');
     return result;
@@ -50,7 +64,6 @@ try {
 
   const packageRoot = join(installRoot, 'node_modules', '@annyeong844', 'code-map');
   const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
-  const cli = join(packageRoot, manifest.bin.map.replace(/^\.\//u, ''));
   const server = join(packageRoot, manifest.bin['map-mcp'].replace(/^\.\//u, ''));
   const version = runInstalledMap(['--version']).stdout.trim();
   if (version !== manifest.version) throw new Error(`installed CLI version ${version} != package ${manifest.version}`);

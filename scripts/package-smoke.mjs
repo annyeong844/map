@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +55,7 @@ try {
   const version = runInstalledMap(['--version']).stdout.trim();
   if (version !== manifest.version) throw new Error(`installed CLI version ${version} != package ${manifest.version}`);
   const setup = JSON.parse(runInstalledMap(['setup', 'codex', '--json']).stdout);
-  if (setup.packageRoot !== packageRoot || !setup.steps?.some((step) => step.args?.includes('map-mcp'))) {
+  if (realpathSync(setup.packageRoot) !== realpathSync(packageRoot) || !setup.steps?.some((step) => step.args?.includes('map-mcp'))) {
     throw new Error('installed setup plan does not point at its own marketplace and MCP binary');
   }
 

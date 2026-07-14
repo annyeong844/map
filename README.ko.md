@@ -124,7 +124,8 @@ code-map은 넓게 시작했고(locate, grep, graph, hotspots, 시맨틱 검색)
 **[code-map-bench](https://github.com/annyeong844/code-map-bench)** 에 —
 [RESULTS.md](https://github.com/annyeong844/code-map-bench/blob/main/RESULTS.md)(drift/edit/oracle)
 + [EFFICIENCY-CODEX.md](https://github.com/annyeong844/code-map-bench/blob/main/EFFICIENCY-CODEX.md)
-(batch/cross-model/adoption). 거기 `node verify.mjs`가 모든 헤드라인을 raw에서 재유도합니다.
+(batch/cross-model/adoption). 거기 `node verify.mjs`가 커밋된 헤드라인(코덱스·Grok pass@30 top-line 포함)을
+raw 실행 데이터에서 재유도하고, 재유도 못 하는 소수는 직접 표시합니다.
 
 </details>
 

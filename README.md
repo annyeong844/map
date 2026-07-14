@@ -127,7 +127,8 @@ Full numbers, the round-trip law, the adoption ladder, and every retraction live
 **[code-map-bench](https://github.com/annyeong844/code-map-bench)** —
 [RESULTS.md](https://github.com/annyeong844/code-map-bench/blob/main/RESULTS.md) (drift/edit/oracle)
 and [EFFICIENCY-CODEX.md](https://github.com/annyeong844/code-map-bench/blob/main/EFFICIENCY-CODEX.md)
-(batch/cross-model/adoption). `node verify.mjs` there re-derives every headline from raw data.
+(batch/cross-model/adoption). `node verify.mjs` there re-derives the committed headlines —
+the codex & grok pass@30 top-lines included — from the raw run data, and prints the few it can't.
 
 </details>
 

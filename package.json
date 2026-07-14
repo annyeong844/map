@@ -26,8 +26,8 @@
     "LICENSE"
   ],
   "bin": {
-    "map": "./src/cli/main.ts",
-    "map-mcp": "./src/mcp/server.ts"
+    "map": "src/cli/main.ts",
+    "map-mcp": "src/mcp/server.ts"
   },
   "scripts": {
     "map": "node src/cli/main.ts",

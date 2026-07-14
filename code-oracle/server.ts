@@ -34,6 +34,10 @@ const REQ_TIMEOUT_MS = Number(process.env.TS_ORACLE_REQ_TIMEOUT_MS ?? 40000);
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 type Lang = 'ts' | 'py';
+type ProjectFileKind = Lang | `${Lang}-config`;
+type ProjectFile = { signature: string; kind: ProjectFileKind };
+type ProjectSnapshot = { epoch: string; files: Map<string, ProjectFile> };
+
 function langOf(file: string): Lang | null {
   if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(file)) return 'ts';
   if (/\.(py|pyi)$/.test(file)) return 'py';
@@ -156,9 +160,11 @@ class LspSession {
   private warmed = false;
   private lastMsgAt = Date.now();
   private languageId: string;
+  private projectFiles: Map<string, ProjectFile>;
 
-  constructor(spec: { cmd: string; args: string[]; languageId: string }, root: string) {
+  constructor(spec: { cmd: string; args: string[]; languageId: string }, root: string, projectFiles: Map<string, ProjectFile>) {
     this.languageId = spec.languageId;
+    this.projectFiles = new Map(projectFiles);
     this.proc = spawn(spec.cmd, spec.args, { stdio: ['pipe', 'pipe', 'ignore'] });
     this.proc.stdout!.on('data', (d: Buffer) => this.onData(d));
     this.proc.on('error', (error) => this.fail(error));
@@ -244,6 +250,37 @@ class LspSession {
     if (version === 1) this.notify('textDocument/didOpen', { textDocument: { uri, languageId: this.languageId, version, text } });
     else this.notify('textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text }] });
     return uri;
+  }
+
+  /** Bring files changed outside the queried document into the warm project.
+   * Added/modified sources can be overlaid cheaply. Deletions and project-config
+   * changes require a fresh language-server project graph, so the caller restarts. */
+  async reconcileProject(projectFiles: Map<string, ProjectFile>, lang: Lang): Promise<boolean> {
+    const configKind = `${lang}-config` as const;
+    const relevant = (file: ProjectFile): boolean => file.kind === lang || file.kind === configKind;
+    const next = new Map([...projectFiles].filter(([, file]) => relevant(file)));
+
+    for (const [path, prior] of this.projectFiles) {
+      if (!relevant(prior)) continue;
+      const current = next.get(path);
+      if (!current || (prior.kind === configKind && current.signature !== prior.signature)) return false;
+    }
+    for (const [path, current] of next) {
+      const prior = this.projectFiles.get(path);
+      if (current.kind === configKind && (!prior || prior.signature !== current.signature)) return false;
+    }
+
+    const changed = [...next]
+      .filter(([path, current]) => current.kind === lang && this.projectFiles.get(path)?.signature !== current.signature)
+      .map(([path]) => path);
+    if (changed.length) {
+      await this.initDone;
+      for (const path of changed) this.syncFile(path);
+      this.warmed = false;
+      this.lastMsgAt = Date.now();
+    }
+    this.projectFiles = next;
+    return true;
   }
 
   /** Wait until the project is loaded — tsgo has gone quiet for QUIET_MS (bounded). */
@@ -391,10 +428,20 @@ function findPosition(file: string, name?: string, line?: number, character?: nu
 // ── one warm session per (language, project root). The working root is pre-warmed
 // at startup (see prewarm()); other roots spin up lazily on first use. ──
 const sessions = new Map<string, LspSession>();
-function session(root: string, lang: Lang, spec: { cmd: string; args: string[]; languageId: string }): LspSession {
+async function session(
+  root: string,
+  lang: Lang,
+  spec: { cmd: string; args: string[]; languageId: string },
+  projectFiles: Map<string, ProjectFile>,
+): Promise<LspSession> {
   const key = `${lang}::${root}`;
   let s = sessions.get(key);
-  if (!s) sessions.set(key, (s = new LspSession(spec, root)));
+  if (s && !(await s.reconcileProject(projectFiles, lang))) {
+    s.dispose();
+    sessions.delete(key);
+    s = undefined;
+  }
+  if (!s) sessions.set(key, (s = new LspSession(spec, root, projectFiles)));
   return s;
 }
 
@@ -411,11 +458,12 @@ const SKIP_DIRS = new Set([
   // scan dominate even cache hits on a big repo (the "ty warm" check surfaced it).
   'venv', '.venv', 'env', '.env', '__pycache__', 'site-packages', '.tox', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.eggs',
 ]);
-const SRC_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|pyi)$/;
-const EPOCH_TTL_MS = Number(process.env.CODE_ORACLE_EPOCH_TTL_MS ?? 2000);
+// Exact by default: a positive opt-in TTL can coalesce burst queries, but it also
+// explicitly permits that many milliseconds of filesystem staleness.
+const EPOCH_TTL_MS = Number(process.env.CODE_ORACLE_EPOCH_TTL_MS ?? 0);
 
 type Epoch = string;
-const epochCache = new Map<string, { at: number; epoch: Epoch }>();
+const epochCache = new Map<string, { at: number; snapshot: ProjectSnapshot }>();
 
 function fnv1a32(value: string): number {
   let hash = 0x811c9dc5;
@@ -423,23 +471,34 @@ function fnv1a32(value: string): number {
   return hash >>> 0;
 }
 
-/** Sampled ≤ once / EPOCH_TTL, so repeat queries are O(1). A bounded breadth-first
- * directory walk plus 64 stat workers stays O(files) without the old unbounded
- * Promise tree / file-descriptor burst. The commutative fingerprint includes path,
- * size, mtime, ctime and inode, so non-max edits and deletions cannot hide behind an
- * unchanged "maximum mtime". */
-async function projectEpoch(root: string): Promise<Epoch> {
+/** Fresh by default; an opt-in EPOCH_TTL makes burst repeats O(1). A bounded
+ * breadth-first directory walk plus 64 stat workers stays O(files) without the old
+ * unbounded Promise tree / file-descriptor burst. The commutative fingerprint
+ * includes path, size, mtime, ctime and inode, so non-max edits and deletions cannot
+ * hide behind an unchanged "maximum mtime". */
+async function projectSnapshot(root: string): Promise<ProjectSnapshot> {
   const c = epochCache.get(root);
-  if (c && Date.now() - c.at < EPOCH_TTL_MS) return c.epoch;
-  const epoch = await scanProjectEpoch(root);
-  epochCache.set(root, { at: Date.now(), epoch });
-  return epoch;
+  if (c && Date.now() - c.at < EPOCH_TTL_MS) return c.snapshot;
+  const snapshot = await scanProject(root);
+  epochCache.set(root, { at: Date.now(), snapshot });
+  return snapshot;
 }
 
 /** Uncached O(files) fingerprint pass, exported for deterministic regression tests. */
 export async function scanProjectEpoch(root: string): Promise<Epoch> {
+  return (await scanProject(root)).epoch;
+}
+
+function projectFileKind(path: string): ProjectFileKind | null {
+  const name = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+  if (/^(?:tsconfig(?:\.[^.]+)?|jsconfig(?:\.[^.]+)?)\.json$/.test(name) || name === 'package.json') return 'ts-config';
+  if (name === 'pyproject.toml' || name === 'setup.cfg') return 'py-config';
+  return langOf(path);
+}
+
+async function scanProject(root: string): Promise<ProjectSnapshot> {
   const dirs = [root];
-  const sources: string[] = [];
+  const projectFiles: { path: string; kind: ProjectFileKind }[] = [];
   for (let cursor = 0; cursor < dirs.length;) {
     const batch = dirs.slice(cursor, cursor + 32);
     cursor += batch.length;
@@ -452,7 +511,10 @@ export async function scanProjectEpoch(root: string): Promise<Epoch> {
         if (SKIP_DIRS.has(entry.name)) continue;
         const path = join(dir, entry.name);
         if (entry.isDirectory()) dirs.push(path);
-        else if (SRC_RE.test(entry.name)) sources.push(path);
+        else {
+          const kind = projectFileKind(path);
+          if (kind) projectFiles.push({ path, kind });
+        }
       }
     }
   }
@@ -461,21 +523,23 @@ export async function scanProjectEpoch(root: string): Promise<Epoch> {
   let count = 0;
   let xor = 0;
   let sum = 0;
+  const files = new Map<string, ProjectFile>();
   const worker = async (): Promise<void> => {
-    while (cursor < sources.length) {
-      const path = sources[cursor++];
+    while (cursor < projectFiles.length) {
+      const { path, kind } = projectFiles[cursor++];
       try {
         const info = await stat(path);
         const signature = `${relative(root, path)}\0${info.size}\0${Math.trunc(info.mtimeMs * 1000)}\0${Math.trunc(info.ctimeMs * 1000)}\0${info.ino}`;
         const hash = fnv1a32(signature);
+        files.set(path, { signature, kind });
         xor = (xor ^ hash) >>> 0;
         sum = (sum + hash) >>> 0;
         count++;
       } catch { /* file disappeared during the scan */ }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(64, sources.length) }, worker));
-  return `${count.toString(36)}:${xor.toString(36)}:${sum.toString(36)}`;
+  await Promise.all(Array.from({ length: Math.min(64, projectFiles.length) }, worker));
+  return { epoch: `${count.toString(36)}:${xor.toString(36)}:${sum.toString(36)}`, files };
 }
 
 type Cache = { epoch: Epoch; entries: Record<string, unknown> };
@@ -570,7 +634,8 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   const cacheKey = `${tool}:${relFile}#${args.name ?? `${explicit!.line}:${explicit!.character}`}`;
 
   // Cache gate: serve instantly (no LSP warmup) when the project hasn't changed.
-  const epoch = await projectEpoch(root);
+  const snapshot = await projectSnapshot(root);
+  const epoch = snapshot.epoch;
   const cache = loadCache(root);
   if (cache.epoch === epoch && cache.entries[cacheKey]) {
     return { ...(cache.entries[cacheKey] as object), cached: true };
@@ -579,7 +644,7 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
   // Resolve the symbol position. Explicit coords win; otherwise anchor on the DECLARATION
   // via the LSP's documentSymbol (skips comments/strings/imports), falling back to the
   // comment-skipping text scan only if the LSP doesn't know the name.
-  const sess = session(root, lang, be);
+  const sess = await session(root, lang, be, snapshot.files);
   let pos: { line: number; character: number } | null = explicit ?? null;
   if (!pos && args.name) {
     const resolved = await sess.documentSymbolPosition(file, args.name);
@@ -725,7 +790,8 @@ async function prewarm(): Promise<void> {
     if (!seed) continue;
     process.stderr.write(`code-oracle: warming the ${lang} oracle for ${root} (~10-20s; queries wait until ready)…\n`);
     const started = Date.now();
-    session(root, lang, be).prewarm(seed).then(
+    const snapshot = await projectSnapshot(root);
+    (await session(root, lang, be, snapshot.files)).prewarm(seed).then(
       () => process.stderr.write(`code-oracle: ${lang} oracle ready in ${Math.round((Date.now() - started) / 1000)}s\n`),
       (e) => process.stderr.write(`code-oracle: ${lang} pre-warm failed: ${e}\n`),
     );

@@ -62,6 +62,8 @@ test('Content-Length decoding is linear-safe across byte splits and packed frame
 test('project fingerprint catches additions, deletions, and restored-mtime edits', async () => {
   const root = mkdtempSync(join(tmpdir(), 'code-oracle-epoch-'));
   const source = join(root, 'a.ts');
+  const config = join(root, 'tsconfig.json');
+  writeFileSync(config, JSON.stringify({ include: ['*.ts'] }));
   writeFileSync(source, 'export const a = 1\n');
   const first = await scanProjectEpoch(root);
 
@@ -75,7 +77,11 @@ test('project fingerprint catches additions, deletions, and restored-mtime edits
   const before = statSync(source);
   writeFileSync(source, 'export const z = 1\n'); // equal size
   utimesSync(source, before.atime, before.mtime);
-  assert.notEqual(await scanProjectEpoch(root), first, 'ctime catches an equal-size edit with restored mtime');
+  const afterSourceEdit = await scanProjectEpoch(root);
+  assert.notEqual(afterSourceEdit, first, 'ctime catches an equal-size edit with restored mtime');
+
+  writeFileSync(config, JSON.stringify({ include: ['src/*.ts'] }));
+  assert.notEqual(await scanProjectEpoch(root), afterSourceEdit, 'project configuration participates in the fingerprint');
 });
 
 // Pure resolver, no LSP: the name→declaration decision behind the interface-vs-class
@@ -196,4 +202,34 @@ test('bare name flags same-file same-name ambiguity; qualified name anchors the 
   // 3) the interface method resolves to the socket.send() site, not the this.send() ones.
   const iface = (await query('callers', { file, name: 'WebSocketLike.send', root })) as { count: number; results: { preview: string }[] };
   assert.ok(iface.results.some((r) => /this\.socket\.send/.test(r.preview)), `expected socket.send caller, got ${JSON.stringify(iface.results)}`);
+});
+
+test('callers reconciles added, modified, and deleted sibling files after warmup', { skip: hasTsgo ? false : 'tsgo not installed (npm install in code-oracle/)', timeout: 90_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-dirty-callers-'));
+  const definitionFile = join(root, 'definition.ts');
+  const callerFile = join(root, 'caller.ts');
+
+  try {
+    writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, module: 'nodenext', moduleResolution: 'nodenext' }, include: ['*.ts'] }));
+    writeFileSync(definitionFile, 'export function target(): number { return 1; }\n');
+
+    const before = (await query('callers', { file: definitionFile, name: 'target', root })) as { count: number };
+    assert.equal(before.count, 0);
+
+    writeFileSync(callerFile, "import { target } from './definition.js';\nexport const run = () => target();\n");
+    const afterAddition = (await query('callers', { file: definitionFile, name: 'target', root })) as { count: number; results: { file: string }[] };
+    assert.equal(afterAddition.count, 1, `new sibling caller must enter the warm project: ${JSON.stringify(afterAddition)}`);
+    assert.equal(afterAddition.results[0]?.file, 'caller.ts');
+
+    writeFileSync(callerFile, "import { target } from './definition.js';\nexport const first = () => target();\nexport const second = () => target();\n");
+    const afterModification = (await query('callers', { file: definitionFile, name: 'target', root })) as { count: number };
+    assert.equal(afterModification.count, 2, `modified sibling content must replace the warm overlay: ${JSON.stringify(afterModification)}`);
+
+    unlinkSync(callerFile);
+    const afterDeletion = (await query('callers', { file: definitionFile, name: 'target', root })) as { count: number };
+    assert.equal(afterDeletion.count, 0, `deleted sibling must leave the project graph: ${JSON.stringify(afterDeletion)}`);
+  } finally {
+    disposeAll();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

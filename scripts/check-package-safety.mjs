@@ -53,8 +53,13 @@ const secretPatterns = [
   },
 ];
 
-const pack = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+// Windows resolves `npm` to `npm.cmd`; since the CVE-2024-27980 fix, Node
+// refuses to spawn a .cmd without a shell. Pass the whole command as a single
+// string under a shell — all tokens are static literals, so there is no
+// injection surface (and this avoids the DEP0190 shell+args warning).
+const pack = spawnSync('npm pack --dry-run --json --ignore-scripts', {
   encoding: 'utf8',
+  shell: true,
 });
 
 if (pack.status !== 0) {

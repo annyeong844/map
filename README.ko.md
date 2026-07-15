@@ -253,7 +253,14 @@ GA `typescript@7.0.2`는 빌드 컴파일러 `tsc`만 노출하고, code-oracle�
 `@typescript/native-preview` LSP 빌드를 정확히 핀합니다. launcher가 `bin/tsgo.js`에서
 확장자 없는 `bin/tsgo`로 바뀌었지만 둘 다 자동 감지하며, `TSGO_BIN`으로 직접 덮어쓸 수도 있습니다.
 
-tsgo 세션을 1회 워밍(~수초~20s, 레포 크기별)하니 스킬은 값어치 있을 때만(큰 레포·충돌 이름) 호출해요.
+세션은 첫 checker 요청에서 지연 시작합니다(~수초~20s, 레포 크기별). 시작 비용을 미리 내는 편이
+확실히 이득일 때만 `CODE_ORACLE_PREWARM=1`을 설정하세요. MCP 하나당 warm 세션은 기본 2개로
+제한되고 10분 idle 후 회수됩니다(`CODE_ORACLE_MAX_SESSIONS`, `CODE_ORACLE_SESSION_IDLE_MS`로
+조정). MCP stdin이 닫히면 모든 LSP 자식도 즉시 정리합니다.
+같은 root의 동시 요청은 정확한 fingerprint scan 하나를 공유하고, 동일 checker 질의는 진행 중인
+LSP 요청 하나를 함께 씁니다. 기본 fingerprint TTL=0에서는 완료된 전체 파일 맵을 보관하지 않고
+즉시 놓아줍니다. 영속 answer cache는 project epoch당 snapshot을 한 번만 쓰고 같은 epoch의 답은
+delta로 덧붙여, 누적 제곱 cache rewrite를 피합니다.
 **크로스플랫폼:** code-oracle가 `/mnt/c/…` ↔ `C:\…` 경로를 정규화해서 **서버 하나가 Windows IDE와
 WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** 빌드가 WSL 클라이언트까지 담당해
 `/mnt/c` drvfs 페널티를 피함(같은 레포 ~38s → ~4s). 네이티브 **Linux/WSL도 지원**합니다.
@@ -266,7 +273,7 @@ WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** �
 <summary><b>📊 직접 벤치마크</b></summary>
 
 레포 내부 복잡도 마이크로벤치는 full/no-op 인덱싱, cold/warm locate, line-only 64심볼 읽기,
-10,000파일 barrel 체인을 함께 잽니다:
+순수 wildcard와 named/wildcard 혼합 10,000파일 barrel 체인을 함께 잽니다:
 
 ```bash
 npm run bench

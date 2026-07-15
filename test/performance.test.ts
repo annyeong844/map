@@ -333,6 +333,56 @@ test('fan-in resolves a 12k wildcard barrel chain iteratively for many names', (
   for (let i = 0; i < 200; i++) assert.equal(fanIn.get(`f${depth - 1}.ts::symbol${i}`), 1);
 });
 
+test('fan-in batches names through mixed named/wildcard barrels', { timeout: 1500 }, () => {
+  const depth = 1_000;
+  const files = Array.from({ length: depth }, (_, i) => `f${i}.ts`);
+  files.push('use.ts');
+  const imports = new Map<string, { source: string; name: string; reexport?: boolean }[]>();
+  for (let i = 0; i < depth - 1; i++) {
+    imports.set(`f${i}.ts`, [
+      // The named route wins only for its own name. Every other name should flow
+      // through the wildcard without re-walking the whole chain.
+      { source: `./missing${i}`, name: `special${i}`, reexport: true },
+      { source: `./f${i + 1}`, name: '*', reexport: true },
+    ]);
+  }
+  imports.set('use.ts', [
+    ...Array.from({ length: depth - 1 }, (_, i) => ({ source: './f0', name: `special${i}` })),
+    ...Array.from({ length: 200 }, (_, i) => ({ source: './f0', name: `ordinary${i}` })),
+  ]);
+
+  const fanIn = computeFanIn(files, imports);
+  for (let i = 0; i < depth - 1; i++) assert.equal(fanIn.get(`f${i}.ts::special${i}`), 1);
+  for (let i = 0; i < 200; i++) assert.equal(fanIn.get(`f${depth - 1}.ts::ordinary${i}`), 1);
+});
+
+test('batched fan-in preserves re-export order and mixed-cycle semantics', () => {
+  const files = ['cycle-a.ts', 'cycle-b.ts', 'early.ts', 'late.ts', 'tail.ts', 'target.ts', 'use-cycle.ts', 'use-early.ts', 'use-late.ts'];
+  const imports = new Map<string, { source: string; name: string; reexport?: boolean }[]>([
+    ['early.ts', [
+      { source: './target', name: 'x', reexport: true },
+      { source: './tail', name: '*', reexport: true },
+    ]],
+    ['late.ts', [
+      { source: './tail', name: '*', reexport: true },
+      { source: './target', name: 'x', reexport: true },
+    ]],
+    ['cycle-a.ts', [
+      { source: './target', name: 'x', reexport: true },
+      { source: './cycle-b', name: '*', reexport: true },
+    ]],
+    ['cycle-b.ts', [{ source: './cycle-a', name: '*', reexport: true }]],
+    ['use-early.ts', [{ source: './early', name: 'x' }]],
+    ['use-late.ts', [{ source: './late', name: 'x' }]],
+    ['use-cycle.ts', [{ source: './cycle-a', name: 'x' }, { source: './cycle-a', name: 'y' }]],
+  ]);
+
+  const fanIn = computeFanIn(files, imports);
+  assert.equal(fanIn.get('target.ts::x'), 2, 'an exact route before wildcard wins');
+  assert.equal(fanIn.get('tail.ts::x'), 1, 'a wildcard before the exact route wins');
+  assert.equal(fanIn.get('cycle-a.ts::y'), 1, 'mixed wildcard cycles retain their canonical terminal');
+});
+
 test('incremental no-op returns the prior snapshot and a deleted empty file invalidates it', async () => {
   const root = repo({
     'src/a.ts': 'export function a() { return 1 }\n',

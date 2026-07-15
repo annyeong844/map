@@ -267,8 +267,15 @@ code-oracle uses for its LSP server. Code-oracle therefore pins the current
 `@typescript/native-preview` LSP build. Its launcher changed from `bin/tsgo.js` to
 extensionless `bin/tsgo`; both layouts are detected, and `TSGO_BIN` remains an explicit override.
 
-It warms a tsgo session once (~seconds–20s by repo size), so the skill only calls it when it pays
-(large repo / colliding name). **Cross-platform:** code-oracle normalizes `/mnt/c/…` ↔ `C:\…` paths,
+Sessions start lazily on the first checker query (~seconds–20s by repo size); set
+`CODE_ORACLE_PREWARM=1` only when paying that cost at startup is worthwhile. Warm sessions are
+bounded to two per MCP and reaped after 10 idle minutes (`CODE_ORACLE_MAX_SESSIONS` and
+`CODE_ORACLE_SESSION_IDLE_MS` override those limits), and MCP stdin EOF reaps every child.
+Concurrent queries for one root share the same exact fingerprint scan, and identical checker
+queries share one in-flight LSP request. With the default zero fingerprint TTL, the completed
+file map is released immediately rather than retained. Persistent answers write one full
+snapshot per project epoch and append same-epoch deltas, avoiding quadratic cache rewrites.
+**Cross-platform:** code-oracle normalizes `/mnt/c/…` ↔ `C:\…` paths,
 so *one* server serves both a Windows IDE and WSL agents (over interop) — e.g. a fast **win32** build
 can serve WSL clients too, dodging the `/mnt/c` drvfs penalty (~38s → ~4s on the same repo).
 Native **Linux/WSL is supported too**: install `code-oracle/` with that environment's Node/npm and
@@ -281,7 +288,7 @@ instead of burning two 40-second request timeouts.
 <summary><b>📊 Benchmark it yourself</b></summary>
 
 The in-repo complexity microbenchmark covers full/no-op indexing, cold/warm locate, 64-symbol
-line-only reads, and a 10,000-file barrel chain:
+line-only reads, and both pure-wildcard and mixed named/wildcard 10,000-file barrel chains:
 
 ```bash
 npm run bench

@@ -75,6 +75,7 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
   // Compile each barrel into O(1) named/wildcard route lookup while preserving
   // source order (the first matching re-export remains authoritative).
   const routesByFile = new Map<string, Routes>();
+  const dominantExactNames = new Set<string>();
   for (const [f, edges] of importsByFile) {
     let routes: Routes | null = null;
     for (let order = 0; order < edges.length; order++) {
@@ -94,6 +95,9 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
           if (exact.order < routes.wildcard.order) { routes.unconditional = false; break; }
         }
       }
+      for (const [name, exact] of routes.exact) {
+        if (!routes.wildcard || exact.order < routes.wildcard.order) dominantExactNames.add(name);
+      }
       routesByFile.set(f, routes);
     }
   }
@@ -107,47 +111,65 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
   };
 
   interface SkipResult { file: string; cyclic: boolean }
-  const unconditionalStops = new Map<string, SkipResult>();
-  /** Collapse pure `export *` chains once for all names. Without this, M unique
-   * imported names through an L-file barrel chain cost O(M·L). */
-  const skipUnconditional = (start: string): SkipResult => {
-    const cachedStart = unconditionalStops.get(start);
+  const collapseWildcardPath = (start: string, stops: Map<string, SkipResult>, ignoreDominantExact: boolean): SkipResult => {
+    const cachedStart = stops.get(start);
     if (cachedStart) return cachedStart;
     const path: string[] = [];
     const seenAt = new Map<string, number>();
     let file = start;
     let result: SkipResult;
     for (;;) {
-      const cached = unconditionalStops.get(file);
+      const cached = stops.get(file);
       if (cached) { result = cached; break; }
       const cycleAt = seenAt.get(file);
       if (cycleAt !== undefined) {
         const cycle = path.slice(cycleAt);
         const canonical = cycle.reduce((best, candidate) => candidate < best ? candidate : best);
         result = { file: canonical, cyclic: true };
-        for (const cycleFile of cycle) unconditionalStops.set(cycleFile, result);
+        for (const cycleFile of cycle) stops.set(cycleFile, result);
         break;
       }
       seenAt.set(file, path.length);
       path.push(file);
       const routes = routesByFile.get(file);
-      if (!routes?.unconditional || !routes.wildcard?.target) {
+      const target = ignoreDominantExact
+        ? routes?.wildcard?.target
+        : routes?.unconditional ? routes.wildcard?.target : null;
+      if (!target) {
         result = { file, cyclic: false };
         break;
       }
-      file = routes.wildcard.target;
+      file = target;
     }
     for (let i = path.length - 1; i >= 0; i--) {
-      if (!unconditionalStops.has(path[i])) unconditionalStops.set(path[i], result);
+      if (!stops.has(path[i])) stops.set(path[i], result);
     }
     return result;
   };
+
+  const unconditionalStops = new Map<string, SkipResult>();
+  /** Collapse pure `export *` chains once for every name. */
+  const skipUnconditional = (start: string): SkipResult => collapseWildcardPath(start, unconditionalStops, false);
+
+  // A name that is never intercepted by an earlier named re-export follows only
+  // wildcard routes. Collapse that path once globally instead of once per name.
+  const wildcardStops = new Map<string, SkipResult>();
+  const skipWildcard = (start: string): SkipResult => collapseWildcardPath(start, wildcardStops, true);
 
   /** Walk `export { name } from …` / `export * from …` chains to the file that
    * actually defines `name`, so importers through a barrel count toward the real
    * definition rather than the barrel. */
   const resolvedDefs = new Map<string, string>();
   const resolveDef = (start: string, name: string): string => {
+    const startKey = `${start}\0${name}`;
+    const cachedStart = resolvedDefs.get(startKey);
+    if (cachedStart !== undefined) return cachedStart;
+    if (!dominantExactNames.has(name)) {
+      const terminal = skipWildcard(start).file;
+      resolvedDefs.set(startKey, terminal);
+      return terminal;
+    }
+
     const path: string[] = [];
     const seenAt = new Map<string, number>();
     let file = start;
@@ -188,17 +210,96 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
     return terminal;
   };
 
-  const importers = new Map<string, Set<string>>(); // "defFile::name" -> set of importing files
+  /** Resolve many names entering the same barrel as one flowing group. At a
+   * mixed named/wildcard file we inspect its sparse exact routes, peel only the
+   * matching names, and move the remaining Set down the wildcard edge. This
+   * turns a shared L-file/M-name path from O(L·M) into O(L + M + route edges),
+   * plus only the work on exact routes that genuinely diverge. */
+  const resolveDefs = (start: string, names: Iterable<string>): Map<string, string> => {
+    const results = new Map<string, string>();
+    const active = new Set<string>();
+    let wildcardTerminal: string | undefined;
+    for (const name of names) {
+      const key = `${start}\0${name}`;
+      const cached = resolvedDefs.get(key);
+      if (cached !== undefined) results.set(name, cached);
+      else if (!dominantExactNames.has(name)) {
+        wildcardTerminal ??= skipWildcard(start).file;
+        resolvedDefs.set(key, wildcardTerminal);
+        results.set(name, wildcardTerminal);
+      } else active.add(name);
+    }
+    if (active.size === 1) {
+      const name = active.values().next().value!;
+      results.set(name, resolveDef(start, name));
+      return results;
+    }
+    if (active.size === 0) return results;
+
+    const finish = (terminal: string): void => {
+      for (const name of active) {
+        resolvedDefs.set(`${start}\0${name}`, terminal);
+        results.set(name, terminal);
+      }
+      active.clear();
+    };
+    const path: string[] = [];
+    const seenAt = new Map<string, number>();
+    let file = start;
+    while (active.size) {
+      const skipped = skipUnconditional(file);
+      file = skipped.file;
+      if (skipped.cyclic) { finish(file); break; }
+      const cycleAt = seenAt.get(file);
+      if (cycleAt !== undefined) {
+        finish(path.slice(cycleAt).reduce((best, candidate) => candidate < best ? candidate : best));
+        break;
+      }
+      seenAt.set(file, path.length);
+      path.push(file);
+
+      const routes = routesByFile.get(file);
+      const wildcard = routes?.wildcard;
+      if (routes) {
+        for (const [name, exact] of routes.exact) {
+          if (!active.has(name) || (wildcard && exact.order >= wildcard.order)) continue;
+          active.delete(name);
+          const terminal = exact.target ? resolveDef(exact.target, name) : file;
+          resolvedDefs.set(`${start}\0${name}`, terminal);
+          results.set(name, terminal);
+        }
+      }
+      if (active.size === 0) break;
+      if (!wildcard?.target) { finish(file); break; }
+      file = wildcard.target;
+    }
+    return results;
+  };
+
+  // Batch consumers by the barrel they enter. Repeated imports of the same name
+  // share both module resolution and definition traversal.
+  const requests = new Map<string, Map<string, Set<string>>>();
   for (const [fromFile, edges] of importsByFile) {
     for (const edge of edges) {
       if (!edge.name || edge.name === '*' || edge.reexport) continue; // re-exports forward, they don't consume
       const target = targetFor(fromFile, edge.source);
       if (!target) continue;
-      const def = resolveDef(target, edge.name);
-      const key = `${def}::${edge.name}`;
+      let byName = requests.get(target);
+      if (!byName) requests.set(target, (byName = new Map()));
+      let consumers = byName.get(edge.name);
+      if (!consumers) byName.set(edge.name, (consumers = new Set()));
+      consumers.add(fromFile);
+    }
+  }
+
+  const importers = new Map<string, Set<string>>(); // "defFile::name" -> set of importing files
+  for (const [target, byName] of requests) {
+    const defs = resolveDefs(target, byName.keys());
+    for (const [name, consumers] of byName) {
+      const key = `${defs.get(name) ?? target}::${name}`;
       let set = importers.get(key);
-      if (!set) importers.set(key, (set = new Set()));
-      set.add(fromFile);
+      if (!set) importers.set(key, consumers);
+      else for (const fromFile of consumers) set.add(fromFile);
     }
   }
   const fanIn = new Map<string, number>();

@@ -233,6 +233,19 @@ await measure('fanIn.deepBarrel', async () => {
   return { depth: BARREL_DEPTH, names: 200, resolved: fanIn.size };
 });
 
+const mixedBarrelImports = new Map();
+for (let i = 0; i < BARREL_DEPTH - 1; i++) {
+  mixedBarrelImports.set(`f${i}.ts`, [
+    { source: `./missing${i}`, name: `special${i}`, reexport: true },
+    { source: `./f${i + 1}`, name: '*', reexport: true },
+  ]);
+}
+mixedBarrelImports.set('use.ts', Array.from({ length: BARREL_DEPTH - 1 }, (_, i) => ({ source: './f0', name: `special${i}` })));
+await measure('fanIn.mixedBarrel', async () => {
+  const fanIn = computeFanIn(barrelFiles, mixedBarrelImports);
+  return { depth: BARREL_DEPTH, names: BARREL_DEPTH - 1, resolved: fanIn.size };
+});
+
 const flatFiles = ['target.ts', ...Array.from({ length: FANIN_IMPORTERS }, (_, i) => `use${i}.ts`)];
 const flatImports = new Map(flatFiles.slice(1).map((file) => [file, [{ source: './target', name: 'target' }]]));
 await measure('fanIn.flat', async () => {

@@ -16,7 +16,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -31,12 +31,31 @@ const MIN_MS = Number(process.env.TS_ORACLE_MIN_MS ?? 1500);
 const MAX_MS = Number(process.env.TS_ORACLE_WARMUP_MS ?? 30000);
 const REQ_TIMEOUT_MS = Number(process.env.TS_ORACLE_REQ_TIMEOUT_MS ?? 40000);
 
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+const SESSION_IDLE_MS = positiveIntegerEnv('CODE_ORACLE_SESSION_IDLE_MS', 10 * 60_000);
+const MAX_SESSIONS = positiveIntegerEnv('CODE_ORACLE_MAX_SESSIONS', 2);
+
 const HERE = dirname(fileURLToPath(import.meta.url));
+let stopping = false;
 
 type Lang = 'ts' | 'py';
 type ProjectFileKind = Lang | `${Lang}-config`;
 type ProjectFile = { signature: string; kind: ProjectFileKind };
 type ProjectSnapshot = { epoch: string; files: Map<string, ProjectFile> };
+
+function relevantProjectFiles(projectFiles: Map<string, ProjectFile>, lang: Lang): Map<string, ProjectFile> {
+  const configKind = `${lang}-config` as const;
+  const relevant = new Map<string, ProjectFile>();
+  for (const [path, file] of projectFiles) {
+    if (file.kind === lang || file.kind === configKind) relevant.set(path, file);
+  }
+  return relevant;
+}
 
 function langOf(file: string): Lang | null {
   if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(file)) return 'ts';
@@ -161,10 +180,12 @@ class LspSession {
   private lastMsgAt = Date.now();
   private languageId: string;
   private projectFiles: Map<string, ProjectFile>;
+  private projectEpoch: Epoch;
 
-  constructor(spec: { cmd: string; args: string[]; languageId: string }, root: string, projectFiles: Map<string, ProjectFile>) {
+  constructor(spec: { cmd: string; args: string[]; languageId: string }, root: string, snapshot: ProjectSnapshot, lang: Lang) {
     this.languageId = spec.languageId;
-    this.projectFiles = new Map(projectFiles);
+    this.projectFiles = relevantProjectFiles(snapshot.files, lang);
+    this.projectEpoch = snapshot.epoch;
     this.proc = spawn(spec.cmd, spec.args, { stdio: ['pipe', 'pipe', 'ignore'] });
     this.proc.stdout!.on('data', (d: Buffer) => this.onData(d));
     this.proc.on('error', (error) => this.fail(error));
@@ -203,8 +224,10 @@ class LspSession {
   }
 
   private write(msg: unknown): void {
+    if (this.failure) throw this.failure;
+    if (!this.proc.stdin?.writable) throw new Error('LSP backend stdin is closed.');
     const s = JSON.stringify(msg);
-    this.proc.stdin!.write(`Content-Length: ${Buffer.byteLength(s)}\r\n\r\n${s}`);
+    this.proc.stdin.write(`Content-Length: ${Buffer.byteLength(s)}\r\n\r\n${s}`);
   }
   private notify(method: string, params: unknown): void {
     this.write({ jsonrpc: '2.0', method, params });
@@ -255,31 +278,35 @@ class LspSession {
   /** Bring files changed outside the queried document into the warm project.
    * Added/modified sources can be overlaid cheaply. Deletions and project-config
    * changes require a fresh language-server project graph, so the caller restarts. */
-  async reconcileProject(projectFiles: Map<string, ProjectFile>, lang: Lang): Promise<boolean> {
+  async reconcileProject(snapshot: ProjectSnapshot, lang: Lang): Promise<boolean> {
+    if (this.projectEpoch === snapshot.epoch) return true;
+    const projectFiles = snapshot.files;
     const configKind = `${lang}-config` as const;
-    const relevant = (file: ProjectFile): boolean => file.kind === lang || file.kind === configKind;
-    const next = new Map([...projectFiles].filter(([, file]) => relevant(file)));
-
-    for (const [path, prior] of this.projectFiles) {
-      if (!relevant(prior)) continue;
-      const current = next.get(path);
-      if (!current || (prior.kind === configKind && current.signature !== prior.signature)) return false;
-    }
-    for (const [path, current] of next) {
+    const changed: string[] = [];
+    let relevantCount = 0;
+    for (const [path, current] of projectFiles) {
+      if (current.kind !== lang && current.kind !== configKind) continue;
+      relevantCount++;
       const prior = this.projectFiles.get(path);
       if (current.kind === configKind && (!prior || prior.signature !== current.signature)) return false;
+      if (current.kind === lang && prior?.signature !== current.signature) changed.push(path);
+    }
+    // Deletions require a project restart. Check the old, already language-filtered
+    // map directly; unchanged projects avoid allocating a replacement Map entirely.
+    for (const path of this.projectFiles.keys()) if (!projectFiles.has(path)) return false;
+    if (changed.length === 0 && relevantCount === this.projectFiles.size) {
+      this.projectEpoch = snapshot.epoch;
+      return true;
     }
 
-    const changed = [...next]
-      .filter(([path, current]) => current.kind === lang && this.projectFiles.get(path)?.signature !== current.signature)
-      .map(([path]) => path);
     if (changed.length) {
       await this.initDone;
       for (const path of changed) this.syncFile(path);
       this.warmed = false;
       this.lastMsgAt = Date.now();
     }
-    this.projectFiles = next;
+    this.projectFiles = relevantProjectFiles(projectFiles, lang);
+    this.projectEpoch = snapshot.epoch;
     return true;
   }
 
@@ -288,10 +315,12 @@ class LspSession {
     if (this.warmed) return;
     const start = Date.now();
     for (;;) {
+      if (this.failure) throw this.failure;
       const elapsed = Date.now() - start;
       if ((Date.now() - this.lastMsgAt > QUIET_MS && elapsed > MIN_MS) || elapsed > MAX_MS) break;
       await new Promise((r) => setTimeout(r, 200));
     }
+    if (this.failure) throw this.failure;
     this.warmed = true;
   }
 
@@ -358,7 +387,11 @@ class LspSession {
 
   get ready(): boolean { return this.warmed; }
 
-  dispose(): void { try { this.proc.kill(); } catch { /* ignore */ } }
+  dispose(): void {
+    this.fail(new Error('LSP session disposed.'));
+    try { this.proc.stdin?.destroy(); } catch { /* ignore */ }
+    try { this.proc.kill(); } catch { /* ignore */ }
+  }
 }
 
 // ── name → declaration position, from the LSP's documentSymbol tree ──
@@ -425,24 +458,103 @@ function findPosition(file: string, name?: string, line?: number, character?: nu
   return firstHit; // everything was comment/import — better than nothing
 }
 
-// ── one warm session per (language, project root). The working root is pre-warmed
-// at startup (see prewarm()); other roots spin up lazily on first use. ──
-const sessions = new Map<string, LspSession>();
-async function session(
+// ── bounded warm-session pool. Sessions are lazy, LRU-capped, and reaped after
+// an idle timeout. A per-root lease serializes reconcile/query/restart so two MCP
+// requests cannot replace the same LSP underneath one another. ──
+type SessionEntry = {
+  session: LspSession;
+  inUse: number;
+  idleTimer: NodeJS.Timeout | null;
+};
+type SessionLease = { session: LspSession; release: () => void };
+
+const sessions = new Map<string, SessionEntry>();
+const sessionQueues = new Map<string, Promise<void>>();
+
+function disposeSession(key: string, entry: SessionEntry): void {
+  if (entry.idleTimer) clearTimeout(entry.idleTimer);
+  entry.idleTimer = null;
+  if (sessions.get(key) === entry) sessions.delete(key);
+  entry.session.dispose();
+}
+
+function armIdleTimer(key: string, entry: SessionEntry): void {
+  if (entry.idleTimer) clearTimeout(entry.idleTimer);
+  entry.idleTimer = null;
+  if (entry.inUse > 0 || sessions.get(key) !== entry) return;
+  entry.idleTimer = setTimeout(() => {
+    entry.idleTimer = null;
+    if (entry.inUse === 0 && sessions.get(key) === entry) disposeSession(key, entry);
+  }, SESSION_IDLE_MS);
+  entry.idleTimer.unref();
+}
+
+function trimSessions(): void {
+  // Map order is LRU order. One pass removes as many idle victims as needed;
+  // repeatedly spreading the whole Map made overload cleanup O(sessions²).
+  for (const [key, entry] of sessions) {
+    if (sessions.size <= MAX_SESSIONS) return;
+    if (entry.inUse === 0) disposeSession(key, entry);
+  }
+}
+
+async function acquireSession(
   root: string,
   lang: Lang,
   spec: { cmd: string; args: string[]; languageId: string },
-  projectFiles: Map<string, ProjectFile>,
-): Promise<LspSession> {
+  snapshot: ProjectSnapshot,
+): Promise<SessionLease> {
   const key = `${lang}::${root}`;
-  let s = sessions.get(key);
-  if (s && !(await s.reconcileProject(projectFiles, lang))) {
-    s.dispose();
-    sessions.delete(key);
-    s = undefined;
+  const previous = sessionQueues.get(key) ?? Promise.resolve();
+  let unlock!: () => void;
+  const gate = new Promise<void>((resolveGate) => { unlock = resolveGate; });
+  const queued = previous.then(() => gate);
+  sessionQueues.set(key, queued);
+  await previous;
+
+  const finishQueue = (): void => {
+    unlock();
+    if (sessionQueues.get(key) === queued) sessionQueues.delete(key);
+  };
+
+  let entry: SessionEntry | undefined;
+  try {
+    if (stopping) throw new Error('code-oracle is shutting down.');
+    entry = sessions.get(key);
+    if (entry?.idleTimer) clearTimeout(entry.idleTimer);
+    if (entry) entry.idleTimer = null;
+    if (entry && !(await entry.session.reconcileProject(snapshot, lang))) {
+      disposeSession(key, entry);
+      entry = undefined;
+    }
+    if (stopping) throw new Error('code-oracle is shutting down.');
+    if (!entry) {
+      entry = { session: new LspSession(spec, root, snapshot, lang), inUse: 0, idleTimer: null };
+      sessions.set(key, entry);
+    } else {
+      sessions.delete(key);
+      sessions.set(key, entry); // Map insertion order is the LRU order
+    }
+    entry.inUse++;
+    trimSessions();
+
+    const acquired = entry;
+    let released = false;
+    return {
+      session: acquired.session,
+      release: () => {
+        if (released) return;
+        released = true;
+        acquired.inUse--;
+        if (sessions.get(key) === acquired) armIdleTimer(key, acquired);
+        trimSessions();
+        finishQueue();
+      },
+    };
+  } catch (error) {
+    finishQueue();
+    throw error;
   }
-  if (!s) sessions.set(key, (s = new LspSession(spec, root, projectFiles)));
-  return s;
 }
 
 // ── persistent answer cache (the practical "snapshot"): the checker's RAM can't be
@@ -464,6 +576,7 @@ const EPOCH_TTL_MS = Number(process.env.CODE_ORACLE_EPOCH_TTL_MS ?? 0);
 
 type Epoch = string;
 const epochCache = new Map<string, { at: number; snapshot: ProjectSnapshot }>();
+const epochFlights = new Map<string, Promise<ProjectSnapshot>>();
 
 function fnv1a32(value: string): number {
   let hash = 0x811c9dc5;
@@ -476,12 +589,24 @@ function fnv1a32(value: string): number {
  * unbounded Promise tree / file-descriptor burst. The commutative fingerprint
  * includes path, size, mtime, ctime and inode, so non-max edits and deletions cannot
  * hide behind an unchanged "maximum mtime". */
-async function projectSnapshot(root: string): Promise<ProjectSnapshot> {
-  const c = epochCache.get(root);
-  if (c && Date.now() - c.at < EPOCH_TTL_MS) return c.snapshot;
-  const snapshot = await scanProject(root);
-  epochCache.set(root, { at: Date.now(), snapshot });
-  return snapshot;
+export async function projectSnapshot(root: string): Promise<ProjectSnapshot> {
+  if (EPOCH_TTL_MS > 0) {
+    const cached = epochCache.get(root);
+    if (cached && Date.now() - cached.at < EPOCH_TTL_MS) return cached.snapshot;
+  }
+  const active = epochFlights.get(root);
+  if (active) return active;
+
+  // No cache TTL is added: only callers overlapping the same physical scan share
+  // that scan. With TTL=0 the completed O(files) Map is not retained at all.
+  const flight = scanProject(root).then((snapshot) => {
+    if (!stopping && EPOCH_TTL_MS > 0) epochCache.set(root, { at: Date.now(), snapshot });
+    return snapshot;
+  }).finally(() => {
+    if (epochFlights.get(root) === flight) epochFlights.delete(root);
+  });
+  epochFlights.set(root, flight);
+  return flight;
 }
 
 /** Uncached O(files) fingerprint pass, exported for deterministic regression tests. */
@@ -529,8 +654,10 @@ async function scanProject(root: string): Promise<ProjectSnapshot> {
       const { path, kind } = projectFiles[cursor++];
       try {
         const info = await stat(path);
-        const signature = `${relative(root, path)}\0${info.size}\0${Math.trunc(info.mtimeMs * 1000)}\0${Math.trunc(info.ctimeMs * 1000)}\0${info.ino}`;
-        const hash = fnv1a32(signature);
+        // The absolute Map key already identifies the file. Keep only stat data in
+        // the retained signature; include the relative path solely in the epoch hash.
+        const signature = `${info.size}\0${Math.trunc(info.mtimeMs * 1000)}\0${Math.trunc(info.ctimeMs * 1000)}\0${info.ino}`;
+        const hash = fnv1a32(`${relative(root, path)}\0${signature}`);
         files.set(path, { signature, kind });
         xor = (xor ^ hash) >>> 0;
         sum = (sum + hash) >>> 0;
@@ -543,49 +670,97 @@ async function scanProject(root: string): Promise<ProjectSnapshot> {
 }
 
 type Cache = { epoch: Epoch; entries: Record<string, unknown> };
+type CacheDelta = { epoch: Epoch; key: string; value: unknown };
 const caches = new Map<string, Cache>();
 const cacheFile = (root: string) => join(CACHE_DIR, `${sha16(root)}.json`);
+const cacheLogFile = (root: string) => join(CACHE_DIR, `${sha16(root)}.jsonl`);
 function loadCache(root: string): Cache {
   let c = caches.get(root);
   if (c) return c;
   try { c = JSON.parse(readFileSync(cacheFile(root), 'utf8')) as Cache; } catch { c = { epoch: '', entries: {} }; }
+  try {
+    const log = readFileSync(cacheLogFile(root), 'utf8');
+    let start = 0;
+    while (start < log.length) {
+      let end = log.indexOf('\n', start);
+      if (end === -1) end = log.length;
+      const line = log.slice(start, end).trim();
+      start = end + 1;
+      if (!line) continue;
+      try {
+        const delta = JSON.parse(line) as CacheDelta;
+        if (delta.epoch === c.epoch && typeof delta.key === 'string') c.entries[delta.key] = delta.value;
+      } catch { /* an interrupted final append is safe to ignore */ }
+    }
+  } catch { /* no delta log yet */ }
   caches.set(root, c);
   return c;
 }
-function persistCache(root: string): void {
-  try { mkdirSync(CACHE_DIR, { recursive: true }); writeFileSync(cacheFile(root), JSON.stringify(caches.get(root))); } catch { /* best effort */ }
+type DirtyCache = { reset: boolean; keys: Set<string> };
+function persistCache(root: string, dirty: DirtyCache): void {
+  const cache = caches.get(root);
+  if (!cache) return;
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    if (dirty.reset) {
+      // One full snapshot per project epoch. Older log records carry their epoch,
+      // so a crash between these two operations can only replay matching data.
+      writeFileSync(cacheFile(root), JSON.stringify(cache));
+      try { unlinkSync(cacheLogFile(root)); } catch { /* no prior log */ }
+      return;
+    }
+    const records: string[] = [];
+    for (const key of dirty.keys) {
+      if (Object.hasOwn(cache.entries, key)) records.push(JSON.stringify({ epoch: cache.epoch, key, value: cache.entries[key] } satisfies CacheDelta));
+    }
+    if (records.length) appendFileSync(cacheLogFile(root), `${records.join('\n')}\n`);
+  } catch { /* best effort */ }
 }
 
-const dirtyCaches = new Set<string>();
+const dirtyCaches = new Map<string, DirtyCache>();
 let persistTimer: NodeJS.Timeout | null = null;
 function flushCaches(): void {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = null;
-  for (const root of dirtyCaches) persistCache(root);
+  for (const [root, dirty] of dirtyCaches) persistCache(root, dirty);
   dirtyCaches.clear();
 }
-function schedulePersist(root: string): void {
-  dirtyCaches.add(root);
+function schedulePersist(root: string, key: string, reset: boolean): void {
+  let dirty = dirtyCaches.get(root);
+  if (!dirty) {
+    dirty = { reset, keys: new Set() };
+    dirtyCaches.set(root, dirty);
+  } else if (reset) {
+    dirty.reset = true;
+    dirty.keys.clear();
+  }
+  if (!dirty.reset) dirty.keys.add(key);
   if (persistTimer) return;
-  // Coalesce a burst of checker queries. Rewriting the whole answer snapshot per
-  // result made Q distinct queries cost O(Q²) serialized bytes.
+  // Coalesce a burst of checker queries. Same-epoch answers append only their
+  // delta, so Q distinct queries serialize O(total answer bytes), not O(Q²).
   persistTimer = setTimeout(flushCaches, 5000);
   persistTimer.unref();
 }
 
 const LINE_CACHE_MAX = 256;
-const lineCache = new Map<string, { epoch: Epoch; lines: string[] }>();
-function sourceLine(file: string, line0: number, epoch: Epoch): string {
+type SourceIndex = { token: string; text: string; starts: number[] };
+const lineCache = new Map<string, SourceIndex>();
+function sourceLine(file: string, line0: number, token: string): string {
   let cached = lineCache.get(file);
-  if (!cached || cached.epoch !== epoch) {
-    let lines: string[];
-    try { lines = readFileSync(file, 'utf8').split('\n'); } catch { lines = []; }
-    cached = { epoch, lines };
+  if (!cached || cached.token !== token) {
+    let text = '';
+    try { text = readFileSync(file, 'utf8'); } catch { /* unreadable preview */ }
+    const starts = [0];
+    for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+    cached = { token, text, starts };
     lineCache.delete(file);
     lineCache.set(file, cached);
     if (lineCache.size > LINE_CACHE_MAX) lineCache.delete(lineCache.keys().next().value!);
   }
-  return (cached.lines[line0] ?? '').trim().slice(0, 160);
+  const start = cached.starts[line0];
+  if (start === undefined) return '';
+  const end = cached.starts[line0 + 1] ?? cached.text.length;
+  return cached.text.slice(start, end).trim().slice(0, 160);
 }
 
 const METHOD: Record<string, string> = {
@@ -593,6 +768,7 @@ const METHOD: Record<string, string> = {
   definition: 'textDocument/definition',
   implementations: 'textDocument/implementation',
 };
+const queryFlights = new Map<string, Promise<unknown>>();
 // `ENGINE` is substituted with the actual backend (tsgo for TS/JS, ty for Python) per query.
 const NOTE: Record<string, string> = {
   callers: 'Type-aware callers via ENGINE references (checker grade; resolves through interfaces / standard DI). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) stays invisible — a residual for the agent to read.',
@@ -641,55 +817,75 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
     return { ...(cache.entries[cacheKey] as object), cached: true };
   }
 
+  const flightKey = `${root}\0${epoch}\0${cacheKey}`;
+  const active = queryFlights.get(flightKey);
+  if (active) return active;
+
   // Resolve the symbol position. Explicit coords win; otherwise anchor on the DECLARATION
   // via the LSP's documentSymbol (skips comments/strings/imports), falling back to the
   // comment-skipping text scan only if the LSP doesn't know the name.
-  const sess = await session(root, lang, be, snapshot.files);
-  let pos: { line: number; character: number } | null = explicit ?? null;
-  if (!pos && args.name) {
-    const resolved = await sess.documentSymbolPosition(file, args.name);
-    if (resolved && 'ambiguous' in resolved) {
-      const candidates = resolved.ambiguous.map((c) => ({
-        name: c.container ? `${c.container}.${c.name}` : c.name,
-        line: c.line,
-        character: c.character,
-      }));
-      return {
-        error: `"${args.name}" matches ${candidates.length} declarations in ${relFile}. Re-query with a qualified name (Container.name) or line/character (0-based).`,
-        candidates,
-      };
-    }
-    pos = resolved ?? findPosition(file, args.name);
-  }
-  if (!pos) return { error: `could not locate symbol "${args.name}" in ${relFile}; pass line/character.` };
+  const run = async (): Promise<unknown> => {
+    const lease = await acquireSession(root, lang, be, snapshot);
+    try {
+      const sess = lease.session;
+      let pos: { line: number; character: number } | null = explicit ?? null;
+      if (!pos && args.name) {
+        const resolved = await sess.documentSymbolPosition(file, args.name);
+        if (resolved && 'ambiguous' in resolved) {
+          const candidates = resolved.ambiguous.map((c) => ({
+            name: c.container ? `${c.container}.${c.name}` : c.name,
+            line: c.line,
+            character: c.character,
+          }));
+          return {
+            error: `"${args.name}" matches ${candidates.length} declarations in ${relFile}. Re-query with a qualified name (Container.name) or line/character (0-based).`,
+            candidates,
+          };
+        }
+        pos = resolved ?? findPosition(file, args.name);
+      }
+      if (!pos) return { error: `could not locate symbol "${args.name}" in ${relFile}; pass line/character.` };
 
-  const locs = await sess.locate(METHOD[tool], file, pos.line, pos.character);
-  const seen = new Set<string>();
-  const out: { file: string; line: number; preview: string }[] = [];
-  for (const r of locs) {
-    const f = fileURLToPath(r.uri);
-    const dk = `${f}\t${r.line}`;
-    if (seen.has(dk)) continue;
-    seen.add(dk);
-    out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line, epoch) });
-  }
-  out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
-  // Honest guard (regression-verified 2026-06): ty 0.0.50's find-references is INTRA-FILE
-  // ONLY — cross-file callers are NOT found (heavily-imported functions returned 0, while
-  // grep/`definition` confirm they're used across many files). So for Python, callers/
-  // implementations are a LOWER BOUND, not the cross-file blast radius. (ty `definition`
-  // DOES resolve cross-file, so it's trustworthy.)
-  const engine = lang === 'ts' ? 'tsgo' : 'ty';
-  const base = NOTE[tool].replace(/ENGINE/g, engine);
-  const pyRefsCaveat = lang === 'py' && (tool === 'callers' || tool === 'implementations');
-  const note = pyRefsCaveat
-    ? base + ' ⚠ Python (ty 0.0.50): find-references is INTRA-FILE ONLY here — cross-file callers are NOT found (verified). Treat as a LOWER BOUND / intra-file screen, NOT a complete blast radius. `definition` does resolve cross-file.'
-    : base;
-  const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note, ...(pyRefsCaveat ? { incomplete: true } : {}) };
-  if (cache.epoch !== epoch) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
-  cache.entries[cacheKey] = result;
-  schedulePersist(root);
-  return result;
+      const locs = await sess.locate(METHOD[tool], file, pos.line, pos.character);
+      const seen = new Set<string>();
+      const out: { file: string; line: number; preview: string }[] = [];
+      for (const r of locs) {
+        const f = fileURLToPath(r.uri);
+        const dk = `${f}\t${r.line}`;
+        if (seen.has(dk)) continue;
+        seen.add(dk);
+        const previewToken = snapshot.files.get(f)?.signature ?? epoch;
+        out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line, previewToken) });
+      }
+      out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+      // Honest guard (regression-verified 2026-06): ty 0.0.50's find-references is INTRA-FILE
+      // ONLY — cross-file callers are NOT found (heavily-imported functions returned 0, while
+      // grep/`definition` confirm they're used across many files). So for Python, callers/
+      // implementations are a LOWER BOUND, not the cross-file blast radius. (ty `definition`
+      // DOES resolve cross-file, so it's trustworthy.)
+      const engine = lang === 'ts' ? 'tsgo' : 'ty';
+      const base = NOTE[tool].replace(/ENGINE/g, engine);
+      const pyRefsCaveat = lang === 'py' && (tool === 'callers' || tool === 'implementations');
+      const note = pyRefsCaveat
+        ? base + ' ⚠ Python (ty 0.0.50): find-references is INTRA-FILE ONLY here — cross-file callers are NOT found (verified). Treat as a LOWER BOUND / intra-file screen, NOT a complete blast radius. `definition` does resolve cross-file.'
+        : base;
+      const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note, ...(pyRefsCaveat ? { incomplete: true } : {}) };
+      const reset = cache.epoch !== epoch;
+      if (reset) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
+      cache.entries[cacheKey] = result;
+      schedulePersist(root, cacheKey, reset);
+      return result;
+    } finally {
+      lease.release();
+    }
+  };
+
+  let flight!: Promise<unknown>;
+  flight = run().finally(() => {
+    if (queryFlights.get(flightKey) === flight) queryFlights.delete(flightKey);
+  });
+  queryFlights.set(flightKey, flight);
+  return flight;
 }
 
 // ── MCP server (newline-delimited JSON-RPC over stdio, like code-map) ──
@@ -724,9 +920,36 @@ const TOOLS = [
   },
 ];
 
-function send(msg: unknown): void { process.stdout.write(JSON.stringify(msg) + '\n'); }
+let sendTail = Promise.resolve();
+function send(msg: unknown): Promise<void> {
+  const queued = sendTail.then(async () => {
+    if (stopping || process.stdout.destroyed) return;
+    const line = `${JSON.stringify(msg)}\n`;
+    if (process.stdout.write(line)) return;
+    const resumeInput = !process.stdin.isPaused();
+    process.stdin.pause(); // natural stream backpressure, not an arbitrary request cap
+    try {
+      await new Promise<void>((resolveDrain, rejectDrain) => {
+        const cleanup = (): void => {
+          process.stdout.off('drain', onDrain);
+          process.stdout.off('error', onError);
+        };
+        const onDrain = (): void => { cleanup(); resolveDrain(); };
+        const onError = (error: Error): void => { cleanup(); rejectDrain(error); };
+        process.stdout.once('drain', onDrain);
+        process.stdout.once('error', onError);
+      });
+    } finally {
+      if (resumeInput && !stopping) process.stdin.resume();
+    }
+  });
+  // Keep later responses ordered even if the consumer closes its pipe.
+  sendTail = queued.catch(() => undefined);
+  return queued;
+}
 
 async function handle(req: any): Promise<void> {
+  if (stopping) return;
   const { id, method, params } = req;
   const isRequest = id !== undefined && id !== null;
   try {
@@ -747,14 +970,14 @@ async function handle(req: any): Promise<void> {
       case 'notifications/cancelled':
         return;
       default:
-        if (isRequest) send({ jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } });
+        if (isRequest) await send({ jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } });
     }
   } catch (e) {
-    if (isRequest) send({ jsonrpc: '2.0', id, error: { code: -32603, message: (e as Error).message } });
+    if (isRequest) await send({ jsonrpc: '2.0', id, error: { code: -32603, message: (e as Error).message } });
   }
 }
 
-// ── eager pre-warm: load the working project at startup so the first query is fast ──
+// ── opt-in pre-warm: lazy startup avoids spawning an unused checker per MCP client ──
 async function firstSourceFile(root: string, lang: Lang): Promise<string | null> {
   const re = lang === 'ts' ? /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/ : /\.(py|pyi)$/;
   const queue = [root];
@@ -774,44 +997,61 @@ async function firstSourceFile(root: string, lang: Lang): Promise<string | null>
   return null;
 }
 
-/** Pre-warm the oracle for the working project at startup (default on; set
- * CODE_ORACLE_PREWARM=0 to disable). Non-blocking — it overlaps the agent's other
- * startup work, so the first blast-radius query doesn't stall on the ~20s cold load. */
+/** Optionally pre-warm the working project at startup. Lazy startup is the safe
+ * default; set CODE_ORACLE_PREWARM=1 when paying the memory cost up front is useful. */
 async function prewarm(): Promise<void> {
-  if (process.env.CODE_ORACLE_PREWARM === '0') return;
+  if (process.env.CODE_ORACLE_PREWARM !== '1' || stopping) return;
   const root = process.env.CODE_ORACLE_ROOT ? resolve(process.env.CODE_ORACLE_ROOT) : process.cwd();
   const langs: Lang[] = [];
   if (existsSync(join(root, 'tsconfig.json'))) langs.push('ts');
   if (['pyproject.toml', 'setup.py', 'setup.cfg'].some((m) => existsSync(join(root, m)))) langs.push('py');
   for (const lang of langs) {
+    if (stopping) return;
     const be = backend(lang);
     if (!be) { process.stderr.write(`code-oracle: ${lang} project at ${root} but its tool isn't installed — pre-warm skipped\n`); continue; }
     const seed = await firstSourceFile(root, lang);
-    if (!seed) continue;
+    if (!seed || stopping) continue;
     process.stderr.write(`code-oracle: warming the ${lang} oracle for ${root} (~10-20s; queries wait until ready)…\n`);
     const started = Date.now();
     const snapshot = await projectSnapshot(root);
-    (await session(root, lang, be, snapshot.files)).prewarm(seed).then(
-      () => process.stderr.write(`code-oracle: ${lang} oracle ready in ${Math.round((Date.now() - started) / 1000)}s\n`),
-      (e) => process.stderr.write(`code-oracle: ${lang} pre-warm failed: ${e}\n`),
-    );
+    if (stopping) return;
+    const lease = await acquireSession(root, lang, be, snapshot);
+    try {
+      await lease.session.prewarm(seed);
+      if (!stopping) process.stderr.write(`code-oracle: ${lang} oracle ready in ${Math.round((Date.now() - started) / 1000)}s\n`);
+    } finally {
+      lease.release();
+    }
   }
 }
 
 function main(): void {
   if (!backend('ts')) process.stderr.write('code-oracle: tsgo not found — set TSGO_BIN or `npm install` in code-oracle/. (Python uses ty via uvx / TY_CMD.) Tools error per-language until present.\n');
-  void prewarm(); // eager, non-blocking
   const rl = createInterface({ input: process.stdin });
+  const shutdown = (): void => {
+    if (stopping) return;
+    stopping = true;
+    rl.close();
+    process.stdin.pause();
+    disposeAll();
+    process.exitCode = 0;
+  };
   rl.on('line', (line) => {
+    if (stopping) return;
     const t = line.trim();
     if (!t) return;
     let req: any;
     try { req = JSON.parse(t); } catch { return; }
     void handle(req);
   });
-  const shutdown = () => { flushCaches(); for (const s of sessions.values()) s.dispose(); process.exit(0); };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  rl.once('close', shutdown); // stdin EOF is the MCP client's lifecycle boundary
+  process.stdout.once('error', shutdown);
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+  process.once('exit', disposeAll);
+  void prewarm().catch((error) => {
+    if (!stopping) process.stderr.write(`code-oracle: pre-warm failed: ${error}\n`);
+  });
 }
 
 let isEntry = false;
@@ -822,8 +1062,14 @@ if (isEntry) main();
  * keeps the process alive. */
 export function disposeAll(): void {
   flushCaches();
-  for (const s of sessions.values()) s.dispose();
+  for (const [key, entry] of sessions) disposeSession(key, entry);
   sessions.clear();
+  sessionQueues.clear();
+  epochCache.clear();
+  epochFlights.clear();
+  queryFlights.clear();
+  lineCache.clear();
+  caches.clear();
 }
 
 export { query, TOOLS };

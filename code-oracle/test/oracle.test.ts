@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { once } from 'node:events';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
-import { ContentLengthDecoder, disposeAll, query, resolveNamePosition, scanProjectEpoch, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
+import { ContentLengthDecoder, disposeAll, projectSnapshot, query, resolveNamePosition, scanProjectEpoch, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const installedTsgo = ['tsgo', 'tsgo.js']
@@ -14,6 +18,100 @@ const hasTsgo =
   (!!process.env.TSGO_BIN && existsSync(process.env.TSGO_BIN)) ||
   (installedTsgo &&
     existsSync(join(HERE, '../node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`)));
+const SERVER = join(HERE, '../server.ts');
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitUntil(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await delay(25);
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function readPids(path: string): number[] {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number);
+}
+
+function writeFakeLsp(path: string): void {
+  writeFileSync(path, `
+import { appendFileSync } from 'node:fs';
+appendFileSync(process.env.FAKE_LSP_PID_LOG, String(process.pid) + '\\n');
+let buffer = Buffer.alloc(0);
+function send(id, result) {
+  const body = JSON.stringify({ jsonrpc: '2.0', id, result });
+  process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\\r\\n\\r\\n' + body);
+}
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  for (;;) {
+    const separator = buffer.indexOf('\\r\\n\\r\\n');
+    if (separator < 0) return;
+    const header = buffer.subarray(0, separator).toString();
+    const match = /Content-Length: (\\d+)/i.exec(header);
+    if (!match) { buffer = buffer.subarray(separator + 4); continue; }
+    const length = Number(match[1]);
+    const start = separator + 4;
+    if (buffer.length < start + length) return;
+    const message = JSON.parse(buffer.subarray(start, start + length).toString());
+    buffer = buffer.subarray(start + length);
+    if (process.env.FAKE_LSP_METHOD_LOG && message.method) appendFileSync(process.env.FAKE_LSP_METHOD_LOG, message.method + '\\n');
+    if (message.id != null) send(message.id, message.method === 'initialize' ? { capabilities: {} } : []);
+  }
+});
+`);
+}
+
+function startOracle(root: string, fakeLsp: string, pidLog: string, overrides: NodeJS.ProcessEnv = {}): {
+  child: ChildProcessWithoutNullStreams;
+  stderr: () => string;
+} {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TSGO_BIN: fakeLsp,
+    CODE_ORACLE_ROOT: root,
+    TS_ORACLE_QUIET_MS: '10',
+    TS_ORACLE_MIN_MS: '10',
+    TS_ORACLE_WARMUP_MS: '1000',
+    TS_ORACLE_REQ_TIMEOUT_MS: '2000',
+    FAKE_LSP_PID_LOG: pidLog,
+    ...overrides,
+  };
+  if (overrides.CODE_ORACLE_PREWARM === undefined) delete env.CODE_ORACLE_PREWARM;
+  const child = spawn(process.execPath, [SERVER], { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+  return { child, stderr: () => stderr };
+}
+
+async function stopOracle(child: ChildProcessWithoutNullStreams, pids: number[]): Promise<void> {
+  if (child.exitCode == null && child.signalCode == null) {
+    const exited = once(child, 'exit');
+    child.kill();
+    await Promise.race([exited, delay(1000)]);
+  }
+  for (const pid of pids) {
+    if (pidAlive(pid)) { try { process.kill(pid); } catch { /* already gone */ } }
+  }
+}
 
 after(() => disposeAll());
 
@@ -57,6 +155,184 @@ test('Content-Length decoding is linear-safe across byte splits and packed frame
 
   const packed = new ContentLengthDecoder().push(bytes);
   assert.deepEqual(packed.map((body) => JSON.parse(body.toString())), [first, second]);
+});
+
+test('concurrent project snapshots share one exact scan', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-snapshot-flight-'));
+  try {
+    writeFileSync(join(root, 'tsconfig.json'), '{}');
+    for (let i = 0; i < 128; i++) writeFileSync(join(root, `f${i}.ts`), `export const f${i} = ${i};\n`);
+    const snapshots = await Promise.all(Array.from({ length: 32 }, () => projectSnapshot(root)));
+    assert.ok(snapshots.every((snapshot) => snapshot === snapshots[0]), 'overlapping callers must share one snapshot object');
+    assert.equal(snapshots[0].files.size, 129);
+  } finally {
+    disposeAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('startup is lazy unless prewarm is explicitly enabled', { timeout: 10_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-lazy-'));
+  const fakeLsp = join(root, 'fake-lsp.mjs');
+  const pidLog = join(root, 'lsp-pids.txt');
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ include: ['*.ts'] }));
+  writeFileSync(join(root, 'source.ts'), 'export const value = 1;\n');
+  writeFakeLsp(fakeLsp);
+  const oracle = startOracle(root, fakeLsp, pidLog);
+  try {
+    await delay(400);
+    assert.deepEqual(readPids(pidLog), [], `default startup must not spawn an LSP: ${oracle.stderr()}`);
+    const exited = once(oracle.child, 'exit');
+    oracle.child.stdin.end();
+    const [code] = await withTimeout(exited, 3000, `lazy MCP did not exit on stdin EOF: ${oracle.stderr()}`);
+    assert.equal(code, 0, oracle.stderr());
+  } finally {
+    await stopOracle(oracle.child, readPids(pidLog));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('duplicate queries share work and same-epoch cache writes append one delta', { timeout: 15_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-query-flight-'));
+  const fakeLsp = join(root, 'fake-lsp.mjs');
+  const pidLog = join(root, 'lsp-pids.txt');
+  const methodLog = join(root, 'lsp-methods.txt');
+  const digest = createHash('sha256').update(root).digest('hex').slice(0, 16);
+  const cache = join(HERE, '../.cache', `${digest}.json`);
+  const cacheLog = join(HERE, '../.cache', `${digest}.jsonl`);
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ include: ['*.ts'] }));
+  writeFileSync(join(root, 'source.ts'), 'export const value = 1;\n');
+  writeFakeLsp(fakeLsp);
+
+  const run = async (requests: { id: number; character: number }[]): Promise<void> => {
+    const oracle = startOracle(root, fakeLsp, pidLog, { FAKE_LSP_METHOD_LOG: methodLog });
+    const lines = createInterface({ input: oracle.child.stdout });
+    const responses = new Promise<string[]>((resolveResponses) => {
+      const received: string[] = [];
+      lines.on('line', (line) => {
+        received.push(line);
+        if (received.length === requests.length) resolveResponses(received);
+      });
+    });
+    try {
+      for (const request of requests) {
+        oracle.child.stdin.write(JSON.stringify({
+          jsonrpc: '2.0',
+          id: request.id,
+          method: 'tools/call',
+          params: { name: 'definition', arguments: { root, file: join(root, 'source.ts'), line: 0, character: request.character } },
+        }) + '\n');
+      }
+      const messages = await withTimeout(responses, 5000, `oracle queries timed out: ${oracle.stderr()}`);
+      for (const line of messages) assert.equal(JSON.parse(line).error, undefined, line);
+      const exited = once(oracle.child, 'exit');
+      oracle.child.stdin.end();
+      const [code] = await withTimeout(exited, 3000, `oracle did not flush and exit: ${oracle.stderr()}`);
+      assert.equal(code, 0, oracle.stderr());
+    } finally {
+      lines.close();
+      await stopOracle(oracle.child, readPids(pidLog));
+    }
+  };
+
+  try {
+    rmSync(cache, { force: true });
+    rmSync(cacheLog, { force: true });
+    await run([{ id: 1, character: 13 }, { id: 2, character: 13 }]);
+    const methods = readFileSync(methodLog, 'utf8').trim().split(/\s+/);
+    assert.equal(methods.filter((method) => method === 'textDocument/definition').length, 1, 'identical requests must share one LSP call');
+    const base = readFileSync(cache, 'utf8');
+
+    await run([{ id: 3, character: 12 }]);
+    assert.equal(readFileSync(cache, 'utf8'), base, 'same-epoch answers must not rewrite the full snapshot');
+    const deltas = readFileSync(cacheLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(deltas.length, 1);
+    assert.match(deltas[0].key, /#0:12$/);
+  } finally {
+    rmSync(cache, { force: true });
+    rmSync(cacheLog, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('warm sessions are LRU-bounded and idle-reaped', { timeout: 15_000 }, async () => {
+  const base = mkdtempSync(join(tmpdir(), 'code-oracle-pool-'));
+  const firstRoot = join(base, 'first');
+  const secondRoot = join(base, 'second');
+  const fakeLsp = join(base, 'fake-lsp.mjs');
+  const pidLog = join(base, 'lsp-pids.txt');
+  for (const root of [firstRoot, secondRoot]) {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ include: ['*.ts'] }));
+    writeFileSync(join(root, 'source.ts'), 'export const value = 1;\n');
+  }
+  writeFakeLsp(fakeLsp);
+  const oracle = startOracle(firstRoot, fakeLsp, pidLog, {
+    CODE_ORACLE_PREWARM: '0',
+    CODE_ORACLE_MAX_SESSIONS: '1',
+    CODE_ORACLE_SESSION_IDLE_MS: '5000',
+  });
+  const lines = createInterface({ input: oracle.child.stdout });
+  let id = 0;
+  const callDefinition = async (root: string): Promise<void> => {
+    const response = once(lines, 'line');
+    oracle.child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: ++id,
+      method: 'tools/call',
+      params: { name: 'definition', arguments: { root, file: join(root, 'source.ts'), line: 0, character: 13 } },
+    }) + '\n');
+    const [line] = await withTimeout(response, 5000, `oracle query timed out: ${oracle.stderr()}`);
+    const message = JSON.parse(line as string);
+    assert.equal(message.error, undefined, JSON.stringify(message));
+  };
+
+  try {
+    await callDefinition(firstRoot);
+    await waitUntil(() => readPids(pidLog).length === 1, 2000, 'first LSP did not start');
+    const firstPid = readPids(pidLog)[0];
+
+    await callDefinition(secondRoot);
+    await waitUntil(() => readPids(pidLog).length === 2, 2000, 'second LSP did not start');
+    const secondPid = readPids(pidLog)[1];
+    await waitUntil(() => !pidAlive(firstPid), 2000, 'LRU cap did not reap the first LSP');
+    assert.equal(pidAlive(secondPid), true, 'newest LSP was reaped instead of the LRU session');
+    await waitUntil(() => !pidAlive(secondPid), 7000, 'idle timeout did not reap the remaining LSP');
+
+    const exited = once(oracle.child, 'exit');
+    oracle.child.stdin.end();
+    const [code] = await withTimeout(exited, 3000, `pooled MCP did not exit: ${oracle.stderr()}`);
+    assert.equal(code, 0, oracle.stderr());
+  } finally {
+    lines.close();
+    await stopOracle(oracle.child, readPids(pidLog));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('stdin EOF shuts down an in-flight prewarm and reaps its LSP', { timeout: 10_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-eof-'));
+  const fakeLsp = join(root, 'fake-lsp.mjs');
+  const pidLog = join(root, 'lsp-pids.txt');
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ include: ['*.ts'] }));
+  writeFileSync(join(root, 'source.ts'), 'export const value = 1;\n');
+  writeFakeLsp(fakeLsp);
+  const oracle = startOracle(root, fakeLsp, pidLog, {
+    CODE_ORACLE_PREWARM: '1',
+    CODE_ORACLE_SESSION_IDLE_MS: '60000',
+  });
+  try {
+    await waitUntil(() => readPids(pidLog).length === 1, 3000, `prewarm LSP did not start: ${oracle.stderr()}`);
+    const lspPid = readPids(pidLog)[0];
+    const exited = once(oracle.child, 'exit');
+    oracle.child.stdin.end();
+    const [code] = await withTimeout(exited, 3000, `MCP stayed alive after stdin EOF: ${oracle.stderr()}`);
+    assert.equal(code, 0, oracle.stderr());
+    await waitUntil(() => !pidAlive(lspPid), 2000, 'stdin EOF left the LSP process alive');
+  } finally {
+    await stopOracle(oracle.child, readPids(pidLog));
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('project fingerprint catches additions, deletions, and restored-mtime edits', async () => {

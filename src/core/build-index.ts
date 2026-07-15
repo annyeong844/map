@@ -71,7 +71,8 @@ function runPyBackend(root: string, files: string[], targets: string[]): Promise
   });
 }
 
-async function readAll(root: string, files: string[], concurrency = 32): Promise<Map<string, string | null>> {
+const READ_CONCURRENCY = 32;
+async function readAll(root: string, files: string[], concurrency = READ_CONCURRENCY): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   let i = 0;
   const worker = async (): Promise<void> => {
@@ -281,11 +282,6 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
 
   const pyFiles = files.filter(isPython);
   const pyChanged = changedFiles.filter(isPython);
-  const jsChanged = changedFiles.filter((file) => !isPython(file));
-
-  // JS/TS is read here. Python is read by its parser and returns tokens plus
-  // coordinates, avoiding the old Node-read + Python-read duplicate I/O.
-  const text = await readAll(root, jsChanged);
 
   // Python files go through the stdlib-ast backend (one batched subprocess, the
   // gitignore-aware file set supplied by Node); TS/JS goes through oxc.
@@ -300,76 +296,82 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     }
   }
 
-  for (const file of changedFiles) {
-    const st = stats.get(file) ?? null;
-    const bucket: MapEntry[] = [];
-    if (isPython(file)) {
-      const sourceToken = py?.fileTokens[file];
-      if (sourceToken === undefined) {
+  // Preserve deterministic file order, but release source text after each
+  // existing 32-file I/O batch instead of retaining every changed JS/TS file.
+  for (let batchStart = 0; batchStart < changedFiles.length; batchStart += READ_CONCURRENCY) {
+    const batch = changedFiles.slice(batchStart, batchStart + READ_CONCURRENCY);
+    const text = await readAll(root, batch.filter((file) => !isPython(file)));
+    for (const file of batch) {
+      const st = stats.get(file) ?? null;
+      const bucket: MapEntry[] = [];
+      if (isPython(file)) {
+        const sourceToken = py?.fileTokens[file];
+        if (sourceToken === undefined) {
+          filesMissing.push(file);
+          continue;
+        }
+        entriesByFile.set(file, bucket);
+        fileTokens[file] = sourceToken;
+        if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
+        fileImports[file] = py?.fileImports[file] ?? [];
+        const refs = py?.fileRefs[file] ?? {};
+        for (const rec of pyByFile.get(file) ?? []) {
+          bucket.push({
+            id: mkId(file, rec.name, rec.kind, rec.line),
+            name: rec.name,
+            kind: rec.kind,
+            file,
+            line: rec.line,
+            endLine: rec.endLine,
+            charStart: rec.charStart,
+            charEnd: rec.charEnd,
+            searchText: rec.searchText || rec.name,
+            className: rec.className,
+            extends: rec.extends,
+            visibility: rec.visibility,
+            static: rec.static,
+            default: rec.default,
+            fanIn: 0,
+            intraRefs: refs[rec.name] ?? 0,
+            definitionId: `${file}#${rec.kind}:${rec.charStart}-${rec.charEnd}`,
+          });
+        }
+        continue;
+      }
+
+      const src = text.get(file) ?? null;
+      if (src == null) {
         filesMissing.push(file);
         continue;
       }
       entriesByFile.set(file, bucket);
-      fileTokens[file] = sourceToken;
+      fileTokens[file] = token(src);
       if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
-      fileImports[file] = py?.fileImports[file] ?? [];
-      const refs = py?.fileRefs[file] ?? {};
-      for (const rec of pyByFile.get(file) ?? []) {
+      const parsed = extractSymbols(file, src);
+      fileImports[file] = parsed.imports;
+      const lines = buildLineIndex(src);
+      for (const rec of parsed.symbols) {
+        const line = indexedLineAt(lines, rec.charStart);
         bucket.push({
-          id: mkId(file, rec.name, rec.kind, rec.line),
+          id: mkId(file, rec.name, rec.kind, line),
           name: rec.name,
           kind: rec.kind,
           file,
-          line: rec.line,
-          endLine: rec.endLine,
+          line,
+          endLine: indexedLineAt(lines, rec.charEnd),
           charStart: rec.charStart,
           charEnd: rec.charEnd,
-          searchText: rec.searchText || rec.name,
+          searchText: firstLine(src, rec.charStart) || rec.name,
           className: rec.className,
           extends: rec.extends,
           visibility: rec.visibility,
           static: rec.static,
           default: rec.default,
           fanIn: 0,
-          intraRefs: refs[rec.name] ?? 0,
+          intraRefs: parsed.refs[rec.name] ?? 0,
           definitionId: `${file}#${rec.kind}:${rec.charStart}-${rec.charEnd}`,
         });
       }
-      continue;
-    }
-
-    const src = text.get(file) ?? null;
-    if (src == null) {
-      filesMissing.push(file);
-      continue;
-    }
-    entriesByFile.set(file, bucket);
-    fileTokens[file] = token(src);
-    if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
-    const parsed = extractSymbols(file, src);
-    fileImports[file] = parsed.imports;
-    const lines = buildLineIndex(src);
-    for (const rec of parsed.symbols) {
-      const line = indexedLineAt(lines, rec.charStart);
-      bucket.push({
-        id: mkId(file, rec.name, rec.kind, line),
-        name: rec.name,
-        kind: rec.kind,
-        file,
-        line,
-        endLine: indexedLineAt(lines, rec.charEnd),
-        charStart: rec.charStart,
-        charEnd: rec.charEnd,
-        searchText: firstLine(src, rec.charStart) || rec.name,
-        className: rec.className,
-        extends: rec.extends,
-        visibility: rec.visibility,
-        static: rec.static,
-        default: rec.default,
-        fanIn: 0,
-        intraRefs: parsed.refs[rec.name] ?? 0,
-        definitionId: `${file}#${rec.kind}:${rec.charStart}-${rec.charEnd}`,
-      });
     }
   }
 

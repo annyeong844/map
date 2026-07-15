@@ -54,7 +54,8 @@ export interface FileParse {
  * won't overflow the stack).
  */
 function walkProgram(program: unknown): { refs: Record<string, number> } {
-  const refs: Record<string, number> = Object.create(null);
+  const refs: Record<string, number> = {};
+  Object.setPrototypeOf(refs, null);
   const stack: unknown[] = [program];
   while (stack.length) {
     const node = stack.pop();

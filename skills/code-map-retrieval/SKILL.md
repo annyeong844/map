@@ -21,6 +21,8 @@ is lost it says so. It does **not search** — grep does the finding, `read` doe
 For MCP calls, always pass `root` as the indexed repository's absolute directory. A global
 server commonly starts in the user home and cannot infer which child workspace is active.
 Native Linux, Windows (`C:\...`), and equivalent WSL (`/mnt/c/...`) spellings are accepted.
+For a Windows-hosted MCP reading native WSL ext4, pass the repository's
+`\\wsl.localhost\<distro>\...` UNC path as `root`; keep `ref` repository-relative.
 
 ## Decision rule
 
@@ -45,6 +47,15 @@ Native Linux, Windows (`C:\...`), and equivalent WSL (`/mnt/c/...`) spellings ar
    list. Refs without a session baseline are returned conservatively. Don't re-read the
    unchanged ones; don't re-grep the tree.
 
+6. **Missing/stale index or MCP process**
+   → current servers lazily create missing/incompatible indexes, rebuild large drift on the next
+   read, and rebuild smaller drift when a requested symbol is missing. Do not reflexively run
+   `map index`. Retry with the correct absolute `root` and `diagnostics: true`. Index files
+   hot-reload, but server code and client MCP configuration do not: if `restartRequired` is true,
+   the reported entrypoint/server file is not the configured one, or no diagnostics are returned
+   by a supposedly current server, start a new MCP session. If `changedOnly` calls a never-returned
+   ref `unchanged`, treat that process as stale and make a normal `read` after restart.
+
 ## References / callers / definitions — escalate to code-oracle (type-aware), by judgment
 
 `read` and grep don't answer **"who calls X / where is X defined / what implements this"**
@@ -57,13 +68,17 @@ the one-time warmup against repo size and how common the name is:*
   `callers` (checker-grade, type-confirmed). Measured: ~31 % fewer files to read overall, **40–75 %
   on common names**. A **distinctive** name in a **small** repo → grep is already precise, stay on grep.
 - **where does this actually resolve** (the precise callee, through interfaces / DI) → `definition`.
-- **what implements this interface/abstract** → `implementations` (sound over-approx for blast radius).
+- **what implements this interface/abstract** → `implementations`. Keep the full `results` set for
+  blast radius. On TS/JS, use `likely` before `possible` only to order reading; static `new` /
+  `useClass` hints are not runtime proof (`implementationEvidence.runtimeObserved` is false).
 - **When to spin it up (your judgment):** code-oracle warms a session once (~seconds up to ~20 s by
   repo size). Worth it when the repo is large and/or the name collides; skip it (use grep) for tiny
   repos or distinctive names. It's a TS/JS-first win — tsgo is the native TS compiler, so it's fast.
-- **Honest limits:** truly dynamic dispatch (Proxy, `obj[k]()`, token-only DI) is invisible — read
-  those by hand; Python (`ty`) references are currently intra-file only. If code-oracle isn't
-  installed, fall back to grep (and `code-map read` for the bodies).
+- **Honest limits:** inspect structured `coverage`. Truly dynamic dispatch (Proxy, `obj[k]()`,
+  token-only DI) is invisible — read those by hand; Python (`ty`) references are an intra-file
+  lower bound. Never drop a `possible` implementation because its ranking is deliberately
+  over-inclusive and source-static. If code-oracle isn't installed, fall back to grep (and
+  `code-map read` for the bodies).
 
 ## Why this matters (measured)
 
@@ -82,7 +97,8 @@ the one-time warmup against repo size and how common the name is:*
   `read` when a later read depends on what an earlier one shows.
 - With `snippet`, `aim.status: "ambiguous"` means your quoted text occurs more than once — don't
   target blindly.
-- `No code-map index` means the call's `root` is missing or wrong (or the index has not been
-  built). Do not search the user home for child repos or pin one global server to a single repo.
+- `No code-map index` from a current server normally means `root` is missing/wrong or automatic
+  indexing failed/was disabled. Inspect `diagnostics`; do not search the user home for child repos
+  or pin one global server to a single repo.
 
 Coordinates, not meaning: pull the raw slice and judge it yourself.

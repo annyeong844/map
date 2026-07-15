@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
-import { ContentLengthDecoder, disposeAll, projectSnapshot, query, resolveNamePosition, resolveTsgoPackageBin, scanProjectEpoch, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
+import { ContentLengthDecoder, coverageFor, disposeAll, projectSnapshot, query, resolveNamePosition, resolveTsgoPackageBin, scanProjectEpoch, scanStaticInstantiationHints, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const installedTsgo = ['tsgo', 'tsgo.js']
@@ -74,7 +74,9 @@ process.stdin.on('data', (chunk) => {
     const message = JSON.parse(buffer.subarray(start, start + length).toString());
     buffer = buffer.subarray(start + length);
     if (process.env.FAKE_LSP_METHOD_LOG && message.method) appendFileSync(process.env.FAKE_LSP_METHOD_LOG, message.method + '\\n');
-    if (message.id != null) send(message.id, message.method === 'initialize' ? { capabilities: {} } : []);
+    if (message.id != null && message.method !== process.env.FAKE_LSP_HANG_METHOD) {
+      send(message.id, message.method === 'initialize' ? { capabilities: {} } : []);
+    }
   }
 });
 `);
@@ -117,6 +119,48 @@ after(() => disposeAll());
 
 test('the three tools are exposed', () => {
   assert.deepEqual(TOOLS.map((t) => t.name).sort(), ['callers', 'definition', 'implementations']);
+});
+
+test('query validates the MCP boundary before paths or checker state are touched', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-input-'));
+  const file = join(root, 'source.ts');
+  writeFileSync(file, 'export const value = 1;\n');
+  try {
+    assert.match(String((await query('callers', { file: {} }) as { error: string }).error), /file.*non-empty string/);
+    assert.match(String((await query('callers', { file, root: [] }) as { error: string }).error), /root.*non-empty string/);
+    assert.match(String((await query('callers', { file, name: {} }) as { error: string }).error), /name.*non-empty string/);
+    assert.match(String((await query('callers', { file, line: 0 }) as { error: string }).error), /provided together/);
+    assert.match(String((await query('callers', { file, line: -1, character: 0 }) as { error: string }).error), /non-negative safe integers/);
+    assert.match(String((await query('implementations', { file, name: 'value', evidence: 'yes' }) as { error: string }).error), /evidence.*boolean/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('coverage metadata distinguishes checker evidence, over-approximation, and Python lower bounds', () => {
+  assert.equal(coverageFor('callers', 'ts').kind, 'checker-confirmed');
+  const implementations = coverageFor('implementations', 'ts');
+  assert.equal(implementations.kind, 'sound-overapproximation');
+  assert.equal(implementations.scope, 'checker-visible-project');
+  assert.ok(implementations.residuals.includes('token-only-di'));
+  const python = coverageFor('callers', 'py');
+  assert.equal(python.kind, 'lower-bound');
+  assert.equal(python.scope, 'intra-file');
+  assert.ok(python.residuals.includes('cross-file-references'));
+});
+
+test('static instantiation hints ignore comments and strings and retain strong construction signals', () => {
+  const hints = scanStaticInstantiationHints([
+    '// new CommentOnly()',
+    'const text = "new StringOnly()";',
+    'const circle = new Circle();',
+    'const provider = { useClass: EmailNotifier };',
+    '',
+  ].join('\n'), 'fixture.ts');
+  assert.deepEqual(hints.map((hint) => [hint.name, hint.kind, hint.line]), [
+    ['Circle', 'constructor', 3],
+    ['EmailNotifier', 'di-use-class', 4],
+  ]);
 });
 
 test('tsgo spawn accepts the new extensionless Node launcher and legacy/native binaries', () => {
@@ -177,8 +221,8 @@ test('tsgo package resolution follows a hoisted Node dependency layout', () => {
     const scope = join(root, 'node_modules/@typescript');
     const packageRoot = join(scope, 'native-preview');
     const platformRoot = join(scope, `native-preview-${process.platform}-${process.arch}`);
-    mkdirSync(join(packageRoot, 'bin'), { recursive: true });
-    mkdirSync(platformRoot, { recursive: true });
+    mkdirSync(packageRoot, { recursive: true });
+    mkdirSync(join(platformRoot, 'lib'), { recursive: true });
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
       name: '@typescript/native-preview',
       exports: { './package.json': './package.json' },
@@ -187,10 +231,10 @@ test('tsgo package resolution follows a hoisted Node dependency layout', () => {
       name: `@typescript/native-preview-${process.platform}-${process.arch}`,
       exports: { './package.json': './package.json' },
     }));
-    const launcher = join(packageRoot, 'bin/tsgo');
-    writeFileSync(launcher, '#!/usr/bin/env node\n');
+    const executable = join(platformRoot, 'lib', process.platform === 'win32' ? 'tsgo.exe' : 'tsgo');
+    writeFileSync(executable, 'native executable placeholder\n');
 
-    assert.equal(resolveTsgoPackageBin(join(root, 'client.cjs')), launcher);
+    assert.equal(resolveTsgoPackageBin(join(root, 'client.cjs')), executable);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -335,6 +379,46 @@ test('warm sessions are LRU-bounded and idle-reaped', { timeout: 15_000 }, async
   }
 });
 
+test('an LSP request timeout fails honestly and terminates the poisoned backend', { timeout: 10_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-timeout-'));
+  const fakeLsp = join(root, 'fake-lsp.mjs');
+  const pidLog = join(root, 'lsp-pids.txt');
+  writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ include: ['*.ts'] }));
+  writeFileSync(join(root, 'source.ts'), 'export const value = 1;\n');
+  writeFakeLsp(fakeLsp);
+  const oracle = startOracle(root, fakeLsp, pidLog, {
+    CODE_ORACLE_PREWARM: '0',
+    CODE_ORACLE_SESSION_IDLE_MS: '60000',
+    TS_ORACLE_REQ_TIMEOUT_MS: '100',
+    FAKE_LSP_HANG_METHOD: 'textDocument/definition',
+  });
+  const lines = createInterface({ input: oracle.child.stdout });
+  try {
+    const response = once(lines, 'line');
+    oracle.child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'definition', arguments: { root, file: join(root, 'source.ts'), line: 0, character: 13 } },
+    }) + '\n');
+    const [line] = await withTimeout(response, 3000, `timed-out query did not answer: ${oracle.stderr()}`);
+    const message = JSON.parse(line as string);
+    assert.match(message.error?.message ?? '', /LSP request timed out.*textDocument\/definition/);
+    await waitUntil(() => readPids(pidLog).length === 1, 1000, 'timed-out LSP never started');
+    const lspPid = readPids(pidLog)[0];
+    await waitUntil(() => !pidAlive(lspPid), 2000, 'timed-out LSP was left alive');
+
+    const exited = once(oracle.child, 'exit');
+    oracle.child.stdin.end();
+    const [code] = await withTimeout(exited, 3000, `timeout-test MCP did not exit: ${oracle.stderr()}`);
+    assert.equal(code, 0, oracle.stderr());
+  } finally {
+    lines.close();
+    await stopOracle(oracle.child, readPids(pidLog));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('stdin EOF shuts down an in-flight prewarm and reaps its LSP', { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'code-oracle-eof-'));
   const fakeLsp = join(root, 'fake-lsp.mjs');
@@ -436,29 +520,73 @@ test('implementations resolves an interface method to every concrete impl (type-
   const root = mkdtempSync(join(tmpdir(), 'code-oracle-'));
   writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, module: 'nodenext', moduleResolution: 'nodenext' }, include: ['*.ts'] }));
   writeFileSync(
-    join(root, 'shapes.ts'),
+    join(root, 'shape.ts'),
     [
       'export interface Shape {',
       '  area(): number;',
       '}',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(root, 'circle.ts'),
+    [
+      "import type { Shape } from './shape.js';",
       'export class Circle implements Shape {',
       '  area() { return 3.14; }',
       '}',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(root, 'square.ts'),
+    [
+      "import type { Shape } from './shape.js';",
       'export class Square implements Shape {',
       '  area() { return 4; }',
       '}',
       '',
     ].join('\n'),
   );
+  writeFileSync(
+    join(root, 'app.ts'),
+    [
+      "import type { Shape } from './shape.js';",
+      "import { Circle } from './circle.js';",
+      'export const active: Shape = new Circle();',
+      '',
+    ].join('\n'),
+  );
 
   // Point at the interface method's declaration (line 1, the `area` token at col 2).
-  const r = (await query('implementations', { file: join(root, 'shapes.ts'), line: 1, character: 2, root })) as {
+  const r = (await query('implementations', { file: join(root, 'shape.ts'), line: 1, character: 2, root })) as {
     tool: string;
     count: number;
-    results: { file: string; line: number }[];
+    coverage: { kind: string };
+    implementationEvidence: { runtimeObserved: boolean; likelyCount: number };
+    results: { file: string; line: number; container: string | null; likelihood: string; staticEvidence?: { kind: string }[] }[];
   };
   assert.equal(r.tool, 'implementations');
   assert.ok(r.count >= 2, `expected >= 2 concrete impls, got ${r.count}: ${JSON.stringify(r.results)}`);
+  assert.equal(r.coverage.kind, 'sound-overapproximation');
+  assert.equal(r.implementationEvidence.runtimeObserved, false);
+  const circle = r.results.find((result) => result.container === 'Circle');
+  const square = r.results.find((result) => result.container === 'Square');
+  assert.equal(circle?.likelihood, 'likely');
+  assert.ok(circle?.staticEvidence?.some((evidence) => evidence.kind === 'constructor'));
+  assert.equal(square?.likelihood, 'possible');
+  assert.equal(r.implementationEvidence.likelyCount, 1);
+
+  const unranked = (await query('implementations', {
+    file: join(root, 'shape.ts'), line: 1, character: 2, root, evidence: false,
+  })) as {
+    count: number;
+    implementationEvidence: { basis: string };
+    results: { likelihood?: string }[];
+  };
+  assert.equal(unranked.count, r.count, 'opting out of evidence must not change the possible set');
+  assert.equal(unranked.implementationEvidence.basis, 'not-requested');
+  assert.ok(unranked.results.every((result) => result.likelihood === undefined));
 });
 
 // Real footgun (firsthand 2026-07): asking callers by the bare name `send` silently

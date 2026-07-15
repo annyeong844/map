@@ -1,0 +1,73 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import"],
+  "rules": {
+    "import/no-cycle": "error"
+  },
+  "overrides": [
+    {
+      "files": ["src/core/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../cli/**", "../mcp/**", "../../code-oracle/**"],
+                "message": "Core must not depend on CLI, MCP, or Oracle adapters."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/cli/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../mcp/**"],
+                "message": "CLI commands and the MCP adapter must meet through core owners."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/mcp/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../cli/**"],
+                "message": "The MCP adapter must not depend on CLI commands."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["code-oracle/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../src/**", "../../src/**"],
+                "message": "Oracle stays an isolated optional service; do not couple it to code-map core."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

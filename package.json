@@ -45,13 +45,19 @@
     "check:package": "npm run build && node scripts/check-package-safety.mjs",
     "check:versions": "node scripts/check-versions.mjs",
     "smoke:package": "npm run build && node scripts/package-smoke.mjs",
-    "release:check": "npm run typecheck && npm test && npm run lint && npm run check:versions && npm run check:package && npm run smoke:package",
+    "release:check": "npm run format:check:tooling && npm run typecheck && npm run typecheck:oracle && npm test && npm run test:oracle && npm run lint && npm run check:versions && npm run check:package && npm run smoke:package",
     "prepublishOnly": "npm run release:check",
     "prepack": "npm run build",
     "prepare": "node scripts/prepare-package.mjs",
     "test": "node --test test/*.test.ts",
+    "test:oracle": "npm --prefix code-oracle test",
     "typecheck": "tsc --noEmit -p .",
-    "lint": "oxlint src test",
+    "typecheck:oracle": "npm --prefix code-oracle run typecheck",
+    "format:check:tooling": "prettier --check .prettierrc.json .oxlintrc.json .oxlintrc.typed.json package.json package-lock.json tsconfig.json",
+    "lint": "npm run lint:syntax && npm run lint:typed",
+    "lint:syntax": "oxlint src test code-oracle hooks scripts",
+    "lint:typed": "oxlint --type-aware -c .oxlintrc.typed.json src code-oracle/server.ts",
+    "lint:typed:unsafe": "oxlint --type-aware --allow=all --warn=typescript/no-unsafe-argument --warn=typescript/no-unsafe-assignment --warn=typescript/no-unsafe-call --warn=typescript/no-unsafe-member-access src code-oracle/server.ts",
     "bench": "node --expose-gc scripts/benchmark.mjs"
   },
   "engines": {
@@ -80,6 +86,8 @@
   "devDependencies": {
     "@types/node": "^22.19.21",
     "oxlint": "1.74.0",
+    "oxlint-tsgolint": "0.24.0",
+    "prettier": "3.8.1",
     "typescript": "^7.0.2"
   }
 }

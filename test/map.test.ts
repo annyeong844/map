@@ -1,16 +1,27 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { buildIndex } from '../src/core/build-index.ts';
+import { autoIndexDecision, scanIndexDrift } from '../src/core/index-drift.ts';
 import { locate } from '../src/core/locate.ts';
 import { changed, read } from '../src/core/read.ts';
 import { getPreparedLookup, loadIndex, saveIndex } from '../src/core/store.ts';
-import { callTool, dispatch, resolveIndexPath, toHostPath, TOOLS } from '../src/mcp/server.ts';
+import {
+  callTool,
+  callToolAsync,
+  dispatch,
+  disposeMcpState,
+  resolveIndexPath,
+  sourceIdentityChanged,
+  toHostPath,
+  TOOLS,
+} from '../src/mcp/server.ts';
 import { applySetup, setupPlan } from '../src/cli/setup.ts';
 import { VERSION } from '../src/version.ts';
 
@@ -33,6 +44,8 @@ function helper(): number {
   return 2;
 }
 `;
+
+after(disposeMcpState);
 
 test('CLI and MCP expose the package version from one source', () => {
   const cli = spawnSync(process.execPath, [fileURLToPath(new URL('../src/cli/main.ts', import.meta.url)), '--version'], {
@@ -83,7 +96,7 @@ test('index extracts coordinates + an anchor from real source, no meaning, no ex
   assert.equal(typeof alpha.charStart, 'number');
   assert.equal(typeof alpha.charEnd, 'number');
   assert.match(alpha.searchText, /function alpha/);
-  assert.equal((alpha as unknown as Record<string, unknown>).summary, undefined);
+  assert.equal('summary' in alpha, false);
   // The private helper is covered too — the map parsed it itself.
   const helper = index.entries.find((e) => e.name === 'helper')!;
   assert.ok(helper, 'private fn indexed');
@@ -189,6 +202,51 @@ test('MCP changedOnly compares with the prior read even after an index refresh',
   assert.deepEqual(stable.changed, []);
 });
 
+test('async MCP changedOnly reads edited bytes even when small drift is not rebuilt', async () => {
+  const root = repo({
+    'src/a.ts': 'export function alpha(): number {\n  return 1;\n}\n',
+    'src/b.ts': 'export function beta(): number {\n  return 2;\n}\n',
+  });
+  const { index } = await buildIndex({ root });
+  saveIndex(index, join(root, '.map-index.json'));
+
+  const initial = JSON.parse(await callToolAsync('read', {
+    root,
+    refs: ['alpha', 'beta'],
+  }));
+  assert.deepEqual(initial.results.map((result: { status: string }) => result.status), ['exact', 'exact']);
+
+  writeFileSync(join(root, 'src/a.ts'), 'export function alpha(): number {\n  return 9;\n}\n');
+  const delta = JSON.parse(await callToolAsync('read', {
+    root,
+    refs: ['alpha', 'beta'],
+    changedOnly: true,
+    diagnostics: true,
+  }));
+  assert.deepEqual(delta.unchanged, ['src/b.ts#beta']);
+  assert.deepEqual(delta.changed.map((result: { id: string }) => result.id), ['src/a.ts#alpha']);
+  assert.match(delta.changed[0].raw ?? '', /return 9/);
+  assert.notEqual(delta._meta.autoIndex?.status, 'rebuilt');
+
+  const stable = JSON.parse(await callToolAsync('read', {
+    root,
+    refs: ['alpha', 'beta'],
+    changedOnly: true,
+  }));
+  assert.deepEqual(stable.unchanged, ['src/a.ts#alpha', 'src/b.ts#beta']);
+  assert.deepEqual(stable.changed, []);
+});
+
+test('MCP refuses non-string snippet input instead of stringifying objects', async () => {
+  const root = repo({ 'src/m.ts': SRC });
+  const { index } = await buildIndex({ root });
+  const result = JSON.parse(dispatch(index, 'read', {
+    ref: 'alpha',
+    snippet: { untrusted: true },
+  }));
+  assert.match(result.error ?? '', /snippet.*string/);
+});
+
 test('the global MCP bounds warmed repository runtimes', async () => {
   const container = repo({});
   const roots: string[] = [];
@@ -205,6 +263,160 @@ test('the global MCP bounds warmed repository runtimes', async () => {
   assert.match(JSON.parse(callTool('read', { root: roots[0], ref: 'symbol0' })).error ?? '', /No code-map index/);
 });
 
+test('automatic index gate is linear and uses an adaptive large-change threshold', async () => {
+  const files = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [
+    `src/f${i}.ts`,
+    `export function symbol${i}(): number { return ${i}; }\n`,
+  ]));
+  const root = repo(files);
+  const { index } = await buildIndex({ root });
+
+  const current = await scanIndexDrift(root, index);
+  assert.deepEqual(autoIndexDecision(current), { rebuild: false, reason: 'current', threshold: 4 });
+
+  for (let i = 0; i < 4; i++) {
+    writeFileSync(join(root, `src/f${i}.ts`), `// changed ${i}\nexport function symbol${i}(): number { return ${i + 100}; }\n`);
+  }
+  const large = await scanIndexDrift(root, index);
+  assert.equal(large.totalChanged, 4);
+  assert.deepEqual(autoIndexDecision(large), { rebuild: true, reason: 'large-change', threshold: 4 });
+
+  const missing = await scanIndexDrift(root, null);
+  assert.equal(autoIndexDecision(missing).reason, 'missing-index');
+  const incompatible = await scanIndexDrift(root, { ...index, meta: { ...index.meta, version: index.meta.version - 1 } });
+  assert.equal(autoIndexDecision(incompatible).reason, 'incompatible-index');
+});
+
+test('async MCP lazily creates a missing index and reports its live instance', async () => {
+  const root = repo({ 'src/m.ts': SRC });
+  const result = JSON.parse(await callToolAsync('read', { root, ref: 'alpha', diagnostics: true }));
+  assert.equal(result.status, 'exact');
+  assert.equal(result._meta.autoIndex.status, 'rebuilt');
+  assert.equal(result._meta.autoIndex.reason, 'missing-index');
+  assert.equal(result._meta.mcp.pid, process.pid);
+  assert.equal(result._meta.mcp.restartRequired, false);
+  assert.equal(result._meta.index.root, root);
+  assert.equal(result._meta.index.indexPath, join(root, '.map-index.json'));
+  assert.match(result._meta.index.watchMode, /^(active|on-call-fallback)$/);
+  assert.equal(existsSync(join(root, '.map-index.json')), true);
+});
+
+test('an explicit missing child root never overwrites a parent repository index', async () => {
+  const parent = repo({ 'src/parent.ts': 'export function parentSymbol(): number { return 1; }\n' });
+  const parentBuild = await buildIndex({ root: parent });
+  const parentIndexPath = join(parent, '.map-index.json');
+  saveIndex(parentBuild.index, parentIndexPath);
+  const child = join(parent, 'nested-repo');
+  mkdirSync(join(child, 'src'), { recursive: true });
+  writeFileSync(join(child, 'src/child.ts'), 'export function childSymbol(): number { return 2; }\n');
+
+  const result = JSON.parse(await callToolAsync('read', { root: child, ref: 'childSymbol' }));
+  assert.equal(result.status, 'exact');
+  assert.equal(existsSync(join(child, '.map-index.json')), true);
+  assert.equal(read(loadIndex(parentIndexPath), 'parentSymbol').status, 'exact');
+  assert.equal(read(loadIndex(parentIndexPath), 'childSymbol').status, 'not-found');
+});
+
+test('concurrent reads share one missing-index build', async () => {
+  const root = repo({
+    'src/a.ts': 'export function alpha(): number { return 1; }\n',
+    'src/b.ts': 'export function beta(): number { return 2; }\n',
+  });
+  const results = await Promise.all(
+    Array.from({ length: 8 }, (_, i) => callToolAsync('read', { root, ref: i % 2 ? 'alpha' : 'beta' })),
+  );
+  for (const text of results) {
+    const result = JSON.parse(text);
+    assert.equal(result.status, 'exact');
+    assert.equal(result._meta.autoIndex.status, 'rebuilt');
+    assert.equal(result._meta.autoIndex.reason, 'missing-index');
+  }
+  assert.equal(loadIndex(join(root, '.map-index.json')).meta.entryCount, 2);
+});
+
+test('a requested new symbol rebuilds small drift and retries once', async () => {
+  const files = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [
+    `src/f${i}.ts`,
+    `export function symbol${i}(): number { return ${i}; }\n`,
+  ]));
+  const root = repo(files);
+  const { index } = await buildIndex({ root });
+  saveIndex(index, join(root, '.map-index.json'));
+  writeFileSync(join(root, 'src/fresh.ts'), 'export function freshSymbol(): number { return 42; }\n');
+
+  const result = JSON.parse(await callToolAsync('read', { root, ref: 'freshSymbol' }));
+  assert.equal(result.status, 'exact');
+  assert.equal(result._meta.autoIndex.status, 'rebuilt');
+  assert.equal(result._meta.autoIndex.reason, 'requested-symbol-missing');
+  assert.equal(result._meta.autoIndex.changed, 1);
+});
+
+test('large drift rebuilds before an unchanged target is read', async () => {
+  const files = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [
+    `src/f${i}.ts`,
+    `export function symbol${i}(): number { return ${i}; }\n`,
+  ]));
+  const root = repo(files);
+  const { index } = await buildIndex({ root });
+  saveIndex(index, join(root, '.map-index.json'));
+  const primed = JSON.parse(await callToolAsync('read', { root, ref: 'symbol15', diagnostics: true }));
+  assert.equal(primed._meta.autoIndex.status, 'current');
+  for (let i = 0; i < 4; i++) {
+    writeFileSync(
+      join(root, `src/f${i}.ts`),
+      `export function symbol${i}(): number { return ${i}; }\nexport function changed${i}(): number { return ${i + 10}; }\n`,
+    );
+  }
+  await new Promise((resolve) => setTimeout(resolve, primed._meta.index.watchMode === 'active' ? 100 : 2_100));
+
+  const result = JSON.parse(await callToolAsync('read', { root, ref: 'symbol15' }));
+  assert.equal(result.status, 'exact');
+  assert.equal(result._meta.autoIndex.reason, 'large-change');
+  assert.equal(result._meta.autoIndex.changed, 4);
+  assert.equal(read(loadIndex(join(root, '.map-index.json')), 'changed0').status, 'exact');
+});
+
+test('MCP source identity diagnostics require a restart only after change', () => {
+  const identity = { mtimeMs: 1, size: 2, ctimeMs: 3, ino: 4 };
+  assert.equal(sourceIdentityChanged(identity, { ...identity }), false);
+  assert.equal(sourceIdentityChanged(identity, { ...identity, size: 5 }), true);
+  assert.equal(sourceIdentityChanged(null, null), false);
+  assert.equal(sourceIdentityChanged(identity, null), true);
+});
+
+test('MCP initializes before repository work and exits on stdin EOF', { timeout: 10_000 }, async () => {
+  const root = repo({ 'src/m.ts': SRC });
+  const env: NodeJS.ProcessEnv = { ...process.env, CODE_MAP_AUTO_INDEX: 'off' };
+  delete env.MAP_INDEX;
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp/server.ts', import.meta.url))], {
+    cwd: root,
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = createInterface({ input: child.stdout });
+  try {
+    const response = once(lines, 'line', { signal: AbortSignal.timeout(3_000) });
+    child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2099-01-01', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+    }) + '\n');
+    const [line] = await response;
+    const message = JSON.parse(line as string);
+    assert.equal(message.result.protocolVersion, '2025-06-18', 'server must advertise the protocol it actually supports');
+    assert.equal(message.result.serverInfo.name, 'code-map');
+
+    const exited = once(child, 'exit', { signal: AbortSignal.timeout(3_000) });
+    child.stdin.end();
+    const [code] = await exited;
+    assert.equal(code, 0);
+  } finally {
+    lines.close();
+    if (child.exitCode == null && child.signalCode == null) child.kill();
+  }
+});
+
 test('a running MCP server loads an index created later in a parent', { timeout: 10_000 }, async () => {
   const root = repo({ 'src/m.ts': SRC });
   const nested = join(root, 'one', 'two');
@@ -212,6 +424,7 @@ test('a running MCP server loads an index created later in a parent', { timeout:
   const { index } = await buildIndex({ root });
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.MAP_INDEX;
+  env.CODE_MAP_AUTO_INDEX = 'off';
   const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp/server.ts', import.meta.url))], {
     cwd: nested,
     env,

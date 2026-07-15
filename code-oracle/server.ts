@@ -17,13 +17,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readFile as readFileAsync, readdir, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PROTOCOL = '2025-06-18';
+const RESULT_SCHEMA = 2;
 // Readiness by quiescence: the project is "loaded" once tsgo stops emitting
 // log/progress messages for QUIET_MS — far better than a fixed sleep. Bounded by
 // MIN_MS (don't trust a momentary pause) and MAX_MS (never hang).
@@ -48,6 +49,61 @@ type Lang = 'ts' | 'py';
 type ProjectFileKind = Lang | `${Lang}-config`;
 type ProjectFile = { signature: string; kind: ProjectFileKind };
 type ProjectSnapshot = { epoch: string; files: Map<string, ProjectFile> };
+type UnknownRecord = Record<string, unknown>;
+type RpcId = string | number | null;
+
+function isObjectRecord(value: unknown): value is UnknownRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function recordAt(value: unknown, key: string): UnknownRecord | null {
+  if (!isObjectRecord(value)) return null;
+  const nested = value[key];
+  return isObjectRecord(nested) ? nested : null;
+}
+
+function finiteNumberAt(value: UnknownRecord | null, key: string, fallback = 0): number {
+  const candidate = value?.[key];
+  return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : fallback;
+}
+
+export interface OracleCoverage {
+  kind: 'checker-resolved' | 'checker-confirmed' | 'sound-overapproximation' | 'lower-bound';
+  scope: 'project' | 'checker-visible-project' | 'intra-file';
+  residuals: string[];
+}
+
+export interface StaticInstantiationHint {
+  name: string;
+  kind: 'constructor' | 'di-use-class';
+  file: string;
+  line: number;
+  preview: string;
+}
+
+const DYNAMIC_RESIDUALS = ['proxy-dispatch', 'computed-property-call', 'token-only-di'];
+
+export function coverageFor(tool: string, lang: Lang): OracleCoverage {
+  if (lang === 'py' && (tool === 'callers' || tool === 'implementations')) {
+    return {
+      kind: 'lower-bound',
+      scope: 'intra-file',
+      residuals: ['cross-file-references', ...DYNAMIC_RESIDUALS],
+    };
+  }
+  if (tool === 'implementations') {
+    return {
+      kind: 'sound-overapproximation',
+      scope: 'checker-visible-project',
+      residuals: ['runtime-selection', 'dynamic-loading', ...DYNAMIC_RESIDUALS],
+    };
+  }
+  return {
+    kind: tool === 'definition' ? 'checker-resolved' : 'checker-confirmed',
+    scope: 'project',
+    residuals: [...DYNAMIC_RESIDUALS],
+  };
+}
 
 function relevantProjectFiles(projectFiles: Map<string, ProjectFile>, lang: Lang): Map<string, ProjectFile> {
   const configKind = `${lang}-config` as const;
@@ -97,10 +153,10 @@ export function resolveTsgoPackageBin(
 ): string | null {
   try {
     const from = createRequire(anchor);
-    const packageRoot = dirname(from.resolve('@typescript/native-preview/package.json'));
-    from.resolve(`@typescript/native-preview-${platform}-${arch}/package.json`);
-    return [join(packageRoot, 'bin/tsgo'), join(packageRoot, 'bin/tsgo.js')]
-      .find((candidate) => existsSync(candidate)) ?? null;
+    from.resolve('@typescript/native-preview/package.json');
+    const platformRoot = dirname(from.resolve(`@typescript/native-preview-${platform}-${arch}/package.json`));
+    const executable = join(platformRoot, 'lib', platform === 'win32' ? 'tsgo.exe' : 'tsgo');
+    return existsSync(executable) ? executable : null;
   } catch {
     return null;
   }
@@ -115,12 +171,11 @@ function backend(lang: Lang): { cmd: string; args: string[]; languageId: string 
       const override = process.env.TSGO_BIN;
       return { ...tsgoSpawnCommand(override), languageId: 'typescript' };
     }
-    const packageBin = join(HERE, 'node_modules/@typescript/native-preview/bin');
-    const bin = [join(packageBin, 'tsgo'), join(packageBin, 'tsgo.js')].find((candidate) => existsSync(candidate));
     const platform = join(HERE, 'node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`);
+    const native = join(platform, 'lib', process.platform === 'win32' ? 'tsgo.exe' : 'tsgo');
     // npm can leave a wrapper plus another OS's optional package in a shared
     // checkout. Treat that as unavailable now, not as two 40-second LSP timeouts.
-    if (bin && existsSync(platform)) return { ...tsgoSpawnCommand(bin), languageId: 'typescript' };
+    if (existsSync(native)) return { ...tsgoSpawnCommand(native), languageId: 'typescript' };
     // Resolve only from the server module's install tree. Falling back to the
     // queried workspace would execute an untrusted dependency with MCP rights.
     const resolved = resolveTsgoPackageBin(import.meta.url);
@@ -228,23 +283,36 @@ class LspSession {
     this.pending.clear();
   }
 
+  private terminateBackend(): void {
+    try { this.proc.stdin?.destroy(); } catch { /* ignore */ }
+    try { this.proc.kill(); } catch { /* ignore */ }
+  }
+
+  private throwIfFailed(): void {
+    if (this.failure) throw this.failure;
+  }
+
   private onData(d: Buffer): void {
     this.lastMsgAt = Date.now(); // bump on any server activity (logs/progress) — drives quiescence readiness
     for (const body of this.decoder.push(d)) this.handleMessage(body);
   }
 
   private handleMessage(body: Buffer): void {
-    let msg: any;
-    try { msg = JSON.parse(body.toString()); } catch { return; }
-    if (msg.id != null && this.pending.has(msg.id)) {
-      const pending = this.pending.get(msg.id)!;
-      this.pending.delete(msg.id);
+    let parsed: unknown;
+    try { parsed = JSON.parse(body.toString()); } catch { return; }
+    if (!isObjectRecord(parsed)) return;
+    const id = parsed.id;
+    if (typeof id === 'number' && this.pending.has(id)) {
+      const pending = this.pending.get(id)!;
+      this.pending.delete(id);
       clearTimeout(pending.timer);
-      pending.resolve(msg.result);
-    } else if (msg.id != null && msg.method) {
+      pending.resolve(parsed.result);
+    } else if ((typeof id === 'string' || typeof id === 'number') && typeof parsed.method === 'string') {
       // server→client request: must answer or the server stalls (watcher/config).
-      const result = msg.method === 'workspace/configuration' ? (msg.params?.items ?? []).map(() => ({})) : null;
-      this.write({ jsonrpc: '2.0', id: msg.id, result });
+      const params = isObjectRecord(parsed.params) ? parsed.params : null;
+      const items = params && Array.isArray(params.items) ? params.items : [];
+      const result = parsed.method === 'workspace/configuration' ? items.map(() => ({})) : null;
+      this.write({ jsonrpc: '2.0', id, result });
     }
   }
 
@@ -262,7 +330,10 @@ class LspSession {
     if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pending.delete(id)) resolve(null);
+        if (!this.pending.has(id)) return;
+        const error = new Error(`LSP request timed out after ${REQ_TIMEOUT_MS}ms: ${method}`);
+        this.fail(error);
+        this.terminateBackend();
       }, REQ_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer });
       try {
@@ -270,7 +341,9 @@ class LspSession {
       } catch (error) {
         this.pending.delete(id);
         clearTimeout(timer);
-        reject(error);
+        reject(error instanceof Error
+          ? error
+          : new Error('Writing the LSP request failed.', { cause: error }));
       }
     });
   }
@@ -304,6 +377,7 @@ class LspSession {
    * Added/modified sources can be overlaid cheaply. Deletions and project-config
    * changes require a fresh language-server project graph, so the caller restarts. */
   async reconcileProject(snapshot: ProjectSnapshot, lang: Lang): Promise<boolean> {
+    this.throwIfFailed();
     if (this.projectEpoch === snapshot.epoch) return true;
     const projectFiles = snapshot.files;
     const configKind = `${lang}-config` as const;
@@ -340,66 +414,94 @@ class LspSession {
     if (this.warmed) return;
     const start = Date.now();
     for (;;) {
-      if (this.failure) throw this.failure;
+      this.throwIfFailed();
       const elapsed = Date.now() - start;
       if ((Date.now() - this.lastMsgAt > QUIET_MS && elapsed > MIN_MS) || elapsed > MAX_MS) break;
       await new Promise((r) => setTimeout(r, 200));
     }
-    if (this.failure) throw this.failure;
+    this.throwIfFailed();
     this.warmed = true;
   }
 
   /** Run an LSP location query (`references` / `definition` / `implementation`) at a
    * position; return target locations. Handles both Location and LocationLink shapes. */
-  async locate(method: string, file: string, line: number, character: number): Promise<{ uri: string; line: number }[]> {
+  async locate(method: string, file: string, line: number, character: number): Promise<{ uri: string; line: number; character: number }[]> {
     await this.initDone;
     const uri = this.syncFile(file);
     await this.waitReady();
     const params: Record<string, unknown> = { textDocument: { uri }, position: { line, character } };
     if (method === 'textDocument/references') params.context = { includeDeclaration: false };
-    const r = (await this.request(method, params)) as any;
-    const arr = Array.isArray(r) ? r : r ? [r] : [];
-    const locations: { uri: string; line: number }[] = [];
-    for (const location of arr) {
-      const target = location.uri ?? location.targetUri;
-      if (target) locations.push({ uri: target, line: (location.range ?? location.targetRange)?.start?.line ?? 0 });
+    const response = await this.request(method, params);
+    const values = Array.isArray(response) ? response : isObjectRecord(response) ? [response] : [];
+    const locations: { uri: string; line: number; character: number }[] = [];
+    for (const value of values) {
+      if (!isObjectRecord(value)) continue;
+      const target = typeof value.uri === 'string' ? value.uri : typeof value.targetUri === 'string' ? value.targetUri : null;
+      const range = [value.range, value.targetSelectionRange, value.targetRange].find(isObjectRecord) ?? null;
+      const start = recordAt(range, 'start');
+      if (target) locations.push({ uri: target, line: finiteNumberAt(start, 'line'), character: finiteNumberAt(start, 'character') });
     }
     return locations;
   }
 
-  /** Resolve a symbol NAME to its DECLARATION position via the LSP's documentSymbol —
-   * the name's own range (selectionRange), so we anchor on the real declaration and never
-   * on a comment/string/import the way a raw text scan can. Returns null if `name` isn't a
-   * declared symbol in this file (caller then falls back to the comment-skipping text scan).
-   * Among same-name symbols, prefer declaration kinds (function/method/class/…) over vars. */
-  async documentSymbolPosition(file: string, name: string): Promise<{ line: number; character: number } | { ambiguous: OracleSym[] } | null> {
+  /** Flatten the LSP documentSymbol tree while preserving each symbol's
+   * immediate container. Selection ranges anchor on real declarations rather
+   * than comments, strings, or imports. */
+  async documentSymbols(file: string, syncDocument = true): Promise<OracleSym[]> {
     await this.initDone;
-    const uri = this.syncFile(file);
+    // Result files are already part of the checker's project graph. Avoid
+    // didOpen-ing every implementation file merely to rank it: open documents
+    // stay resident in the LSP and a wide hierarchy could otherwise grow memory
+    // with its fan-out. Name resolution still syncs the actively queried file.
+    const uri = syncDocument ? this.syncFile(file) : pathToFileURL(file).href;
     await this.waitReady();
-    const r = (await this.request('textDocument/documentSymbol', { textDocument: { uri } })) as any;
-    if (!Array.isArray(r)) return null;
+    const response = await this.request('textDocument/documentSymbol', { textDocument: { uri } });
+    if (!Array.isArray(response)) return [];
     let fileLines: string[] | null = null;
     const lineText = (ln: number): string => {
       if (!fileLines) { try { fileLines = readFileSync(file, 'utf8').split('\n'); } catch { fileLines = []; } }
       return fileLines[ln] ?? '';
     };
     const out: OracleSym[] = [];
-    const walk = (nodes: any[], container: string | null): void => {
-      for (const n of nodes) {
-        if (n?.name) {
-          const sel = n.selectionRange?.start; // DocumentSymbol: range of the name itself
-          if (sel) out.push({ name: n.name, container, line: sel.line, character: sel.character, kind: n.kind ?? 0 });
-          else if (n.location?.range?.start) { // SymbolInformation: refine column to the identifier
-            const ln = n.location.range.start.line;
-            const col = lineText(ln).indexOf(n.name);
-            out.push({ name: n.name, container: n.containerName ?? container, line: ln, character: col >= 0 ? col : n.location.range.start.character, kind: n.kind ?? 0 });
+    const walk = (nodes: unknown[], container: string | null): void => {
+      for (const value of nodes) {
+        if (!isObjectRecord(value)) continue;
+        const name = typeof value.name === 'string' && value.name ? value.name : null;
+        if (name) {
+          const selectionStart = recordAt(recordAt(value, 'selectionRange'), 'start');
+          if (selectionStart) {
+            out.push({
+              name,
+              container,
+              line: finiteNumberAt(selectionStart, 'line'),
+              character: finiteNumberAt(selectionStart, 'character'),
+              kind: finiteNumberAt(value, 'kind'),
+            });
+          } else {
+            const locationStart = recordAt(recordAt(recordAt(value, 'location'), 'range'), 'start');
+            if (locationStart) { // SymbolInformation: refine column to the identifier
+              const line = finiteNumberAt(locationStart, 'line');
+              const column = lineText(line).indexOf(name);
+              out.push({
+                name,
+                container: typeof value.containerName === 'string' ? value.containerName : container,
+                line,
+                character: column >= 0 ? column : finiteNumberAt(locationStart, 'character'),
+                kind: finiteNumberAt(value, 'kind'),
+              });
+            }
           }
         }
-        if (Array.isArray(n?.children)) walk(n.children, n?.name ?? container);
+        if (Array.isArray(value.children)) walk(value.children, name ?? container);
       }
     };
-    walk(r, null);
-    return resolveNamePosition(out, name);
+    walk(response, null);
+    return out;
+  }
+
+  /** Resolve one declared name; ambiguous containers are surfaced to the caller. */
+  async documentSymbolPosition(file: string, name: string): Promise<{ line: number; character: number } | { ambiguous: OracleSym[] } | null> {
+    return resolveNamePosition(await this.documentSymbols(file), name);
   }
 
   /** Eagerly load the project (open a seed file + wait for quiescence) so the first
@@ -414,8 +516,7 @@ class LspSession {
 
   dispose(): void {
     this.fail(new Error('LSP session disposed.'));
-    try { this.proc.stdin?.destroy(); } catch { /* ignore */ }
-    try { this.proc.kill(); } catch { /* ignore */ }
+    this.terminateBackend();
   }
 }
 
@@ -459,6 +560,32 @@ export function resolveNamePosition(
   const cands = [...byContainer.values()];
   if (cands.length > 1) return { ambiguous: cands };
   return { line: cands[0].line, character: cands[0].character };
+}
+
+function implementationOwner(symbols: OracleSym[], line: number, character: number, queriedName: string | undefined): string | null {
+  const simpleName = queriedName ? queriedName.slice(queriedName.lastIndexOf('.') + 1) : null;
+  let best: { owner: string; score: number } | null = null;
+  for (const symbol of symbols) {
+    if (symbol.line !== line) continue;
+    const owner = symbol.container ?? (symbol.kind === 5 ? symbol.name : null);
+    if (!owner) continue;
+    const score = Math.abs(symbol.character - character) + (simpleName && symbol.name !== simpleName ? 1000 : 0);
+    if (!best || score < best.score) best = { owner, score };
+  }
+  return best?.owner ?? null;
+}
+
+async function documentSymbolsByFile(session: LspSession, files: string[]): Promise<Map<string, OracleSym[]>> {
+  const symbols = new Map<string, OracleSym[]>();
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < files.length) {
+      const file = files[cursor++];
+      symbols.set(file, await session.documentSymbols(file, false));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, files.length) }, worker));
+  return symbols;
 }
 
 // ── symbol → position, TEXT fallback (used only when the LSP can't resolve the name).
@@ -548,9 +675,19 @@ async function acquireSession(
     entry = sessions.get(key);
     if (entry?.idleTimer) clearTimeout(entry.idleTimer);
     if (entry) entry.idleTimer = null;
-    if (entry && !(await entry.session.reconcileProject(snapshot, lang))) {
-      disposeSession(key, entry);
-      entry = undefined;
+    if (entry) {
+      const candidate = entry;
+      let reusable = false;
+      try {
+        reusable = await candidate.session.reconcileProject(snapshot, lang);
+      } catch {
+        // A failed checker is poisoned. Retire it here instead of leaving an
+        // entry with its idle timer cleared and no future path to collection.
+      }
+      if (!reusable) {
+        disposeSession(key, candidate);
+        entry = undefined;
+      }
     }
     if (stopping) throw new Error('code-oracle is shutting down.');
     if (!entry) {
@@ -694,15 +831,178 @@ async function scanProject(root: string): Promise<ProjectSnapshot> {
   return { epoch: `${count.toString(36)}:${xor.toString(36)}:${sum.toString(36)}`, files };
 }
 
-type Cache = { epoch: Epoch; entries: Record<string, unknown> };
-type CacheDelta = { epoch: Epoch; key: string; value: unknown };
+type LexState = 'code' | 'line-comment' | 'block-comment' | 'single-quote' | 'double-quote' | 'template';
+
+type StaticHintVisitor = (
+  name: string,
+  kind: StaticInstantiationHint['kind'],
+  line: number,
+  previewStart: number,
+  previewEnd: number,
+) => void;
+
+function visitStaticInstantiationHints(text: string, visit: StaticHintVisitor): void {
+  const qualifiedName = '[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)*';
+  const pattern = new RegExp(`\\b(?:new\\s+(${qualifiedName})|useClass\\s*:\\s*(${qualifiedName}))`, 'g');
+  let state: LexState = 'code';
+  let cursor = 0;
+  let line = 1;
+  let lineStart = 0;
+  let lineEnd = -1;
+  let linePreviewStart = 0;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    while (cursor < match.index) {
+      const char = text[cursor];
+      const next = text[cursor + 1];
+      if (state === 'code') {
+        if (char === '/' && next === '/') { state = 'line-comment'; cursor += 2; continue; }
+        if (char === '/' && next === '*') { state = 'block-comment'; cursor += 2; continue; }
+        if (char === "'") state = 'single-quote';
+        else if (char === '"') state = 'double-quote';
+        else if (char === '`') state = 'template';
+      } else if (state === 'line-comment') {
+        if (char === '\n') state = 'code';
+      } else if (state === 'block-comment') {
+        if (char === '*' && next === '/') { state = 'code'; cursor += 2; continue; }
+      } else {
+        if (char === '\\') {
+          if (next === '\n') {
+            line++;
+            lineStart = cursor + 2;
+            lineEnd = -1;
+            linePreviewStart = lineStart;
+          }
+          cursor += 2;
+          continue;
+        }
+        if ((state === 'single-quote' && char === "'")
+          || (state === 'double-quote' && char === '"')
+          || (state === 'template' && char === '`')) state = 'code';
+      }
+      if (char === '\n') {
+        line++;
+        lineStart = cursor + 1;
+        lineEnd = -1;
+        linePreviewStart = lineStart;
+      }
+      cursor++;
+    }
+    if (state !== 'code') continue;
+    const qualified = (match[1] ?? match[2]).replace(/\s/g, '');
+    if (lineEnd < match.index) {
+      const nextNewline = text.indexOf('\n', match.index);
+      lineEnd = nextNewline < 0 ? text.length : nextNewline;
+      linePreviewStart = lineStart;
+      while (linePreviewStart < lineEnd) {
+        const code = text.charCodeAt(linePreviewStart);
+        if (code !== 9 && code !== 13 && code !== 32) break;
+        linePreviewStart++;
+      }
+    }
+    visit(
+      qualified.slice(qualified.lastIndexOf('.') + 1),
+      match[1] ? 'constructor' : 'di-use-class',
+      line,
+      linePreviewStart,
+      Math.min(lineEnd, linePreviewStart + 160),
+    );
+  }
+}
+
+/** Cheap, conservative source hints for implementation ranking. These are not
+ * runtime observations: dead code and same-name classes can still produce a
+ * hint, so callers must never use them to remove possible implementations. */
+export function scanStaticInstantiationHints(text: string, file: string): StaticInstantiationHint[] {
+  const hints: StaticInstantiationHint[] = [];
+  visitStaticInstantiationHints(text, (name, kind, line, previewStart, previewEnd) => {
+    hints.push({
+      name,
+      kind,
+      file,
+      line,
+      preview: text.slice(previewStart, previewEnd).trimEnd(),
+    });
+  });
+  return hints;
+}
+
+type InstantiationIndex = Map<string, StaticInstantiationHint[]>;
+const INSTANTIATION_CACHE_MAX = 2;
+const STATIC_HINTS_PER_NAME = 3;
+// Bounds simultaneously resident source buffers, not files scanned or results.
+const INSTANTIATION_SCAN_WORKERS = 8;
+const instantiationCache = new Map<string, { epoch: Epoch; index: InstantiationIndex }>();
+const instantiationFlights = new Map<string, Promise<InstantiationIndex>>();
+
+async function scanInstantiationIndex(root: string, snapshot: ProjectSnapshot): Promise<InstantiationIndex> {
+  const files = [...snapshot.files].filter(([, info]) => info.kind === 'ts').map(([path]) => path);
+  const index: InstantiationIndex = new Map();
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < files.length) {
+      const path = files[cursor++];
+      let text: string;
+      try { text = await readFileAsync(path, 'utf8'); } catch { continue; }
+      const rel = relative(root, path).replace(/\\/g, '/');
+      visitStaticInstantiationHints(text, (name, kind, line, previewStart, previewEnd) => {
+        const signals = index.get(name);
+        if (signals && signals.length >= STATIC_HINTS_PER_NAME) return;
+        const hint = { name, kind, file: rel, line, preview: text.slice(previewStart, previewEnd).trimEnd() };
+        if (!signals) index.set(name, [hint]);
+        else signals.push(hint);
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(INSTANTIATION_SCAN_WORKERS, files.length) }, worker));
+  return index;
+}
+
+function instantiationIndexFor(root: string, snapshot: ProjectSnapshot): Promise<InstantiationIndex> {
+  const cached = instantiationCache.get(root);
+  if (cached?.epoch === snapshot.epoch) {
+    instantiationCache.delete(root);
+    instantiationCache.set(root, cached);
+    return Promise.resolve(cached.index);
+  }
+  const flightKey = `${root}\0${snapshot.epoch}`;
+  const active = instantiationFlights.get(flightKey);
+  if (active) return active;
+  const flight = scanInstantiationIndex(root, snapshot).then((index) => {
+    if (!stopping) {
+      instantiationCache.delete(root);
+      instantiationCache.set(root, { epoch: snapshot.epoch, index });
+      if (instantiationCache.size > INSTANTIATION_CACHE_MAX) {
+        const oldest = instantiationCache.keys().next().value as string | undefined;
+        if (oldest !== undefined) instantiationCache.delete(oldest);
+      }
+    }
+    return index;
+  }).finally(() => {
+    if (instantiationFlights.get(flightKey) === flight) instantiationFlights.delete(flightKey);
+  });
+  instantiationFlights.set(flightKey, flight);
+  return flight;
+}
+
+type Cache = { schema: number; epoch: Epoch; entries: Record<string, unknown> };
+type CacheDelta = { schema: number; epoch: Epoch; key: string; value: unknown };
 const caches = new Map<string, Cache>();
 const cacheFile = (root: string) => join(CACHE_DIR, `${sha16(root)}.json`);
 const cacheLogFile = (root: string) => join(CACHE_DIR, `${sha16(root)}.jsonl`);
+const emptyCache = (): Cache => ({ schema: RESULT_SCHEMA, epoch: '', entries: {} });
 function loadCache(root: string): Cache {
   let c = caches.get(root);
   if (c) return c;
-  try { c = JSON.parse(readFileSync(cacheFile(root), 'utf8')) as Cache; } catch { c = { epoch: '', entries: {} }; }
+  try {
+    const parsed = JSON.parse(readFileSync(cacheFile(root), 'utf8')) as Partial<Cache> | null;
+    c = parsed?.schema === RESULT_SCHEMA
+      && typeof parsed.epoch === 'string'
+      && parsed.entries !== null
+      && typeof parsed.entries === 'object'
+      && !Array.isArray(parsed.entries)
+      ? parsed as Cache
+      : emptyCache();
+  } catch { c = emptyCache(); }
   try {
     const log = readFileSync(cacheLogFile(root), 'utf8');
     let start = 0;
@@ -714,7 +1014,7 @@ function loadCache(root: string): Cache {
       if (!line) continue;
       try {
         const delta = JSON.parse(line) as CacheDelta;
-        if (delta.epoch === c.epoch && typeof delta.key === 'string') c.entries[delta.key] = delta.value;
+        if (delta.schema === RESULT_SCHEMA && delta.epoch === c.epoch && typeof delta.key === 'string') c.entries[delta.key] = delta.value;
       } catch { /* an interrupted final append is safe to ignore */ }
     }
   } catch { /* no delta log yet */ }
@@ -736,7 +1036,7 @@ function persistCache(root: string, dirty: DirtyCache): void {
     }
     const records: string[] = [];
     for (const key of dirty.keys) {
-      if (Object.hasOwn(cache.entries, key)) records.push(JSON.stringify({ epoch: cache.epoch, key, value: cache.entries[key] } satisfies CacheDelta));
+      if (Object.hasOwn(cache.entries, key)) records.push(JSON.stringify({ schema: RESULT_SCHEMA, epoch: cache.epoch, key, value: cache.entries[key] } satisfies CacheDelta));
     }
     if (records.length) appendFileSync(cacheLogFile(root), `${records.join('\n')}\n`);
   } catch { /* best effort */ }
@@ -788,25 +1088,25 @@ function sourceLine(file: string, line0: number, token: string): string {
   return cached.text.slice(start, end).trim().slice(0, 160);
 }
 
-const METHOD: Record<string, string> = {
+const METHOD = {
   callers: 'textDocument/references',
   definition: 'textDocument/definition',
   implementations: 'textDocument/implementation',
-};
+} as const;
+type ToolName = keyof typeof METHOD;
 const queryFlights = new Map<string, Promise<unknown>>();
 // `ENGINE` is substituted with the actual backend (tsgo for TS/JS, ty for Python) per query.
-const NOTE: Record<string, string> = {
+const NOTE: Record<ToolName, string> = {
   callers: 'Type-aware callers via ENGINE references (checker grade; resolves through interfaces / standard DI). Truly dynamic dispatch (Proxy, obj[k](), token-only DI) stays invisible — a residual for the agent to read.',
   definition: 'Type-aware definition(s) via ENGINE — where this symbol/expression actually resolves (the precise callee), not a name guess.',
-  implementations: 'Implementations via ENGINE (type-aware CHA) — the concrete classes/methods behind an interface/abstract; the over-approximate set that is sound for blast radius.',
+  implementations: 'Implementations via ENGINE (type-aware CHA) — results remain the sound over-approximate blast-radius set. Static construction hints rank likely entries but never remove possible ones and are not runtime observations.',
 };
 
 /** Cross-platform path bridge: accept BOTH WSL (`/mnt/c/...`) and Windows
  * (`C:\...`) paths no matter which OS this server runs on, so ONE server (e.g. a
  * fast win32 tsgo) can serve a Windows IDE and WSL agents (over interop) alike —
  * same files on disk, different path spelling. */
-function toHostPath(p: unknown): any {
-  if (typeof p !== 'string' || !p) return p;
+function toHostPath(p: string): string {
   if (process.platform === 'win32') {
     const m = /^\/mnt\/([a-zA-Z])\/(.*)$/.exec(p);
     return m ? `${m[1].toUpperCase()}:\\${m[2].replace(/\//g, '\\')}` : p;
@@ -815,24 +1115,200 @@ function toHostPath(p: unknown): any {
   return m ? `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}` : p;
 }
 
+type Position = { line: number; character: number };
+type ParsedQueryArgs = {
+  fileInput: string;
+  rootInput: string | null;
+  name: string | null;
+  explicit: Position | null;
+  evidence: boolean | undefined;
+};
+type LocatedResult = {
+  absoluteFile: string;
+  line0: number;
+  character: number;
+  file: string;
+  line: number;
+  preview: string;
+};
+
+function parseQueryArgs(tool: ToolName, args: Record<string, unknown>): ParsedQueryArgs | { error: string } {
+  if (typeof args.file !== 'string' || !args.file.trim()) {
+    return { error: `${tool} needs \`file\` as a non-empty string (and \`name\` or line/character).` };
+  }
+  const fileInput = toHostPath(args.file.trim());
+  let rootInput: string | null = null;
+  if (args.root !== undefined) {
+    if (typeof args.root !== 'string' || !args.root.trim()) return { error: '`root` must be a non-empty string when provided.' };
+    rootInput = toHostPath(args.root.trim());
+  }
+  let name: string | null = null;
+  if (args.name !== undefined) {
+    if (typeof args.name !== 'string' || !args.name.trim()) return { error: '`name` must be a non-empty string when provided.' };
+    name = args.name.trim();
+  }
+  if (args.evidence !== undefined && typeof args.evidence !== 'boolean') {
+    return { error: '`evidence` must be a boolean when provided.' };
+  }
+  const hasLine = args.line !== undefined;
+  const hasCharacter = args.character !== undefined;
+  if (hasLine !== hasCharacter) return { error: '`line` and `character` must be provided together.' };
+  let explicit: Position | null = null;
+  if (hasLine && hasCharacter) {
+    const line = args.line;
+    const character = args.character;
+    if (typeof line !== 'number' || !Number.isSafeInteger(line) || line < 0 ||
+        typeof character !== 'number' || !Number.isSafeInteger(character) || character < 0) {
+      return { error: '`line` and `character` must be non-negative safe integers.' };
+    }
+    explicit = { line, character };
+  }
+  if (!explicit && !name) return { error: `${tool} needs \`name\` or line/character.` };
+  return { fileInput, rootInput, name, explicit, evidence: args.evidence };
+}
+
+async function resolveQueryPosition(
+  session: LspSession,
+  file: string,
+  relFile: string,
+  name: string | null,
+  explicit: Position | null,
+): Promise<{ position: Position } | { error: string; candidates?: { name: string; line: number; character: number }[] }> {
+  if (explicit) return { position: explicit };
+  if (!name) return { error: `could not locate an unnamed symbol in ${relFile}; pass line/character.` };
+  const resolved = await session.documentSymbolPosition(file, name);
+  if (resolved && 'ambiguous' in resolved) {
+    const candidates = resolved.ambiguous.map((candidate) => ({
+      name: candidate.container ? `${candidate.container}.${candidate.name}` : candidate.name,
+      line: candidate.line,
+      character: candidate.character,
+    }));
+    return {
+      error: `"${name}" matches ${candidates.length} declarations in ${relFile}. Re-query with a qualified name (Container.name) or line/character (0-based).`,
+      candidates,
+    };
+  }
+  const position = resolved ?? findPosition(file, name);
+  return position ? { position } : { error: `could not locate symbol "${name}" in ${relFile}; pass line/character.` };
+}
+
+async function collectLocations(
+  session: LspSession,
+  method: string,
+  file: string,
+  position: Position,
+  root: string,
+  snapshot: ProjectSnapshot,
+  epoch: Epoch,
+): Promise<LocatedResult[]> {
+  const locations = await session.locate(method, file, position.line, position.character);
+  const seen = new Set<string>();
+  const located: LocatedResult[] = [];
+  for (const location of locations) {
+    let absoluteFile: string;
+    try { absoluteFile = fileURLToPath(location.uri); } catch { continue; }
+    const dedupeKey = `${absoluteFile}\t${location.line}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    const previewToken = snapshot.files.get(absoluteFile)?.signature ?? epoch;
+    located.push({
+      absoluteFile,
+      line0: location.line,
+      character: location.character,
+      file: relative(root, absoluteFile).replace(/\\/g, '/'),
+      line: location.line + 1,
+      preview: sourceLine(absoluteFile, location.line, previewToken),
+    });
+  }
+  located.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.character - b.character);
+  return located;
+}
+
+async function formatQueryResults(
+  tool: ToolName,
+  lang: Lang,
+  session: LspSession,
+  located: LocatedResult[],
+  name: string | null,
+  instantiationPromise: Promise<InstantiationIndex> | null,
+): Promise<{ out: Record<string, unknown>[]; implementationEvidence?: Record<string, unknown> }> {
+  if (instantiationPromise) {
+    const files = [...new Set(located.map((result) => result.absoluteFile))];
+    const [symbolsByFile, instantiations] = await Promise.all([
+      documentSymbolsByFile(session, files),
+      instantiationPromise,
+    ]);
+    let likelyCount = 0;
+    const out = located.map((result) => {
+      const container = implementationOwner(
+        symbolsByFile.get(result.absoluteFile) ?? [],
+        result.line0,
+        result.character,
+        name ?? undefined,
+      );
+      const signals = container ? instantiations.get(container) ?? [] : [];
+      const likelihood = signals.length ? 'likely' : 'possible';
+      if (likelihood === 'likely') likelyCount++;
+      return {
+        file: result.file,
+        line: result.line,
+        preview: result.preview,
+        container,
+        likelihood,
+        ...(signals.length ? {
+          staticEvidence: signals.map((signal) => ({
+            kind: signal.kind,
+            file: signal.file,
+            line: signal.line,
+            preview: signal.preview,
+          })),
+        } : {}),
+      };
+    });
+    return {
+      out,
+      implementationEvidence: {
+        basis: 'static-source-hints',
+        runtimeObserved: false,
+        possibleCount: out.length,
+        likelyCount,
+        caveat: 'Ranking only: lexical `new`/`useClass` source hints can be false positives, occur in dead code, or collide by class name. Every checker result remains in `results`.',
+      },
+    };
+  }
+
+  const out = located.map((result) => ({ file: result.file, line: result.line, preview: result.preview }));
+  if (tool !== 'implementations') return { out };
+  return {
+    out,
+    implementationEvidence: {
+      basis: lang === 'py' ? 'unavailable-for-lower-bound-backend' : 'not-requested',
+      runtimeObserved: false,
+      possibleCount: out.length,
+      likelyCount: 0,
+      caveat: 'No implementation was filtered; `results` is the possible set.',
+    },
+  };
+}
+
 /** One query path for all three tools: resolve a position, gate on the cache, else
  * ask the warm tsgo session (references / definition / implementation), format. */
-async function query(tool: string, args: Record<string, any>): Promise<unknown> {
-  if (!args.file) return { error: `${tool} needs \`file\` (and \`name\` or line/character).` };
-  args.file = toHostPath(args.file);
-  if (args.root) args.root = toHostPath(args.root);
-  const file = isAbsolute(args.file) ? args.file : resolve(args.root ?? process.cwd(), args.file);
+async function query(tool: ToolName, args: Record<string, unknown>): Promise<unknown> {
+  const parsed = parseQueryArgs(tool, args);
+  if ('error' in parsed) return parsed;
+  const { fileInput, rootInput, name, explicit, evidence } = parsed;
+  const file = isAbsolute(fileInput) ? fileInput : resolve(rootInput ?? process.cwd(), fileInput);
   if (!existsSync(file)) return { error: `file not found: ${file}` };
   const lang = langOf(file);
   if (!lang) return { error: `unsupported file type: ${file} (expected TS/JS or Python).` };
   const be = backend(lang);
   if (!be) return { error: lang === 'ts' ? 'tsgo not found — set TSGO_BIN or `npm install` in code-oracle/.' : 'ty not found — install ty or uvx, or set TY_CMD.' };
-  const explicit = args.line != null && args.character != null ? { line: args.line as number, character: args.character as number } : null;
-  if (!explicit && !args.name) return { error: `${tool} needs \`name\` or line/character.` };
 
-  const root = args.root ? resolve(args.root) : projectRoot(file, lang);
+  const root = rootInput ? resolve(rootInput) : projectRoot(file, lang);
   const relFile = relative(root, file).replace(/\\/g, '/');
-  const cacheKey = `${tool}:${relFile}#${args.name ?? `${explicit!.line}:${explicit!.character}`}`;
+  const includeImplementationEvidence = tool === 'implementations' && lang === 'ts' && evidence !== false;
+  const evidenceVariant = tool === 'implementations' ? `:${includeImplementationEvidence ? 'e1' : 'e0'}` : '';
+  const cacheKey = `v${RESULT_SCHEMA}:${tool}:${relFile}#${name ?? `${explicit!.line}:${explicit!.character}`}${evidenceVariant}`;
 
   // Cache gate: serve instantly (no LSP warmup) when the project hasn't changed.
   const snapshot = await projectSnapshot(root);
@@ -853,36 +1329,22 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
     const lease = await acquireSession(root, lang, be, snapshot);
     try {
       const sess = lease.session;
-      let pos: { line: number; character: number } | null = explicit ?? null;
-      if (!pos && args.name) {
-        const resolved = await sess.documentSymbolPosition(file, args.name);
-        if (resolved && 'ambiguous' in resolved) {
-          const candidates = resolved.ambiguous.map((c) => ({
-            name: c.container ? `${c.container}.${c.name}` : c.name,
-            line: c.line,
-            character: c.character,
-          }));
-          return {
-            error: `"${args.name}" matches ${candidates.length} declarations in ${relFile}. Re-query with a qualified name (Container.name) or line/character (0-based).`,
-            candidates,
-          };
-        }
-        pos = resolved ?? findPosition(file, args.name);
-      }
-      if (!pos) return { error: `could not locate symbol "${args.name}" in ${relFile}; pass line/character.` };
+      const positionResult = await resolveQueryPosition(sess, file, relFile, name, explicit);
+      if ('error' in positionResult) return positionResult;
+      const pos = positionResult.position;
 
-      const locs = await sess.locate(METHOD[tool], file, pos.line, pos.character);
-      const seen = new Set<string>();
-      const out: { file: string; line: number; preview: string }[] = [];
-      for (const r of locs) {
-        const f = fileURLToPath(r.uri);
-        const dk = `${f}\t${r.line}`;
-        if (seen.has(dk)) continue;
-        seen.add(dk);
-        const previewToken = snapshot.files.get(f)?.signature ?? epoch;
-        out.push({ file: relative(root, f).replace(/\\/g, '/'), line: r.line + 1, preview: sourceLine(f, r.line, previewToken) });
-      }
-      out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+      // The optional evidence scan is pure filesystem work; overlap it with the
+      // checker request so it does not add another serial warmup phase.
+      const instantiationPromise = includeImplementationEvidence ? instantiationIndexFor(root, snapshot) : null;
+      const located = await collectLocations(sess, METHOD[tool], file, pos, root, snapshot, epoch);
+      const { out, implementationEvidence } = await formatQueryResults(
+        tool,
+        lang,
+        sess,
+        located,
+        name,
+        instantiationPromise,
+      );
       // Honest guard (regression-verified 2026-06): ty 0.0.50's find-references is INTRA-FILE
       // ONLY — cross-file callers are NOT found (heavily-imported functions returned 0, while
       // grep/`definition` confirm they're used across many files). So for Python, callers/
@@ -894,7 +1356,18 @@ async function query(tool: string, args: Record<string, any>): Promise<unknown> 
       const note = pyRefsCaveat
         ? base + ' ⚠ Python (ty 0.0.50): find-references is INTRA-FILE ONLY here — cross-file callers are NOT found (verified). Treat as a LOWER BOUND / intra-file screen, NOT a complete blast radius. `definition` does resolve cross-file.'
         : base;
-      const result = { tool, symbol: { file: relFile, name: args.name ?? null, position: pos }, root, results: out, count: out.length, cached: false, note, ...(pyRefsCaveat ? { incomplete: true } : {}) };
+      const result = {
+        tool,
+        symbol: { file: relFile, name, position: pos },
+        root,
+        results: out,
+        count: out.length,
+        cached: false,
+        coverage: coverageFor(tool, lang),
+        note,
+        ...(implementationEvidence ? { implementationEvidence } : {}),
+        ...(pyRefsCaveat ? { incomplete: true } : {}),
+      };
       const reset = cache.epoch !== epoch;
       if (reset) { cache.epoch = epoch; cache.entries = {}; } // project changed → drop stale, re-seed
       cache.entries[cacheKey] = result;
@@ -922,6 +1395,7 @@ const INPUT = {
     line: { type: 'number', description: 'Optional 0-based line of the symbol (use with character).' },
     character: { type: 'number', description: 'Optional 0-based column of the symbol.' },
     root: { type: 'string', description: 'Optional project root; default = nearest ancestor tsconfig.json.' },
+    evidence: { type: 'boolean', description: 'For TypeScript/JavaScript implementations, attach bounded static instantiation hints and likely/possible ranking. Defaults to true; false skips that optional project scan. Results are never filtered.' },
   },
   required: ['file'],
 } as const;
@@ -930,7 +1404,7 @@ const TOOLS = [
   {
     name: 'callers',
     description:
-      'Type-aware callers of a symbol — "who calls this", at checker grade via a warm LSP session (tsgo for TS/JS, ty for Python; picked by file extension). Resolves calls through interfaces and standard DI (declaration types) that a structural call graph cannot. First call per project warms it (~seconds); the session stays warm and answers are cached.',
+      'Type-aware callers of a symbol — "who calls this", at checker grade via a warm LSP session (tsgo for TS/JS, ty for Python; picked by file extension). Resolves calls through interfaces and standard DI (declaration types) that a structural call graph cannot. Structured `coverage` names dynamic-dispatch residuals and flags Python references as an intra-file lower bound. First call per project warms it (~seconds); the session stays warm and answers are cached.',
     inputSchema: INPUT,
   },
   {
@@ -940,7 +1414,7 @@ const TOOLS = [
   },
   {
     name: 'implementations',
-    description: 'Implementations of an interface/abstract method — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). The over-approximate set that is sound for blast radius (catches DI-injected impls); fan-out can be wide (an interface with N impls = N sites) — that breadth is the nature of dispatch, biased safely toward over-inclusion. (tsgo for TS/JS, ty for Python.)',
+    description: 'Implementations of an interface/abstract method — the concrete classes/methods behind it (type-aware Class Hierarchy Analysis). `results` always remains the sound over-approximate blast-radius set. For TS/JS, bounded static `new`/`useClass` hints rank entries as likely/possible without filtering; `implementationEvidence.runtimeObserved` stays false. Python is explicitly a lower bound. (tsgo for TS/JS, ty for Python.)',
     inputSchema: INPUT,
   },
 ];
@@ -973,20 +1447,25 @@ function send(msg: unknown): Promise<void> {
   return queued;
 }
 
-async function handle(req: any): Promise<void> {
+async function handle(req: UnknownRecord): Promise<void> {
   if (stopping) return;
-  const { id, method, params } = req;
+  const rawId = req.id;
+  const id: RpcId | undefined = rawId === null || typeof rawId === 'string' || typeof rawId === 'number' ? rawId : undefined;
+  const method = typeof req.method === 'string' ? req.method : undefined;
+  const params = isObjectRecord(req.params) ? req.params : null;
   const isRequest = id !== undefined && id !== null;
   try {
     switch (method) {
       case 'initialize':
-        return send({ jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion ?? PROTOCOL, capabilities: { tools: {} }, serverInfo: { name: 'code-oracle', version: '0.1.0' } } });
+        return send({ jsonrpc: '2.0', id, result: { protocolVersion: PROTOCOL, capabilities: { tools: {} }, serverInfo: { name: 'code-oracle', version: '0.1.0' } } });
       case 'tools/list':
         return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
       case 'tools/call': {
-        const name = params?.name;
-        if (!METHOD[name]) throw new Error(`unknown tool: ${name}`);
-        const result = await query(name, params.arguments ?? {});
+        const tool = params?.name;
+        if (typeof tool !== 'string' || !(tool in METHOD)) throw new Error(`unknown tool: ${String(tool)}`);
+        const argumentsValue = params?.arguments;
+        if (argumentsValue !== undefined && !isObjectRecord(argumentsValue)) throw new Error('tool `arguments` must be an object.');
+        const result = await query(tool as ToolName, argumentsValue ?? {});
         return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] } });
       }
       case 'ping':
@@ -998,7 +1477,8 @@ async function handle(req: any): Promise<void> {
         if (isRequest) await send({ jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } });
     }
   } catch (e) {
-    if (isRequest) await send({ jsonrpc: '2.0', id, error: { code: -32603, message: (e as Error).message } });
+    const message = e instanceof Error ? e.message : 'unknown internal error';
+    if (isRequest) await send({ jsonrpc: '2.0', id, error: { code: -32603, message } });
   }
 }
 
@@ -1065,17 +1545,18 @@ function main(): void {
     if (stopping) return;
     const t = line.trim();
     if (!t) return;
-    let req: any;
+    let req: unknown;
     try { req = JSON.parse(t); } catch { return; }
-    void handle(req);
+    if (isObjectRecord(req)) void handle(req);
   });
   rl.once('close', shutdown); // stdin EOF is the MCP client's lifecycle boundary
   process.stdout.once('error', shutdown);
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
   process.once('exit', disposeAll);
-  void prewarm().catch((error) => {
-    if (!stopping) process.stderr.write(`code-oracle: pre-warm failed: ${error}\n`);
+  void prewarm().catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : 'unknown error';
+    if (!stopping) process.stderr.write(`code-oracle: pre-warm failed: ${detail}\n`);
   });
 }
 
@@ -1092,6 +1573,8 @@ export function disposeAll(): void {
   sessionQueues.clear();
   epochCache.clear();
   epochFlights.clear();
+  instantiationCache.clear();
+  instantiationFlights.clear();
   queryFlights.clear();
   lineCache.clear();
   caches.clear();

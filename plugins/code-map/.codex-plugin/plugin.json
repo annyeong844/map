@@ -1,6 +1,6 @@
 {
   "name": "code-map",
-  "version": "0.9.0-rc.1+codex.20260714",
+  "version": "0.9.0-rc.1+codex.20260715065658",
   "description": "Codex-first routing for exact, drift-resistant code-map symbol reads.",
   "author": {
     "name": "annyeong844",
@@ -22,13 +22,15 @@
   "interface": {
     "displayName": "code-map",
     "shortDescription": "Route known symbol reads through code-map's exact MCP tool.",
-    "longDescription": "A Codex-first retrieval skill for indexed repositories: use rg only to discover unknown locations, then read known symbols through code-map in one exact or batched call. It avoids redundant grep-then-read loops and refreshes working sets safely after edits.",
+    "longDescription": "A Codex-first retrieval skill for repositories served by code-map: use rg only to discover unknown locations, then read known symbols in one exact or batched call. It avoids redundant grep-then-read loops, explains lazy automatic indexing, and diagnoses stale long-lived MCP processes.",
     "developerName": "annyeong844",
     "category": "Productivity",
     "capabilities": [
       "Exact symbol reads",
       "Drift-resistant retrieval",
-      "Batch MCP reads"
+      "Batch MCP reads",
+      "Lazy automatic indexing",
+      "Live MCP diagnostics"
     ],
     "defaultPrompt": [
       "Read these known symbols with code-map.",

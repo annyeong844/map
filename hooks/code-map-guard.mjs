@@ -7,7 +7,7 @@
 // moment of regression — non-blocking (permissionDecision: "allow" + additionalContext),
 // throttled so it nudges periodically (a "specific turn"), not on every command.
 //
-// Fail-open everywhere: any error or non-match just lets the tool call proceed.
+// Every error path fails open; a non-match also lets the tool call proceed.
 // Inert outside code-map repos (gated on a .map-index.json above the cwd).
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -53,10 +53,10 @@ if (!bodyRead && !discovery) proceed();
 const WINDOW_MS = 90_000;
 const state = join(tmpdir(), `code-map-guard-${session}.json`);
 let last = 0;
-try { last = Number(JSON.parse(readFileSync(state, 'utf8')).last) || 0; } catch {}
+try { last = Number(JSON.parse(readFileSync(state, 'utf8')).last) || 0; } catch { /* absent/corrupt throttle state means no prior reminder */ }
 const now = Date.now();
 if (now - last < WINDOW_MS) proceed();
-try { writeFileSync(state, JSON.stringify({ last: now })); } catch {}
+try { writeFileSync(state, JSON.stringify({ last: now })); } catch { /* fail open when throttle persistence is unavailable */ }
 
 const reminder = bodyRead
   ? 'code-map routing — this repo is indexed (.map-index.json). Read a known symbol body with the code-map `read` tool (by `path#name` or id), not cat/sed/head/tail: `read` re-anchors when the file has drifted and returns just the symbol. For several known refs, make one batched `read` (refs: [...]). Do not shell-read a body you can fetch by coordinate.'

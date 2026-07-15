@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractSymbols, type ImportEdge, isPython, type SymbolRec } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
-import { listSourceFiles } from './files.ts';
+import { scanIndexDrift, type IndexDriftScan } from './index-drift.ts';
 import { resolvePythonCommand } from './python-command.ts';
 import { INDEX_VERSION, type FileStat, type MapEntry, type MapIndex } from './types.ts';
 import { buildLineIndex, firstLine, indexedLineAt, token } from './util.ts';
@@ -26,13 +26,19 @@ interface PyParse {
   fileRefs: Record<string, Record<string, number>>;
   filesMissing: string[];
 }
-function runPyBackend(root: string, files: string[], targets: string[]): Promise<PyParse> {
+function runPyBackend(root: string, files: string[], targets: string[], signal?: AbortSignal): Promise<PyParse> {
   return new Promise((res, rej) => {
     let python;
     try {
       python = resolvePythonCommand();
     } catch (error) {
-      rej(error);
+      rej(error instanceof Error
+        ? error
+        : new Error('Python command resolution failed.', { cause: error }));
+      return;
+    }
+    if (signal?.aborted) {
+      rej(new Error('Index build aborted.'));
       return;
     }
     const p = spawn(python.command, [...python.args, PY_BACKEND, root], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -41,11 +47,20 @@ function runPyBackend(root: string, files: string[], targets: string[]): Promise
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      try { p.kill(); } catch { /* already gone */ }
+      rej(new Error('Index build aborted.'));
+    };
     const fail = (reason: string): void => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', onAbort);
       rej(new Error(`Python backend failed (${python.display}): ${reason}. Set CODE_MAP_PYTHON to a working Python 3 executable.`));
     };
+    signal?.addEventListener('abort', onAbort, { once: true });
     p.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); stdoutBytes += chunk.length; });
     p.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); stderrBytes += chunk.length; });
     p.stdin.on('error', (e) => fail(e.message));
@@ -59,6 +74,7 @@ function runPyBackend(root: string, files: string[], targets: string[]): Promise
       try {
         const parsed = JSON.parse(Buffer.concat(stdout, stdoutBytes).toString()) as PyParse;
         settled = true;
+        signal?.removeEventListener('abort', onAbort);
         res(parsed);
       } catch (e) {
         fail(`returned invalid JSON${e instanceof Error ? `: ${e.message}` : ''}`);
@@ -90,24 +106,6 @@ async function readAll(root: string, files: string[], concurrency = READ_CONCURR
 }
 
 /** Concurrent stat — a read-free change signal, cheaper than reading on a mount. */
-async function statAll(root: string, files: string[], concurrency = 64): Promise<Map<string, FileStat | null>> {
-  const out = new Map<string, FileStat | null>();
-  let i = 0;
-  const worker = async (): Promise<void> => {
-    while (i < files.length) {
-      const f = files[i++];
-      try {
-        const s = await stat(join(root, f));
-        out.set(f, { mtimeMs: s.mtimeMs, size: s.size, ctimeMs: s.ctimeMs, ino: s.ino });
-      } catch {
-        out.set(f, null);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
-  return out;
-}
-
 export interface BuildOptions {
   /** Source root to index. The only required input — the map parses it itself. */
   root: string;
@@ -115,6 +113,10 @@ export interface BuildOptions {
   previous?: MapIndex | null;
   /** Ignore `previous` and rebuild every file. */
   force?: boolean;
+  /** Reuse a drift scan already performed by an automatic-index gate. */
+  scan?: IndexDriftScan;
+  /** Abort external parser work when the owning MCP connection closes. */
+  signal?: AbortSignal;
 }
 
 export interface BuildReport {
@@ -192,37 +194,17 @@ function canReuseFanIn(
  */
 export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const root = resolve(opts.root);
-  const files = listSourceFiles(root);
-
-  // Incremental: a file's coordinates depend only on its own bytes, so an
-  // unchanged stat (mtime+size) means its entries can be reused untouched.
-  const prev =
-    opts.previous && !opts.force && opts.previous.meta.version === INDEX_VERSION && opts.previous.fileStats && opts.previous.meta.root === root ? opts.previous : null;
-
-  const stats = await statAll(root, files);
-  const changedFiles: string[] = [];
-  const reusableFiles: string[] = [];
-  for (const file of files) {
-    const st = stats.get(file) ?? null;
-    const pv = prev?.fileStats[file];
-    const reusable =
-      !!pv &&
-      !!st &&
-      prev!.fileTokens[file] !== undefined &&
-      pv.mtimeMs === st.mtimeMs &&
-      pv.size === st.size &&
-      // ctime/ino guard a same-size edit with a restored mtime; only enforced when the
-      // prior index recorded them (older indexes omit them → fall back to mtime+size).
-      (pv.ctimeMs === undefined || pv.ctimeMs === st.ctimeMs) &&
-      (pv.ino === undefined || pv.ino === st.ino);
-    if (reusable) reusableFiles.push(file);
-    else changedFiles.push(file);
-  }
+  if (opts.signal?.aborted) throw new Error('Index build aborted.');
+  const drift = opts.scan && opts.scan.root === root && !opts.force
+    ? opts.scan
+    : await scanIndexDrift(root, opts.previous, !!opts.force);
+  const { files, stats, changedFiles, reusableFiles } = drift;
+  const prev = drift.compatible ? drift.previous : null;
 
   // True no-op: stats are identical and no source file appeared/disappeared.
   // Return the prior object directly; fan-in, entry cloning, sorting and JSON
   // preparation would all reproduce bytes the caller intentionally won't save.
-  if (prev && changedFiles.length === 0 && prev.meta.fileCount === files.length) {
+  if (prev && drift.totalChanged === 0) {
     let counts = prev.meta.counts;
     if (!counts) {
       let methods = 0;
@@ -288,7 +270,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const pyByFile = new Map<string, PySymbolRec[]>();
   let py: PyParse | null = null;
   if (pyChanged.length) {
-    py = await runPyBackend(root, pyFiles, pyChanged);
+    py = await runPyBackend(root, pyFiles, pyChanged, opts.signal);
     for (const rec of py.entries) {
       const a = pyByFile.get(rec.file);
       if (a) a.push(rec);
@@ -299,6 +281,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   // Preserve deterministic file order, but release source text after each
   // existing 32-file I/O batch instead of retaining every changed JS/TS file.
   for (let batchStart = 0; batchStart < changedFiles.length; batchStart += READ_CONCURRENCY) {
+    if (opts.signal?.aborted) throw new Error('Index build aborted.');
     const batch = changedFiles.slice(batchStart, batchStart + READ_CONCURRENCY);
     const text = await readAll(root, batch.filter((file) => !isPython(file)));
     for (const file of batch) {
@@ -437,6 +420,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     fileImports,
     entries,
   };
+  if (opts.signal?.aborted) throw new Error('Index build aborted.');
   return {
     index,
     filesIndexed: files.length,

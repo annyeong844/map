@@ -65,15 +65,21 @@ npm install -g @annyeong844/code-map@next
 map setup codex --apply
 # Other hosts: map setup claude --apply  |  map setup gemini --apply
 
-# 3. index the repo you want your agent to read
+# 3. optional eager warm-up (the first MCP read can create this automatically)
 cd /path/to/your-repo && map index --root .  # writes ./.map-index.json
 ```
 
 That's it — your agent now has one tool, `read`. For the **−19% / −67%** efficiency win on
 Codex you also tell it *when* to use code-map (one line); see *Wiring it for real* below.
 When launched inside a repo, the MCP server auto-detects its index. A global server can serve
-many repos: each `read` selects one with `root` (the bundled skill supplies it). Re-indexed files
-auto-reload with no reconnect.
+many repos: each `read` selects one with `root` (the bundled skill supplies it). A missing or
+incompatible index is built lazily. Source changes only mark an O(1) dirty generation; the next
+read performs one shared O(files) stat scan and rebuilds when drift reaches
+`ceil(sqrt(project files))`. A new-symbol miss also rebuilds smaller drift and retries once.
+MCP `initialize` never parses or prepares an index, so repository size cannot block the handshake;
+the first `read` owns that work and stdout backpressure bounds queued response bytes.
+There is no background parser or polling child to orphan. Set `CODE_MAP_AUTO_INDEX=off` to opt out;
+`CODE_MAP_AUTO_INDEX_POLL_MS` changes the on-call fallback interval (default 2000 ms).
 
 ---
 
@@ -107,13 +113,20 @@ map stats                                    # index overview
 Add `--json` for machine output. **Search with your own `grep`** — feed the `file:line` or
 symbol name you find to `read`. As an MCP tool it's the same `read` (absolute repo `root`, single
 `ref`, a `refs` array for batch, optional `snippet`). Windows and `/mnt/<drive>/...` WSL root
-spellings are interchangeable.
+spellings are interchangeable. If a Windows-hosted MCP reads a repo on native WSL ext4, pass the
+repo's `\\wsl.localhost\<distro>\...` UNC path as `root`; `ref` stays repo-relative (`path#symbol`).
 
 To refresh a prior MCP working set after edits, send the same `refs` with
 `changedOnly: true`. The long-lived server compares against the slices it actually returned,
 so an automatic index rebuild cannot turn an edited symbol into a false `unchanged`; a ref with
 no session baseline is returned conservatively. The one-shot `map changed` CLI remains
 index-relative because it has no prior session.
+
+Index bytes hot-reload; MCP server code and client configuration do not. If a session may still
+be running an older command or file, pass `diagnostics: true`. The response reports the live
+instance id, pid, start time, entrypoint, server file, source identities, and `restartRequired`.
+When that flag is true—or the reported entrypoint is not the one you configured—start a new MCP
+session before using the result as evidence.
 
 ---
 
@@ -270,10 +283,11 @@ that checkout as above. Core code-map remains independently installable and one-
 
 GA `typescript@7.0.2` exposes the build compiler as `tsc`, but not the `tsgo` launcher that
 code-oracle uses for its LSP server. Code-oracle therefore pins the current
-`@typescript/native-preview` LSP build. Its launcher changed from `bin/tsgo.js` to
-extensionless `bin/tsgo`; both layouts are detected. Node package resolution from the trusted
-server install tree also supports hoisted workspace/pnpm layouts without executing a dependency
-from the queried workspace; `TSGO_BIN` remains an explicit override.
+`@typescript/native-preview` LSP build. Package-managed installs resolve the platform's native
+`tsgo` executable directly instead of retaining a Node launcher plus its child; explicit
+`TSGO_BIN` launchers remain supported. Node package resolution from the trusted server install
+tree also supports hoisted workspace/pnpm layouts without executing a dependency from the
+queried workspace.
 
 Sessions start lazily on the first checker query (~seconds–20s by repo size); set
 `CODE_ORACLE_PREWARM=1` only when paying that cost at startup is worthwhile. Warm sessions are
@@ -283,6 +297,15 @@ Concurrent queries for one root share the same exact fingerprint scan, and ident
 queries share one in-flight LSP request. With the default zero fingerprint TTL, the completed
 file map is released immediately rather than retained. Persistent answers write one full
 snapshot per project epoch and append same-epoch deltas, avoiding quadratic cache rewrites.
+An LSP request timeout is a hard checker failure, never an empty result: the poisoned backend is
+terminated immediately and the next query starts a fresh session. MCP and LSP JSON are validated
+as untrusted input before paths, caches, or checker state are touched.
+Every successful answer includes structured `coverage`. `implementations.results` always keeps the full
+checker-visible possible set; TS/JS additionally marks each entry `likely` or `possible` from direct
+`new Class` / `useClass: Class` source hints. That ranking is for reading order only:
+`implementationEvidence.runtimeObserved` is always `false`, lexical false positives, name collisions,
+and dead code remain possible, and `evidence: false` skips the optional project scan without changing
+the result set.
 **Cross-platform:** code-oracle normalizes `/mnt/c/…` ↔ `C:\…` paths,
 so *one* server serves both a Windows IDE and WSL agents (over interop) — e.g. a fast **win32** build
 can serve WSL clients too, dodging the `/mnt/c` drvfs penalty (~38s → ~4s on the same repo).
@@ -344,10 +367,10 @@ code-map can *replace* (not augment) the search.
 
 ```
 src/
-  core/    types · files · extract-symbols (oxc) · fan-in · build-index · locate · read · store
+  core/    types · files · extract-symbols (oxc) · fan-in · index-drift · build-index · locate · read · store
   py/      extract.py   (Python: stdlib ast → the same per-file primitives)
   cli/     main.ts      (index / read / changed / stats / setup / version)
-  mcp/     server.ts    (the single `read` tool, auto-reload)
+  mcp/     server.ts    (the single `read` tool, lazy auto-index + live-process diagnostics)
 test/      extract · exact-slice · methods · relocation · anchor-lost · incremental · fan-in
            · snippet-aim · batch · path-traversal refusal · Python
 ```
@@ -366,7 +389,9 @@ cross-file and accurately, but `references` is intra-file only** — so Python `
 lower-bound intra-file screen (flagged `incomplete: true`). For complete Python callers, use
 `grep` (100% recall); we deliberately don't add a heavier Python references backend. Truly
 dynamic dispatch (token-only DI, `Proxy`, `obj[k]()`) is invisible to any checker. Its own
-`package.json` + tests (`cd code-oracle && npm test`).
+`package.json` + tests (`cd code-oracle && npm test`). Responses make those boundaries
+machine-readable through `coverage`: TypeScript callers are checker-confirmed, implementations
+are a checker-visible over-approximation, and Python references are an intra-file lower bound.
 
 </details>
 

@@ -80,7 +80,7 @@ function run(command: string, args: string[]): RunResult {
   };
 }
 
-function readJson(command: string, args: string[]): unknown | null {
+function readJson(command: string, args: string[]): unknown {
   const result = run(command, args);
   if (result.status !== 0) return null;
   try { return JSON.parse(result.stdout) as unknown; } catch { return null; }

@@ -64,14 +64,21 @@ npm install -g @annyeong844/code-map@next
 map setup codex --apply
 # 다른 호스트: map setup claude --apply  |  map setup gemini --apply
 
-# 3. 에이전트가 읽을 레포를 인덱싱
+# 3. 선택적 사전 워밍업 (첫 MCP read가 자동 생성할 수도 있음)
 cd /path/to/your-repo && map index --root .  # ./.map-index.json 생성
 ```
 
 끝 — 이제 에이전트엔 도구 하나 `read`가 생겼어요. Codex에서 **−19% / −67%** 효율 이득까지
 보려면 *언제* code-map을 쓸지 한 줄로 알려줘야 합니다(아래 *실전 배선* 참고). 레포 안에서
 시작한 MCP는 인덱스를 자동 탐지하고, 전역 MCP 하나는 각 `read`의 `root`로 여러 레포를
-전환합니다(동봉 스킬이 전달). 재인덱싱도 자동 리로드 — 재연결 불필요.
+전환합니다(동봉 스킬이 전달). 없거나 호환되지 않는 인덱스는 첫 읽기에서 지연 생성합니다.
+소스 변경 이벤트는 O(1) dirty 세대만 올리고, 다음 읽기가 공유된 O(파일 수) stat 스캔을 한 번
+수행해 변경량이 `ceil(sqrt(프로젝트 파일 수))`에 닿으면 증분 재빌드합니다. 새 심볼을 요청했는데
+못 찾으면 작은 변경도 재빌드하고 한 번 재시도해요. 백그라운드 파서나 polling 자식은 없어
+오르펀으로 남지 않습니다. MCP `initialize`에서는 인덱스를 읽거나 lookup을 준비하지 않으므로
+레포 크기가 handshake를 막지 않습니다. 그 비용은 첫 `read`가 맡고, stdout backpressure가
+대기 응답 바이트를 제한합니다. 끄려면 `CODE_MAP_AUTO_INDEX=off`, 호출 시 fallback 검사 간격은
+`CODE_MAP_AUTO_INDEX_POLL_MS`(기본 2000ms)로 바꿀 수 있어요.
 
 ---
 
@@ -105,11 +112,20 @@ map stats                                    # 인덱스 개요
 기계 출력은 `--json`. **검색은 직접 `grep`으로** — 찾은 `file:line`이나 심볼 이름을 `read`에
 넘기세요. MCP 도구로도 같은 `read`(절대 레포 경로 `root`, 단일 `ref`, batch용 `refs` 배열,
 선택적 `snippet`). Windows 경로와 `/mnt/<드라이브>/...` WSL 표기를 서로 바꿔 써도 됩니다.
+Windows에서 실행 중인 MCP가 네이티브 WSL ext4 레포를 읽을 때는 레포의
+`\\wsl.localhost\<distro>\...` UNC 경로를 `root`로 주고, `ref`는 계속 레포 상대
+`path#symbol`로 주세요.
 
 편집 뒤 이전 MCP 작업 세트를 갱신할 때는 같은 `refs`에 `changedOnly: true`를 보내세요.
 장기 실행 서버는 실제로 전에 반환한 슬라이스와 비교하므로, 중간에 자동 재인덱스가 끼어도
 편집된 심볼을 거짓 `unchanged`로 숨기지 않습니다. 세션 기준선이 없는 ref는 보수적으로 현재
 슬라이스를 반환합니다. 일회성 `map changed` CLI는 이전 세션이 없으므로 인덱스 기준입니다.
+
+인덱스 바이트는 자동 리로드되지만 MCP 서버 코드와 클라이언트 설정은 hot-reload되지 않습니다.
+세션이 이전 명령/파일을 실행 중인지 의심되면 `diagnostics: true`를 보내세요. 응답에 실제
+instance id, pid, 시작 시각, entrypoint, 서버 파일, 시작/현재 source identity와
+`restartRequired`가 나옵니다. 이 값이 `true`이거나 보고된 entrypoint가 설정과 다르면 그 결과를
+근거로 쓰기 전에 새 MCP 세션을 시작해야 합니다.
 
 ---
 
@@ -255,10 +271,10 @@ claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/ser
 
 GA `typescript@7.0.2`는 빌드 컴파일러 `tsc`만 노출하고, code-oracle가 LSP 서버로 쓰는
 `tsgo` launcher는 아직 제공하지 않습니다. 그래서 code-oracle는 최신
-`@typescript/native-preview` LSP 빌드를 정확히 핀합니다. launcher가 `bin/tsgo.js`에서
-확장자 없는 `bin/tsgo`로 바뀌었지만 둘 다 자동 감지합니다. 신뢰된 서버 설치 트리에서 Node
-패키지 해석도 시도하므로 workspace hoist/pnpm 배치를 지원하면서 조회 대상 workspace의
-의존성을 실행하지 않고, `TSGO_BIN`으로 직접 덮어쓸 수도 있습니다.
+`@typescript/native-preview` LSP 빌드를 정확히 핀합니다. 패키지 설치에서는 Node launcher와
+그 자식을 함께 남기지 않고 플랫폼의 native `tsgo` 실행 파일을 직접 해석합니다. 명시적
+`TSGO_BIN` launcher도 계속 지원합니다. 신뢰된 서버 설치 트리에서만 패키지를 해석하므로
+workspace hoist/pnpm 배치를 지원하면서 조회 대상 workspace의 의존성은 실행하지 않습니다.
 
 세션은 첫 checker 요청에서 지연 시작합니다(~수초~20s, 레포 크기별). 시작 비용을 미리 내는 편이
 확실히 이득일 때만 `CODE_ORACLE_PREWARM=1`을 설정하세요. MCP 하나당 warm 세션은 기본 2개로
@@ -268,6 +284,14 @@ GA `typescript@7.0.2`는 빌드 컴파일러 `tsc`만 노출하고, code-oracle�
 LSP 요청 하나를 함께 씁니다. 기본 fingerprint TTL=0에서는 완료된 전체 파일 맵을 보관하지 않고
 즉시 놓아줍니다. 영속 answer cache는 project epoch당 snapshot을 한 번만 쓰고 같은 epoch의 답은
 delta로 덧붙여, 누적 제곱 cache rewrite를 피합니다.
+LSP 요청 timeout은 빈 결과가 아니라 checker 실패입니다. 고장 난 backend를 즉시 종료하고 다음
+질의가 새 세션을 시작합니다. MCP/LSP JSON은 경로·캐시·checker 상태에 닿기 전에 신뢰하지 않는
+입력으로 검증합니다.
+성공한 모든 응답은 구조화된 `coverage`를 포함합니다. `implementations.results`는 checker가 본 전체
+가능 후보를 그대로 보존하고, TS/JS에서는 직접적인 `new Class` / `useClass: Class` 소스 힌트로
+각 후보를 `likely` 또는 `possible`로 표시합니다. 이 순위는 읽는 순서에만 쓰세요:
+`implementationEvidence.runtimeObserved`는 언제나 `false`이고 어휘적 오탐·이름 충돌·dead code
+가능성이 남습니다. `evidence: false`는 후보 집합을 바꾸지 않고 선택적 프로젝트 스캔만 생략합니다.
 **크로스플랫폼:** code-oracle가 `/mnt/c/…` ↔ `C:\…` 경로를 정규화해서 **서버 하나가 Windows IDE와
 WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** 빌드가 WSL 클라이언트까지 담당해
 `/mnt/c` drvfs 페널티를 피함(같은 레포 ~38s → ~4s). 네이티브 **Linux/WSL도 지원**합니다.
@@ -328,10 +352,10 @@ node harnesses/bench-codex-headless.mjs --run --passes 30 --repo ../map --strate
 
 ```
 src/
-  core/    types · files · extract-symbols (oxc) · fan-in · build-index · locate · read · store
+  core/    types · files · extract-symbols (oxc) · fan-in · index-drift · build-index · locate · read · store
   py/      extract.py   (Python: stdlib ast →같은 per-file 기본형)
   cli/     main.ts      (index / read / changed / stats / setup / version)
-  mcp/     server.ts    (유일한 `read` 도구, 자동 리로드)
+  mcp/     server.ts    (유일한 `read` 도구, 지연 자동 인덱싱 + 실제 프로세스 진단)
 test/      extract · exact-slice · methods · relocation · anchor-lost · incremental · fan-in
            · snippet-aim · batch · path-traversal 거부 · Python
 ```
@@ -349,7 +373,9 @@ stateful — code-map의 1-dep 가벼움과 정반대. 정직한 범위(측정):
 `callers`는 intra-file 하한선(`incomplete: true` 플래그). 완전한 Python callers는 `grep`
 (100% recall)을 쓰세요; 더 무거운 Python references 백엔드는 *일부러 안 추가.* 진짜 동적 디스패치
 (토큰-only DI, `Proxy`, `obj[k]()`)는 어떤 체커에도 안 보여요. 자체 `package.json` + 테스트
-(`cd code-oracle && npm test`).
+(`cd code-oracle && npm test`). 응답의 `coverage`가 이 경계를 기계가 읽을 수 있게 밝힙니다:
+TypeScript callers는 checker-confirmed, implementations는 checker-visible 과대근사,
+Python references는 intra-file 하한선입니다.
 
 </details>
 

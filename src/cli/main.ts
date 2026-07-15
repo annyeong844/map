@@ -209,7 +209,7 @@ function die(msg: string): never {
   process.exit(1);
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });

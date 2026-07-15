@@ -1211,6 +1211,32 @@ test('read re-anchors via searchText after the file drifts', async () => {
   assert.equal(r.line, alpha.line + 3);
 });
 
+test('read refreshes the dirty AST boundary when a function grows', async () => {
+  const root = repo({
+    'src/grows.ts':
+      'export function alpha(): number {\n  return 1;\n}\n\nexport function beta(): number {\n  return 2;\n}\n',
+  });
+  const { index } = await buildIndex({ root });
+  const alpha = index.entries.find((entry) => entry.name === 'alpha')!;
+  writeFileSync(
+    join(root, 'src/grows.ts'),
+    'export function alpha(): number {\n  const first = 1;\n  const second = 2;\n  // tail added after indexing\n  return first + second;\n}\n\nexport function beta(): number {\n  return 2;\n}\n',
+  );
+
+  const result = read(index, alpha.id, {
+    snippet: 'return first + second;',
+  });
+  assert.equal(result.status, 'relocated');
+  assert.match(result.raw ?? '', /tail added after indexing/);
+  assert.match(result.raw ?? '', /return first \+ second/);
+  assert.doesNotMatch(result.raw ?? '', /function beta/);
+  assert.equal(result.aim?.status, 'hit');
+
+  const delta = changed(index, [alpha.id]);
+  assert.equal(delta.changed.length, 1);
+  assert.match(delta.changed[0].raw ?? '', /return first \+ second/);
+});
+
 test('read reports anchor-lost when the signature anchor is destroyed', async () => {
   const root = repo({ 'src/m.ts': SRC });
   const { index } = await buildIndex({ root });

@@ -27,6 +27,10 @@
     "scripts/build.mjs",
     "scripts/prepare-package.mjs",
     "scripts/benchmark.mjs",
+    "scripts/corpus-lab.mjs",
+    "scripts/corpus-lab-config.mjs",
+    "scripts/corpus-lab-worker.mjs",
+    "docs/corpus-lab.md",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
@@ -61,7 +65,8 @@
     "lint:typed": "oxlint --type-aware -c .oxlintrc.typed.json src code-oracle/*.ts",
     "lint:typed:unsafe": "oxlint --type-aware --allow=all --warn=typescript/no-unsafe-argument --warn=typescript/no-unsafe-assignment --warn=typescript/no-unsafe-call --warn=typescript/no-unsafe-member-access src code-oracle/*.ts",
     "lint:review:magic": "oxlint -c .oxlintrc.review.json src hooks code-oracle/*.ts",
-    "bench": "node --expose-gc scripts/benchmark.mjs"
+    "bench": "node --expose-gc scripts/benchmark.mjs",
+    "corpus:lab": "node --expose-gc scripts/corpus-lab.mjs"
   },
   "engines": {
     "node": ">=23.6"

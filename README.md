@@ -367,6 +367,17 @@ line-only reads, and both pure-wildcard and mixed named/wildcard 10,000-file bar
 npm run bench
 ```
 
+For read-only validation on staged real repositories (cold/no-op time, exact reads, memory, clean
+worker exit, and before/after source fingerprints):
+
+```bash
+npm run corpus:lab
+node --expose-gc scripts/corpus-lab.mjs --profile stress --out .audit/corpus/next.json
+```
+
+See [the corpus-lab protocol](./docs/corpus-lab.md) for profiles, safety guarantees, and explicit
+limits.
+
 ```bash
 git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench
 codex login --device-auth

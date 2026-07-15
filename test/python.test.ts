@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -129,6 +129,33 @@ test(
       (r.raw ?? '').includes('return 42'),
       'slice includes the whole body',
     );
+  },
+);
+
+test(
+  'Python dirty reads do not truncate a function that grew after indexing',
+  { skip: hasPython ? false : 'python3 not available', timeout: 60_000 },
+  async () => {
+    const root = repo({
+      'module.py':
+        'def target():\n    return 1\n\ndef sibling():\n    return 2\n',
+    });
+    try {
+      const { index } = await buildIndex({ root });
+      const target = index.entries.find((entry) => entry.name === 'target')!;
+      writeFileSync(
+        join(root, 'module.py'),
+        'def target():\n    first = 1\n    second = 2\n    # tail added after indexing\n    return first + second\n\ndef sibling():\n    return 2\n',
+      );
+
+      const result = read(index, target.id);
+      assert.equal(result.status, 'relocated');
+      assert.match(result.raw ?? '', /tail added after indexing/);
+      assert.match(result.raw ?? '', /return first \+ second/);
+      assert.doesNotMatch(result.raw ?? '', /def sibling/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   },
 );
 

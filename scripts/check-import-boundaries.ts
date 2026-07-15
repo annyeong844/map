@@ -132,6 +132,9 @@ function repoPath(root: string, absolutePath: string): string | null {
 function ownerFor(path: string): Owner | null {
   if (path === 'src/version.ts') return 'version';
   if (path.startsWith('src/core/')) return 'core';
+  // Packaged developer tools load the compiled mirror when TypeScript sources
+  // are absent. It has the same owner as src/core, not a new boundary.
+  if (path.startsWith('dist/core/')) return 'core';
   if (path.startsWith('src/cli/')) return 'cli';
   if (path.startsWith('src/mcp/')) return 'mcp';
   if (path.startsWith('code-oracle/test/')) return 'oracle-test';

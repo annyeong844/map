@@ -17,6 +17,8 @@ const allowPathPatterns = [
   /^scripts\/build\.mjs$/,
   /^scripts\/prepare-package\.mjs$/,
   /^scripts\/benchmark\.mjs$/,
+  /^scripts\/corpus-lab(?:-config|-worker)?\.mjs$/,
+  /^docs\/corpus-lab\.md$/,
   /^dist\/(?:cli|core|mcp)\/[A-Za-z0-9_-]+\.js$/,
   /^dist\/version\.js$/,
   /^src\/py\/extract\.py$/,

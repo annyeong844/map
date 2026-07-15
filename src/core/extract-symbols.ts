@@ -169,10 +169,17 @@ function idName(node: unknown): string | undefined {
   return typeof node.name === 'string' ? node.name : undefined;
 }
 
-export function extractSymbols(file: string, text: string): FileParse {
+export function extractSymbols(
+  file: string,
+  text: string,
+  opts: { includeRefs?: boolean } = {},
+): FileParse {
   let res: ReturnType<typeof parseSync>;
   try {
-    res = parseSync(file, text);
+    // Parenthesis wrapper nodes carry no routing information. Omitting them
+    // preserves declaration/identifier coordinates while shrinking the AST
+    // that the refs walk must traverse and later collect.
+    res = parseSync(file, text, { preserveParens: false });
   } catch (error) {
     throw new Error(`Oxc could not parse ${file}.`, { cause: error });
   }
@@ -319,7 +326,7 @@ export function extractSymbols(file: string, text: string): FileParse {
     }
     if (isDeclNode(node)) pushDecl(node, false, symbols);
   }
-  const { refs } = walkProgram(res.program);
+  const refs = opts.includeRefs === false ? {} : walkProgram(res.program).refs;
   return { symbols: consolidateLocalExports(symbols), imports, refs };
 }
 

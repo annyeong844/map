@@ -352,6 +352,16 @@ WSL 에이전트(interop)를 동시에** 서빙해요 — 즉 빠른 **win32** �
 npm run bench
 ```
 
+단계별 실제 저장소에서 원본을 쓰지 않고 검증하려면(cold/no-op 시간, exact 읽기, 메모리,
+워커 정상 종료, 실행 전후 소스 지문):
+
+```bash
+npm run corpus:lab
+node --expose-gc scripts/corpus-lab.mjs --profile stress --out .audit/corpus/next.json
+```
+
+프로파일·안전 보장·정직한 한계는 [코퍼스 랩 프로토콜](./docs/corpus-lab.md)에 적었습니다.
+
 ```bash
 git clone https://github.com/annyeong844/code-map-bench && cd code-map-bench
 codex login --device-auth

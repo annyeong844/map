@@ -21,7 +21,7 @@ test('the import boundary matrix accepts only declared owner edges', () => {
     'src/version.ts': `import { readFileSync } from 'node:fs';\nexport { readFileSync };\n`,
     'src/cli/main.ts': `import { value } from '../core/value.ts';\nimport '../version.ts';\nexport { value };\n`,
     'src/mcp/server.ts': `export async function load() { return import('../core/value.ts'); }\n`,
-    'scripts/probe.ts': `import { value } from '../src/core/value.ts';\nexport { value };\n`,
+    'scripts/probe.ts': `import { value } from '../src/core/value.ts';\nimport('../dist/core/value.js');\nexport { value };\n`,
     'test/probe.test.ts': `import '../scripts/probe.ts';\n`,
   });
   try {

@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
+import { extractSymbols, isPython, type SymbolRec } from './extract-symbols.ts';
 import { type LocatedResult, locateWithEntries } from './locate.ts';
 import type { MapEntry, MapIndex, ReadResult } from './types.ts';
 import {
@@ -55,6 +56,7 @@ interface FileSnapshot {
   refused: boolean;
   lines: LineIndex | null;
   contentToken: string | null;
+  currentSymbols?: SymbolRec[] | null;
 }
 
 type FileCache = Map<string, FileSnapshot>;
@@ -215,6 +217,75 @@ function linesFor(
   return snapshot.lines;
 }
 
+/** Recover a dirty TS/JS symbol's current AST boundary. The unchanged path never
+ * pays this parse cost, and refs are deliberately skipped because read only needs
+ * coordinates. If the current parse cannot identify one target, the caller uses
+ * an honest non-truncating fallback instead of pretending its boundary is exact. */
+function relocatedSymbolRange(
+  entry: MapEntry,
+  snapshot: FileSnapshot,
+  anchoredStart: number,
+): { start: number; end: number } | null {
+  const text = snapshot.text;
+  if (text == null || isPython(entry.file)) return null;
+  if (snapshot.currentSymbols === undefined) {
+    try {
+      snapshot.currentSymbols = extractSymbols(entry.file, text, {
+        includeRefs: false,
+      }).symbols;
+    } catch {
+      snapshot.currentSymbols = null;
+    }
+  }
+  let match: SymbolRec | null = null;
+  for (const symbol of snapshot.currentSymbols ?? []) {
+    if (
+      symbol.charStart !== anchoredStart ||
+      symbol.name !== entry.name ||
+      symbol.kind !== entry.kind ||
+      symbol.className !== entry.className
+    ) {
+      continue;
+    }
+    if (match) return null;
+    match = symbol;
+  }
+  return match ? { start: match.charStart, end: match.charEnd } : null;
+}
+
+/** When a current AST boundary is unavailable (Python or a half-written JS/TS
+ * file), stop at the next declaration that was outside the symbol's old range.
+ * Class methods therefore do not truncate their containing class. If every
+ * later anchor also drifted, EOF is the only non-truncating honest fallback. */
+function fallbackRelocatedEnd(
+  index: MapIndex,
+  entry: MapEntry,
+  text: string,
+  anchoredStart: number,
+): number {
+  const range = exactFileEntryRange(index, entry.file);
+  if (range && entry.charEnd != null) {
+    for (let offset = range.start; offset < range.end; offset++) {
+      const candidate = index.entries[offset];
+      if (
+        candidate.id === entry.id ||
+        candidate.charStart == null ||
+        candidate.charStart < entry.charEnd
+      ) {
+        continue;
+      }
+      const first = text.indexOf(candidate.searchText, anchoredStart + 1);
+      if (first === -1) return text.length;
+      const duplicate = text.indexOf(
+        candidate.searchText,
+        first + candidate.searchText.length,
+      );
+      return duplicate === -1 ? first : text.length;
+    }
+  }
+  return text.length;
+}
+
 /**
  * Hand back the raw bytes at a routed location — the evidence the LLM judges.
  * With `opts.snippet`, also act as a sub-symbol designator: resolve the quoted
@@ -270,11 +341,13 @@ function computeAim(
     lo = entry.charStart;
     hi = entry.charEnd;
   } else if (entry.charStart != null && entry.charEnd != null) {
-    // File changed: re-anchor on the signature line; confine to the relocated span.
+    // File changed: re-anchor on the signature line, then recover the current AST
+    // boundary so a longer body does not get truncated by the indexed length.
     const hits = indexOfAll(text, entry.searchText);
     if (hits.length !== 1) return { status: 'unanchored', matches: [] };
-    lo = hits[0];
-    hi = Math.min(text.length, hits[0] + (entry.charEnd - entry.charStart));
+    const current = relocatedSymbolRange(entry, snapshot, hits[0]);
+    lo = current?.start ?? hits[0];
+    hi = current?.end ?? fallbackRelocatedEnd(index, entry, text, hits[0]);
   } else {
     // Line-only symbol (no char range): bound by the next indexed sibling.
     const lines = linesFor(index, entry.file, snapshot);
@@ -434,16 +507,20 @@ function readCore(
     const lines = linesFor(index, entry.file, snapshot);
     const startLine = indexedLineAt(lines, start);
     if (entry.charStart != null && entry.charEnd != null) {
-      const len = entry.charEnd - entry.charStart;
-      const raw = text.slice(start, start + len);
+      const current = relocatedSymbolRange(entry, snapshot, start);
+      const end =
+        current?.end ?? fallbackRelocatedEnd(index, entry, text, start);
+      const raw = text.slice(start, end);
       return {
         status: 'relocated',
         id: entry.id,
         file: entry.file,
         line: startLine,
-        endLine: indexedLineAt(lines, start + len),
+        endLine: indexedLineAt(lines, end),
         raw,
-        note: 'File changed since indexing. Re-anchored on the signature line; the end boundary is best-effort — verify it covers the whole symbol.',
+        note: current
+          ? 'File changed since indexing. Re-anchored on the signature line and refreshed the symbol boundary from the current AST.'
+          : 'File changed since indexing. Re-anchored on the signature line; the end boundary is best-effort — verify it covers the whole symbol.',
       };
     }
     return sliceLineWindow(

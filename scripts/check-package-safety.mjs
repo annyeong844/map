@@ -51,11 +51,20 @@ const denyPathPatterns = [
 const secretPatterns = [
   { name: 'OpenAI API key', re: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
   { name: 'npm token', re: /\bnpm_[A-Za-z0-9]{20,}\b/g },
-  { name: 'GitHub token', re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g },
+  {
+    name: 'GitHub token',
+    re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  },
   { name: 'Google API key', re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
   { name: 'AWS access key', re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
-  { name: 'private key block', re: /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g },
-  { name: 'npm auth token assignment', re: /(?:^|\n)\s*\/\/[^:\n]+:[^\n]*_authToken\s*=\s*[^\s]+/g },
+  {
+    name: 'private key block',
+    re: /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g,
+  },
+  {
+    name: 'npm auth token assignment',
+    re: /(?:^|\n)\s*\/\/[^:\n]+:[^\n]*_authToken\s*=\s*[^\s]+/g,
+  },
   {
     name: 'assigned sensitive env var',
     re: /\b[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY)\s*=\s*["']?(?!\s*(?:$|["']|<|YOUR_|your_|REDACTED|redacted|example|placeholder|dummy|test))[^"'\s]{8,}/g,
@@ -72,7 +81,9 @@ const pack = spawnSync('npm pack --dry-run --json --ignore-scripts', {
 });
 
 if (pack.status !== 0) {
-  process.stderr.write(pack.stderr || pack.stdout || 'npm pack --dry-run failed\n');
+  process.stderr.write(
+    pack.stderr || pack.stdout || 'npm pack --dry-run failed\n',
+  );
   process.exit(pack.status ?? 1);
 }
 
@@ -98,12 +109,15 @@ for (const file of files) {
   let text = '';
   try {
     text = readFileSync(path, 'utf8');
-  } catch {
+  } catch (error) {
+    failures.push(`Could not inspect packed file ${path}: ${error.message}`);
     continue;
   }
   for (const { name, re } of secretPatterns) {
     re.lastIndex = 0;
-    if (re.test(text)) failures.push(`${name} pattern in package file: ${path}`);
+    if (re.test(text)) {
+      failures.push(`${name} pattern in package file: ${path}`);
+    }
   }
 }
 

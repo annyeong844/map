@@ -2,12 +2,28 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { extractSymbols, type ImportEdge, isPython, type SymbolRec } from './extract-symbols.ts';
+import {
+  extractSymbols,
+  type ImportEdge,
+  isPython,
+  type SymbolRec,
+} from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
-import { scanIndexDrift, type IndexDriftScan } from './index-drift.ts';
+import { type IndexDriftScan, scanIndexDrift } from './index-drift.ts';
 import { resolvePythonCommand } from './python-command.ts';
-import { INDEX_VERSION, type FileStat, type MapEntry, type MapIndex } from './types.ts';
-import { buildLineIndex, firstLine, indexedLineAt, token } from './util.ts';
+import {
+  type FileStat,
+  INDEX_VERSION,
+  type MapEntry,
+  type MapIndex,
+} from './types.ts';
+import {
+  buildLineIndex,
+  firstLine,
+  indexedLineAt,
+  isRecord,
+  token,
+} from './util.ts';
 
 /** Python parse backend: the stdlib-ast extractor, shelled out once per build.
  * The whole tree is walked for import resolution; only `targets` are parsed
@@ -17,8 +33,15 @@ import { buildLineIndex, firstLine, indexedLineAt, token } from './util.ts';
  * would corrupt an incremental index. */
 // Both src/core/build-index.ts and dist/core/build-index.js resolve this to the
 // package's single shipped Python source file.
-const PY_BACKEND = fileURLToPath(new URL('../../src/py/extract.py', import.meta.url));
-interface PySymbolRec extends SymbolRec { file: string; line: number; endLine: number; searchText: string }
+const PY_BACKEND = fileURLToPath(
+  new URL('../../src/py/extract.py', import.meta.url),
+);
+interface PySymbolRec extends SymbolRec {
+  file: string;
+  line: number;
+  endLine: number;
+  searchText: string;
+}
 interface PyParse {
   entries: PySymbolRec[];
   fileImports: Record<string, ImportEdge[]>;
@@ -26,22 +49,90 @@ interface PyParse {
   fileRefs: Record<string, Record<string, number>>;
   filesMissing: string[];
 }
-function runPyBackend(root: string, files: string[], targets: string[], signal?: AbortSignal): Promise<PyParse> {
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((item) => typeof item === 'string')
+  );
+}
+
+function isNumberRecord(value: unknown): value is Record<string, number> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((item) => typeof item === 'number')
+  );
+}
+
+function isPyImportEdge(value: unknown): value is ImportEdge {
+  return (
+    isRecord(value) &&
+    typeof value.source === 'string' &&
+    typeof value.name === 'string' &&
+    (value.reexport === undefined || typeof value.reexport === 'boolean')
+  );
+}
+
+function isPySymbol(value: unknown): value is PySymbolRec {
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    typeof value.kind === 'string' &&
+    typeof value.file === 'string' &&
+    typeof value.line === 'number' &&
+    typeof value.endLine === 'number' &&
+    typeof value.charStart === 'number' &&
+    typeof value.charEnd === 'number' &&
+    typeof value.searchText === 'string' &&
+    typeof value.exported === 'boolean'
+  );
+}
+
+function isPyParse(value: unknown): value is PyParse {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.entries) ||
+    !value.entries.every(isPySymbol) ||
+    !isStringRecord(value.fileTokens) ||
+    !Array.isArray(value.filesMissing) ||
+    !value.filesMissing.every((file) => typeof file === 'string') ||
+    !isRecord(value.fileImports) ||
+    !isRecord(value.fileRefs)
+  ) {
+    return false;
+  }
+  return (
+    Object.values(value.fileImports).every(
+      (edges) => Array.isArray(edges) && edges.every(isPyImportEdge),
+    ) && Object.values(value.fileRefs).every(isNumberRecord)
+  );
+}
+
+function runPyBackend(
+  root: string,
+  files: string[],
+  targets: string[],
+  signal?: AbortSignal,
+): Promise<PyParse> {
   return new Promise((res, rej) => {
     let python;
     try {
       python = resolvePythonCommand();
     } catch (error) {
-      rej(error instanceof Error
-        ? error
-        : new Error('Python command resolution failed.', { cause: error }));
+      rej(
+        error instanceof Error
+          ? error
+          : new Error('Python command resolution failed.', { cause: error }),
+      );
       return;
     }
     if (signal?.aborted) {
       rej(new Error('Index build aborted.'));
       return;
     }
-    const p = spawn(python.command, [...python.args, PY_BACKEND, root], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const p = spawn(python.command, [...python.args, PY_BACKEND, root], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
@@ -51,33 +142,60 @@ function runPyBackend(root: string, files: string[], targets: string[], signal?:
       if (settled) return;
       settled = true;
       signal?.removeEventListener('abort', onAbort);
-      try { p.kill(); } catch { /* already gone */ }
+      try {
+        p.kill();
+      } catch {
+        /* already gone */
+      }
       rej(new Error('Index build aborted.'));
     };
     const fail = (reason: string): void => {
       if (settled) return;
       settled = true;
       signal?.removeEventListener('abort', onAbort);
-      rej(new Error(`Python backend failed (${python.display}): ${reason}. Set CODE_MAP_PYTHON to a working Python 3 executable.`));
+      rej(
+        new Error(
+          `Python backend failed (${python.display}): ${reason}. Set CODE_MAP_PYTHON to a working Python 3 executable.`,
+        ),
+      );
     };
     signal?.addEventListener('abort', onAbort, { once: true });
-    p.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); stdoutBytes += chunk.length; });
-    p.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); stderrBytes += chunk.length; });
-    p.stdin.on('error', (e) => fail(e.message));
-    p.on('error', (e) => fail(e.message));
+    p.stdout.on('data', (chunk: Buffer) => {
+      stdout.push(chunk);
+      stdoutBytes += chunk.length;
+    });
+    p.stderr.on('data', (chunk: Buffer) => {
+      stderr.push(chunk);
+      stderrBytes += chunk.length;
+    });
+    p.stdin.on('error', (e) => {
+      fail(e.message);
+    });
+    p.on('error', (e) => {
+      fail(e.message);
+    });
     p.on('close', (code) => {
       if (settled) return;
       if (code !== 0) {
         const errorText = Buffer.concat(stderr, stderrBytes).toString().trim();
-        return fail(`exited with code ${code}${errorText ? `: ${errorText}` : ''}`);
+        fail(`exited with code ${code}${errorText ? `: ${errorText}` : ''}`);
+        return;
       }
       try {
-        const parsed = JSON.parse(Buffer.concat(stdout, stdoutBytes).toString()) as PyParse;
+        const parsed: unknown = JSON.parse(
+          Buffer.concat(stdout, stdoutBytes).toString(),
+        );
+        if (!isPyParse(parsed)) {
+          fail('returned JSON with an invalid result shape');
+          return;
+        }
         settled = true;
         signal?.removeEventListener('abort', onAbort);
         res(parsed);
       } catch (e) {
-        fail(`returned invalid JSON${e instanceof Error ? `: ${e.message}` : ''}`);
+        fail(
+          `returned invalid JSON${e instanceof Error ? `: ${e.message}` : ''}`,
+        );
       }
     });
     // Node already enumerated the gitignore-aware source set. Hand it to Python
@@ -88,7 +206,11 @@ function runPyBackend(root: string, files: string[], targets: string[], signal?:
 }
 
 const READ_CONCURRENCY = 32;
-async function readAll(root: string, files: string[], concurrency = READ_CONCURRENCY): Promise<Map<string, string | null>> {
+async function readAll(
+  root: string,
+  files: string[],
+  concurrency = READ_CONCURRENCY,
+): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   let i = 0;
   const worker = async (): Promise<void> => {
@@ -101,7 +223,9 @@ async function readAll(root: string, files: string[], concurrency = READ_CONCURR
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, files.length) }, worker),
+  );
   return out;
 }
 
@@ -145,12 +269,19 @@ function sameImportEdges(before: ImportEdge[], after: ImportEdge[]): boolean {
   for (let i = 0; i < before.length; i++) {
     const a = before[i];
     const b = after[i];
-    if (a.source !== b.source || a.name !== b.name || !!a.reexport !== !!b.reexport) return false;
+    if (
+      a.source !== b.source ||
+      a.name !== b.name ||
+      !!a.reexport !== !!b.reexport
+    ) {
+      return false;
+    }
   }
   return true;
 }
 
-const fanInSurfaceKey = (entry: MapEntry): string => `${entry.name}\0${entry.default ? 1 : 0}`;
+const fanInSurfaceKey = (entry: MapEntry): string =>
+  `${entry.name}\0${entry.default ? 1 : 0}`;
 
 function sameFanInSurface(before: MapEntry[], after: MapEntry[]): boolean {
   const oldKeys = new Set(before.map(fanInSurfaceKey));
@@ -174,15 +305,31 @@ function canReuseFanIn(
 ): previous is MapIndex {
   if (!previous) return false;
   const oldFiles = Object.keys(previous.fileStats);
-  if (oldFiles.length !== files.length || files.some((file) => !Object.hasOwn(previous.fileStats, file))) return false;
+  if (
+    oldFiles.length !== files.length ||
+    files.some((file) => !Object.hasOwn(previous.fileStats, file))
+  ) {
+    return false;
+  }
   for (const file of changedFiles) {
     const before = prevByFile.get(file) ?? [];
     const after = entriesByFile.get(file) ?? [];
     if (before.some((entry) => typeof entry.fanIn !== 'number')) return false;
-    if (!sameImportEdges(previous.fileImports?.[file] ?? [], fileImports[file] ?? [])) return false;
+    if (
+      !sameImportEdges(
+        previous.fileImports?.[file] ?? [],
+        fileImports[file] ?? [],
+      )
+    ) {
+      return false;
+    }
     if (!sameFanInSurface(before, after)) return false;
   }
   return true;
+}
+
+function compareWithinFile(a: MapEntry, b: MapEntry): number {
+  return a.line - b.line || a.name.localeCompare(b.name);
 }
 
 /**
@@ -195,9 +342,10 @@ function canReuseFanIn(
 export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const root = resolve(opts.root);
   if (opts.signal?.aborted) throw new Error('Index build aborted.');
-  const drift = opts.scan && opts.scan.root === root && !opts.force
-    ? opts.scan
-    : await scanIndexDrift(root, opts.previous, !!opts.force);
+  const drift =
+    opts.scan && opts.scan.root === root && !opts.force
+      ? opts.scan
+      : await scanIndexDrift(root, opts.previous, !!opts.force, opts.signal);
   const { files, stats, changedFiles, reusableFiles } = drift;
   const prev = drift.compatible ? drift.previous : null;
 
@@ -213,7 +361,11 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         if (entry.kind === 'ClassMethod') methods++;
         else if (entry.visibility === 'module-private') privateDefs++;
       }
-      counts = { defs: prev.entries.length - methods - privateDefs, methods, privateDefs };
+      counts = {
+        defs: prev.entries.length - methods - privateDefs,
+        methods,
+        privateDefs,
+      };
     }
     return {
       index: prev,
@@ -236,7 +388,12 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const filesMissing: string[] = [];
   const usedIds = new Map<string, number>();
 
-  const mkId = (file: string, name: string, kind: string, line: number): string => {
+  const mkId = (
+    file: string,
+    name: string,
+    kind: string,
+    line: number,
+  ): string => {
     let id = `${file}#${name}`;
     if (usedIds.has(id)) id = `${file}#${name}#${kind}`;
     if (usedIds.has(id)) id = `${file}#${name}@${line}`;
@@ -255,7 +412,11 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     for (const file of reusableFiles) {
       // Fan-in is global and may change because another file changed. Clone the
       // reused entries before updating it so `previous` stays an immutable snapshot.
-      entriesByFile.set(file, (prevByFile.get(file) ?? []).map((entry) => ({ ...entry })));
+      const clonedEntries: MapEntry[] = [];
+      for (const entry of prevByFile.get(file) ?? []) {
+        clonedEntries.push({ ...entry });
+      }
+      entriesByFile.set(file, clonedEntries);
       fileTokens[file] = prev.fileTokens[file];
       fileStats[file] = prev.fileStats[file];
       fileImports[file] = prev.fileImports?.[file] ?? [];
@@ -280,10 +441,17 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
 
   // Preserve deterministic file order, but release source text after each
   // existing 32-file I/O batch instead of retaining every changed JS/TS file.
-  for (let batchStart = 0; batchStart < changedFiles.length; batchStart += READ_CONCURRENCY) {
+  for (
+    let batchStart = 0;
+    batchStart < changedFiles.length;
+    batchStart += READ_CONCURRENCY
+  ) {
     if (opts.signal?.aborted) throw new Error('Index build aborted.');
     const batch = changedFiles.slice(batchStart, batchStart + READ_CONCURRENCY);
-    const text = await readAll(root, batch.filter((file) => !isPython(file)));
+    const text = await readAll(
+      root,
+      batch.filter((file) => !isPython(file)),
+    );
     for (const file of batch) {
       const st = stats.get(file) ?? null;
       const bucket: MapEntry[] = [];
@@ -295,7 +463,14 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         }
         entriesByFile.set(file, bucket);
         fileTokens[file] = sourceToken;
-        if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
+        if (st) {
+          fileStats[file] = {
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            ctimeMs: st.ctimeMs,
+            ino: st.ino,
+          };
+        }
         fileImports[file] = py?.fileImports[file] ?? [];
         const refs = py?.fileRefs[file] ?? {};
         for (const rec of pyByFile.get(file) ?? []) {
@@ -329,7 +504,14 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       }
       entriesByFile.set(file, bucket);
       fileTokens[file] = token(src);
-      if (st) fileStats[file] = { mtimeMs: st.mtimeMs, size: st.size, ctimeMs: st.ctimeMs, ino: st.ino };
+      if (st) {
+        fileStats[file] = {
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          ctimeMs: st.ctimeMs,
+          ino: st.ino,
+        };
+      }
       const parsed = extractSymbols(file, src);
       fileImports[file] = parsed.imports;
       const lines = buildLineIndex(src);
@@ -363,14 +545,16 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   // already sorted. Parser output is normally source-ordered; only
   // rare export aliases can point backward, so detect that and sort that one
   // file instead of globally sorting every entry on every build.
-  const compareWithinFile = (a: MapEntry, b: MapEntry): number => a.line - b.line || a.name.localeCompare(b.name);
   const entries: MapEntry[] = [];
   for (const file of files) {
     const bucket = entriesByFile.get(file);
     if (!bucket) continue;
     let ordered = true;
     for (let i = 1; i < bucket.length; i++) {
-      if (compareWithinFile(bucket[i - 1], bucket[i]) > 0) { ordered = false; break; }
+      if (compareWithinFile(bucket[i - 1], bucket[i]) > 0) {
+        ordered = false;
+        break;
+      }
     }
     if (!ordered) bucket.sort(compareWithinFile);
     for (const entry of bucket) entries.push(entry);
@@ -379,20 +563,35 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   // Body-only edits keep the global import graph unchanged. If their exported
   // fan-in key surface is unchanged too, copy the prior values only into those
   // changed entries and skip the O(files + import edges) global graph pass.
-  const fanInReused = canReuseFanIn(prev, files, changedFiles, prevByFile, entriesByFile, fileImports);
+  const fanInReused = canReuseFanIn(
+    prev,
+    files,
+    changedFiles,
+    prevByFile,
+    entriesByFile,
+    fileImports,
+  );
   if (fanInReused) {
     for (const file of changedFiles) {
       const oldFanIn = new Map<string, number>();
-      for (const entry of prevByFile.get(file) ?? []) oldFanIn.set(fanInSurfaceKey(entry), entry.fanIn ?? 0);
-      for (const entry of entriesByFile.get(file) ?? []) entry.fanIn = oldFanIn.get(fanInSurfaceKey(entry)) ?? 0;
+      for (const entry of prevByFile.get(file) ?? []) {
+        oldFanIn.set(fanInSurfaceKey(entry), entry.fanIn ?? 0);
+      }
+      for (const entry of entriesByFile.get(file) ?? []) {
+        entry.fanIn = oldFanIn.get(fanInSurfaceKey(entry)) ?? 0;
+      }
     }
   } else {
-    const importsByFile = new Map<string, ImportEdge[]>(Object.entries(fileImports));
+    const importsByFile = new Map<string, ImportEdge[]>(
+      Object.entries(fileImports),
+    );
     const fanIn = computeFanIn(files, importsByFile);
     for (const e of entries) {
       // A default-exported symbol is referenced by importers as `default`, not its
       // local name, so credit that bucket too (`import foo from './x'` → x.ts::default).
-      e.fanIn = (fanIn.get(`${e.file}::${e.name}`) ?? 0) + (e.default ? (fanIn.get(`${e.file}::default`) ?? 0) : 0);
+      e.fanIn =
+        (fanIn.get(`${e.file}::${e.name}`) ?? 0) +
+        (e.default ? (fanIn.get(`${e.file}::default`) ?? 0) : 0);
     }
   }
 

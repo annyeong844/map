@@ -2,7 +2,16 @@ import { posix as pp } from 'node:path';
 import type { ImportEdge } from './extract-symbols.ts';
 
 // Extensions tried for an extensionless specifier, in order.
-const APPEND_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+const APPEND_EXTS = [
+  '.ts',
+  '.tsx',
+  '.mts',
+  '.cts',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+];
 // TS ESM / NodeNext writes a JS-family extension on the specifier, but the file
 // on disk is its TS counterpart (`import './x.js'` resolves to `x.ts`). Map back.
 const JS_TO_TS: Record<string, readonly string[]> = {
@@ -19,7 +28,11 @@ const JS_TO_TS_ENTRIES = Object.entries(JS_TO_TS);
  * tsconfig paths) are external and return null; resolving those fully is a whole
  * module resolver's job, deliberately out of scope here.
  */
-function resolveRelative(fromFile: string, source: string, fileSet: Set<string>): string | null {
+function resolveRelative(
+  fromFile: string,
+  source: string,
+  fileSet: Set<string>,
+): string | null {
   // The Python backend emits an already-resolved repo-relative path ('pkg/mod.py');
   // a source that is itself an indexed file needs no further resolution. (TS bare
   // specifiers like 'react' never match a file path, so this is a no-op for TS.)
@@ -41,7 +54,9 @@ function resolveRelative(fromFile: string, source: string, fileSet: Set<string>)
 
   // 3. Extensionless specifier → append an extension, then try a directory index.
   for (const e of APPEND_EXTS) if (fileSet.has(base + e)) return base + e;
-  for (const e of APPEND_EXTS) if (fileSet.has(`${base}/index${e}`)) return `${base}/index${e}`;
+  for (const e of APPEND_EXTS) {
+    if (fileSet.has(`${base}/index${e}`)) return `${base}/index${e}`;
+  }
   return null;
 }
 
@@ -54,7 +69,10 @@ function resolveRelative(fromFile: string, source: string, fileSet: Set<string>)
  * Honest scope: counts named + default edges via *relative* specifiers only.
  * Namespace/`export *` edges and package/alias specifiers are not attributed.
  */
-export function computeFanIn(files: string[], importsByFile: Map<string, ImportEdge[]>): Map<string, number> {
+export function computeFanIn(
+  files: string[],
+  importsByFile: Map<string, ImportEdge[]>,
+): Map<string, number> {
   const fileSet = new Set(files);
 
   // Resolve each module specifier once. Imports and re-export traversal often
@@ -69,8 +87,15 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
     return target;
   };
 
-  interface Route { target: string | null; order: number }
-  interface Routes { exact: Map<string, Route>; wildcard?: Route; unconditional: boolean }
+  interface Route {
+    target: string | null;
+    order: number;
+  }
+  interface Routes {
+    exact: Map<string, Route>;
+    wildcard?: Route;
+    unconditional: boolean;
+  }
 
   // Compile each barrel into O(1) named/wildcard route lookup while preserving
   // source order (the first matching re-export remains authoritative).
@@ -92,11 +117,16 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
       routes.unconditional = !!routes.wildcard;
       if (routes.wildcard) {
         for (const exact of routes.exact.values()) {
-          if (exact.order < routes.wildcard.order) { routes.unconditional = false; break; }
+          if (exact.order < routes.wildcard.order) {
+            routes.unconditional = false;
+            break;
+          }
         }
       }
       for (const [name, exact] of routes.exact) {
-        if (!routes.wildcard || exact.order < routes.wildcard.order) dominantExactNames.add(name);
+        if (!routes.wildcard || exact.order < routes.wildcard.order) {
+          dominantExactNames.add(name);
+        }
       }
       routesByFile.set(f, routes);
     }
@@ -106,12 +136,21 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
     const routes = routesByFile.get(file);
     if (!routes) return null;
     const exact = routes.exact.get(name);
-    if (exact && (!routes.wildcard || exact.order < routes.wildcard.order)) return exact;
+    if (exact && (!routes.wildcard || exact.order < routes.wildcard.order)) {
+      return exact;
+    }
     return routes.wildcard ?? null;
   };
 
-  interface SkipResult { file: string; cyclic: boolean }
-  const collapseWildcardPath = (start: string, stops: Map<string, SkipResult>, ignoreDominantExact: boolean): SkipResult => {
+  interface SkipResult {
+    file: string;
+    cyclic: boolean;
+  }
+  const collapseWildcardPath = (
+    start: string,
+    stops: Map<string, SkipResult>,
+    ignoreDominantExact: boolean,
+  ): SkipResult => {
     const cachedStart = stops.get(start);
     if (cachedStart) return cachedStart;
     const path: string[] = [];
@@ -120,11 +159,16 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
     let result: SkipResult;
     for (;;) {
       const cached = stops.get(file);
-      if (cached) { result = cached; break; }
+      if (cached) {
+        result = cached;
+        break;
+      }
       const cycleAt = seenAt.get(file);
       if (cycleAt !== undefined) {
         const cycle = path.slice(cycleAt);
-        const canonical = cycle.reduce((best, candidate) => candidate < best ? candidate : best);
+        const canonical = cycle.reduce((best, candidate) =>
+          candidate < best ? candidate : best,
+        );
         result = { file: canonical, cyclic: true };
         for (const cycleFile of cycle) stops.set(cycleFile, result);
         break;
@@ -132,9 +176,14 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
       seenAt.set(file, path.length);
       path.push(file);
       const routes = routesByFile.get(file);
-      const target = ignoreDominantExact
-        ? routes?.wildcard?.target
-        : routes?.unconditional ? routes.wildcard?.target : null;
+      let target: string | null;
+      if (ignoreDominantExact) {
+        target = routes?.wildcard?.target ?? null;
+      } else if (routes?.unconditional) {
+        target = routes.wildcard?.target ?? null;
+      } else {
+        target = null;
+      }
       if (!target) {
         result = { file, cyclic: false };
         break;
@@ -149,12 +198,14 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
 
   const unconditionalStops = new Map<string, SkipResult>();
   /** Collapse pure `export *` chains once for every name. */
-  const skipUnconditional = (start: string): SkipResult => collapseWildcardPath(start, unconditionalStops, false);
+  const skipUnconditional = (start: string): SkipResult =>
+    collapseWildcardPath(start, unconditionalStops, false);
 
   // A name that is never intercepted by an earlier named re-export follows only
   // wildcard routes. Collapse that path once globally instead of once per name.
   const wildcardStops = new Map<string, SkipResult>();
-  const skipWildcard = (start: string): SkipResult => collapseWildcardPath(start, wildcardStops, true);
+  const skipWildcard = (start: string): SkipResult =>
+    collapseWildcardPath(start, wildcardStops, true);
 
   /** Walk `export { name } from …` / `export * from …` chains to the file that
    * actually defines `name`, so importers through a barrel count toward the real
@@ -190,8 +241,12 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
       const cycleAt = seenAt.get(file);
       if (cycleAt !== undefined) {
         const cycle = path.slice(cycleAt);
-        terminal = cycle.reduce((best, candidate) => candidate < best ? candidate : best);
-        for (const cycleFile of cycle) resolvedDefs.set(`${cycleFile}\0${name}`, terminal);
+        terminal = cycle.reduce((best, candidate) =>
+          candidate < best ? candidate : best,
+        );
+        for (const cycleFile of cycle) {
+          resolvedDefs.set(`${cycleFile}\0${name}`, terminal);
+        }
         break;
       }
       seenAt.set(file, path.length);
@@ -215,19 +270,25 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
    * matching names, and move the remaining Set down the wildcard edge. This
    * turns a shared L-file/M-name path from O(L·M) into O(L + M + route edges),
    * plus only the work on exact routes that genuinely diverge. */
-  const resolveDefs = (start: string, names: Iterable<string>): Map<string, string> => {
+  const resolveDefs = (
+    start: string,
+    names: Iterable<string>,
+  ): Map<string, string> => {
     const results = new Map<string, string>();
     const active = new Set<string>();
     let wildcardTerminal: string | undefined;
     for (const name of names) {
       const key = `${start}\0${name}`;
       const cached = resolvedDefs.get(key);
-      if (cached !== undefined) results.set(name, cached);
-      else if (!dominantExactNames.has(name)) {
+      if (cached !== undefined) {
+        results.set(name, cached);
+      } else if (!dominantExactNames.has(name)) {
         wildcardTerminal ??= skipWildcard(start).file;
         resolvedDefs.set(key, wildcardTerminal);
         results.set(name, wildcardTerminal);
-      } else active.add(name);
+      } else {
+        active.add(name);
+      }
     }
     if (active.size === 1) {
       const name = active.values().next().value!;
@@ -249,10 +310,17 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
     while (active.size) {
       const skipped = skipUnconditional(file);
       file = skipped.file;
-      if (skipped.cyclic) { finish(file); break; }
+      if (skipped.cyclic) {
+        finish(file);
+        break;
+      }
       const cycleAt = seenAt.get(file);
       if (cycleAt !== undefined) {
-        finish(path.slice(cycleAt).reduce((best, candidate) => candidate < best ? candidate : best));
+        finish(
+          path
+            .slice(cycleAt)
+            .reduce((best, candidate) => (candidate < best ? candidate : best)),
+        );
         break;
       }
       seenAt.set(file, path.length);
@@ -262,7 +330,12 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
       const wildcard = routes?.wildcard;
       if (routes) {
         for (const [name, exact] of routes.exact) {
-          if (!active.has(name) || (wildcard && exact.order >= wildcard.order)) continue;
+          if (
+            !active.has(name) ||
+            (wildcard && exact.order >= wildcard.order)
+          ) {
+            continue;
+          }
           active.delete(name);
           const terminal = exact.target ? resolveDef(exact.target, name) : file;
           resolvedDefs.set(`${start}\0${name}`, terminal);
@@ -270,7 +343,10 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
         }
       }
       if (active.size === 0) break;
-      if (!wildcard?.target) { finish(file); break; }
+      if (!wildcard?.target) {
+        finish(file);
+        break;
+      }
       file = wildcard.target;
     }
     return results;
@@ -297,7 +373,7 @@ export function computeFanIn(files: string[], importsByFile: Map<string, ImportE
     const defs = resolveDefs(target, byName.keys());
     for (const [name, consumers] of byName) {
       const key = `${defs.get(name) ?? target}::${name}`;
-      let set = importers.get(key);
+      const set = importers.get(key);
       if (!set) importers.set(key, consumers);
       else for (const fromFile of consumers) set.add(fromFile);
     }

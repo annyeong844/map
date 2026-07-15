@@ -4,9 +4,24 @@
   "private": true,
   "type": "module",
   "description": "Multi-language type-aware resolution MCP over a warm LSP session (tsgo for TS/JS, ty for Python) — sibling to code-map. Isolated here so code-map's core stays zero-heavy-dep.",
-  "bin": { "code-oracle-mcp": "./server.ts" },
-  "scripts": { "start": "node server.ts", "test": "node --test \"test/*.test.ts\"", "typecheck": "npx -y -p typescript@5 -p @types/node tsc --noEmit -p ." },
-  "engines": { "node": ">=23.6" },
-  "_dependencyNote": "The tsgo LSP still ships via @typescript/native-preview, not GA typescript (tsc only). Pin EXACT to a known-good day; package installs launch the platform-native executable directly while TSGO_BIN may still name a Node launcher. Python uses ty via `uvx ty server` + python3 (no npm pin).",
-  "dependencies": { "@typescript/native-preview": "7.0.0-dev.20260707.2" }
+  "bin": {
+    "code-oracle-mcp": "./server.ts"
+  },
+  "scripts": {
+    "start": "node server.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "_dependencyNote": "The tsgo LSP still ships via @typescript/native-preview, not GA typescript (tsc only). Pin EXACT to a known-good day; package installs launch the platform-native executable directly while TSGO_BIN may still name a Node launcher. TypeScript 5 and @types/node are exact, lockfile-managed dev tools. Python defaults to exact ty 0.0.50 through uvx; TY_BIN (or legacy TY_CMD) may override the launcher.",
+  "dependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "oxc-parser": "^0.136.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.21",
+    "typescript": "5.9.3"
+  }
 }

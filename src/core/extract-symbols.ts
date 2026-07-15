@@ -1,4 +1,5 @@
 import { parseSync } from 'oxc-parser';
+import { isRecord } from './util.ts';
 
 /**
  * Extract every routable symbol AND every cross-module import edge from one
@@ -64,9 +65,8 @@ function walkProgram(program: unknown): { refs: Record<string, number> } {
       for (const c of node) stack.push(c);
       continue;
     }
-    // Verified non-null object, non-array above — read it as a generic record (oxc's AST
-    // node union is the boundary; the cast is the one place we narrow it, no `any` escape).
-    const rec = node as Record<string, unknown>;
+    if (!isRecord(node)) continue;
+    const rec = node;
     if (rec.type === 'Identifier' && typeof rec.name === 'string') {
       refs[rec.name] = (refs[rec.name] ?? 0) + 1;
     }
@@ -108,10 +108,29 @@ export function isParseable(file: string): boolean {
   return JS_TS.test(file) || PY.test(file);
 }
 
-const TYPE_DECL = new Set(['TSInterfaceDeclaration', 'TSTypeAliasDeclaration', 'TSEnumDeclaration', 'TSModuleDeclaration']);
+const TYPE_DECL = new Set([
+  'TSInterfaceDeclaration',
+  'TSTypeAliasDeclaration',
+  'TSEnumDeclaration',
+  'TSModuleDeclaration',
+]);
 
-function isDeclNode(t: string): boolean {
-  return t === 'FunctionDeclaration' || t === 'ClassDeclaration' || t === 'VariableDeclaration' || TYPE_DECL.has(t);
+function isDeclNode(value: unknown): value is DeclNode {
+  if (
+    !isRecord(value) ||
+    typeof value.type !== 'string' ||
+    typeof value.start !== 'number' ||
+    typeof value.end !== 'number'
+  ) {
+    return false;
+  }
+  const t = value.type;
+  return (
+    t === 'FunctionDeclaration' ||
+    t === 'ClassDeclaration' ||
+    t === 'VariableDeclaration' ||
+    TYPE_DECL.has(t)
+  );
 }
 
 /** `function local() {}; export { local }` reaches the extractor twice: once as
@@ -130,7 +149,10 @@ function consolidateLocalExports(symbols: SymbolRec[]): SymbolRec[] {
       continue;
     }
     const existing = out[existingAt];
-    const preferred = existing.kind === 'ExportSpecifier' && symbol.kind !== 'ExportSpecifier' ? symbol : existing;
+    const preferred =
+      existing.kind === 'ExportSpecifier' && symbol.kind !== 'ExportSpecifier'
+        ? symbol
+        : existing;
     const exported = existing.exported || symbol.exported;
     out[existingAt] = {
       ...preferred,
@@ -142,15 +164,22 @@ function consolidateLocalExports(symbols: SymbolRec[]): SymbolRec[] {
   return out;
 }
 
+function idName(node: unknown): string | undefined {
+  if (!isRecord(node)) return undefined;
+  return typeof node.name === 'string' ? node.name : undefined;
+}
+
 export function extractSymbols(file: string, text: string): FileParse {
   let res: ReturnType<typeof parseSync>;
   try {
     res = parseSync(file, text);
-  } catch {
-    return { symbols: [], imports: [], refs: {} };
+  } catch (error) {
+    throw new Error(`Oxc could not parse ${file}.`, { cause: error });
   }
   const body = res?.program?.body;
-  if (!Array.isArray(body)) return { symbols: [], imports: [], refs: {} };
+  if (!Array.isArray(body)) {
+    throw new Error(`Oxc returned no program body for ${file}.`);
+  }
 
   // Local top-level declarations by name, so `export { foo as bar }` can point
   // at foo's real coordinates rather than the specifier. Also track imported
@@ -161,8 +190,6 @@ export function extractSymbols(file: string, text: string): FileParse {
   // oxc types specifier names as Identifier | StringLiteral and declaration ids as a
   // broad node union; read the identifier name via a real runtime narrowing so this
   // stays type-honest under strict (not an `any` escape).
-  const idName = (n: unknown): string | undefined =>
-    n && typeof n === 'object' && 'name' in n && typeof (n as { name?: unknown }).name === 'string' ? (n as { name: string }).name : undefined;
   for (const node of body) {
     if (node.type === 'ImportDeclaration') {
       for (const spec of node.specifiers ?? []) {
@@ -171,17 +198,28 @@ export function extractSymbols(file: string, text: string): FileParse {
         if (spec.type === 'ImportSpecifier') {
           const im = idName(spec.imported);
           if (im) importedFrom.set(ln, { source: node.source.value, name: im });
-        } else if (spec.type === 'ImportDefaultSpecifier') importedFrom.set(ln, { source: node.source.value, name: 'default' });
-        else if (spec.type === 'ImportNamespaceSpecifier') importedFrom.set(ln, { source: node.source.value, name: '*' });
+        } else if (spec.type === 'ImportDefaultSpecifier') {
+          importedFrom.set(ln, { source: node.source.value, name: 'default' });
+        } else if (spec.type === 'ImportNamespaceSpecifier') {
+          importedFrom.set(ln, { source: node.source.value, name: '*' });
+        }
       }
       continue;
     }
-    const decl = node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration' ? node.declaration : node;
-    if (decl && isDeclNode(decl.type)) {
-      const did = idName((decl as { id?: unknown }).id);
+    const decl =
+      node.type === 'ExportNamedDeclaration' ||
+      node.type === 'ExportDefaultDeclaration'
+        ? node.declaration
+        : node;
+    if (isDeclNode(decl)) {
+      const did = idName(decl.id);
       if (did && !locals.has(did)) locals.set(did, decl);
       if (decl.type === 'VariableDeclaration') {
-        for (const d of decl.declarations ?? []) if (d.id?.type === 'Identifier' && !locals.has(d.id.name)) locals.set(d.id.name, d);
+        for (const d of decl.declarations ?? []) {
+          if (d.id?.type === 'Identifier' && !locals.has(d.id.name)) {
+            locals.set(d.id.name, d);
+          }
+        }
       }
     }
   }
@@ -195,7 +233,9 @@ export function extractSymbols(file: string, text: string): FileParse {
         if (spec.type === 'ImportSpecifier') {
           const im = idName(spec.imported);
           if (im) imports.push({ source: node.source.value, name: im });
-        } else if (spec.type === 'ImportDefaultSpecifier') imports.push({ source: node.source.value, name: 'default' });
+        } else if (spec.type === 'ImportDefaultSpecifier') {
+          imports.push({ source: node.source.value, name: 'default' });
+        }
         // ImportNamespaceSpecifier: no per-symbol attribution — skipped.
       }
       continue;
@@ -211,11 +251,19 @@ export function extractSymbols(file: string, text: string): FileParse {
         for (const spec of node.specifiers ?? []) {
           if (spec.type !== 'ExportSpecifier') continue;
           const ln = idName(spec.local);
-          if (ln) imports.push({ source: node.source.value, name: ln, reexport: true });
+          if (ln) {
+            imports.push({
+              source: node.source.value,
+              name: ln,
+              reexport: true,
+            });
+          }
         }
         continue;
       }
-      if (node.declaration) pushDecl(node.declaration, true, symbols);
+      if (isDeclNode(node.declaration)) {
+        pushDecl(node.declaration, true, symbols);
+      }
       for (const spec of node.specifiers ?? []) {
         if (spec.type !== 'ExportSpecifier') continue;
         const exp = idName(spec.exported);
@@ -225,11 +273,21 @@ export function extractSymbols(file: string, text: string): FileParse {
         if (reexp) {
           // `import { x } …; export { x }` — re-export of an imported binding. Edge
           // to the true definition, NOT a local symbol (else this barrel shadows it).
-          imports.push({ source: reexp.source, name: reexp.name, reexport: true });
+          imports.push({
+            source: reexp.source,
+            name: reexp.name,
+            reexport: true,
+          });
           continue;
         }
         const target = locals.get(local) ?? spec;
-        symbols.push({ name: exp, kind: 'ExportSpecifier', charStart: target.start, charEnd: target.end, exported: true });
+        symbols.push({
+          name: exp,
+          kind: 'ExportSpecifier',
+          charStart: target.start,
+          charEnd: target.end,
+          exported: true,
+        });
       }
       continue;
     }
@@ -237,7 +295,12 @@ export function extractSymbols(file: string, text: string): FileParse {
       const decl = node.declaration;
       // Named `export default function foo` / `class Bar`: index it like any
       // declaration — real kind, and (for a class) its methods too.
-      if (decl && (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration') && decl.id?.name) {
+      if (
+        isDeclNode(decl) &&
+        (decl.type === 'FunctionDeclaration' ||
+          decl.type === 'ClassDeclaration') &&
+        decl.id?.name
+      ) {
         const at = symbols.length;
         pushDecl(decl, true, symbols);
         if (symbols[at]) symbols[at].default = true; // foo is also the module's `default` export
@@ -245,29 +308,53 @@ export function extractSymbols(file: string, text: string): FileParse {
       }
       // Anonymous default (or an expression): a single 'default' entry.
       const t = decl ?? node;
-      symbols.push({ name: 'default', kind: 'default', charStart: t.start, charEnd: t.end, exported: true });
+      symbols.push({
+        name: 'default',
+        kind: 'default',
+        charStart: t.start,
+        charEnd: t.end,
+        exported: true,
+      });
       continue;
     }
-    if (isDeclNode(node.type)) pushDecl(node, false, symbols);
+    if (isDeclNode(node)) pushDecl(node, false, symbols);
   }
   const { refs } = walkProgram(res.program);
   return { symbols: consolidateLocalExports(symbols), imports, refs };
 }
 
-function pushDecl(declNode: unknown, exported: boolean, out: SymbolRec[]): void {
-  const decl = declNode as DeclNode;
+function pushDecl(decl: DeclNode, exported: boolean, out: SymbolRec[]): void {
   const visibility = exported ? undefined : 'module-private';
   if (decl.type === 'FunctionDeclaration') {
-    if (decl.id?.name) out.push({ name: decl.id.name, kind: 'FunctionDeclaration', charStart: decl.start, charEnd: decl.end, exported, visibility });
+    if (decl.id?.name) {
+      out.push({
+        name: decl.id.name,
+        kind: 'FunctionDeclaration',
+        charStart: decl.start,
+        charEnd: decl.end,
+        exported,
+        visibility,
+      });
+    }
     return;
   }
   if (decl.type === 'ClassDeclaration') {
     if (!decl.id?.name) return;
-    const superName = decl.superClass?.type === 'Identifier' ? decl.superClass.name : undefined;
-    out.push({ name: decl.id.name, kind: 'ClassDeclaration', charStart: decl.start, charEnd: decl.end, exported, visibility, extends: superName });
+    const superName =
+      decl.superClass?.type === 'Identifier' ? decl.superClass.name : undefined;
+    out.push({
+      name: decl.id.name,
+      kind: 'ClassDeclaration',
+      charStart: decl.start,
+      charEnd: decl.end,
+      exported,
+      visibility,
+      extends: superName,
+    });
     for (const m of decl.body?.body ?? []) {
       if (m.type !== 'MethodDefinition' || !m.key) continue;
-      const name = m.key.name ?? (m.key.type === 'Literal' ? String(m.key.value) : null);
+      const name =
+        m.key.name ?? (m.key.type === 'Literal' ? String(m.key.value) : null);
       if (!name) continue;
       out.push({
         name,
@@ -284,11 +371,27 @@ function pushDecl(declNode: unknown, exported: boolean, out: SymbolRec[]): void 
   }
   if (decl.type === 'VariableDeclaration') {
     for (const d of decl.declarations ?? []) {
-      if (d.id?.type === 'Identifier' && d.id.name) out.push({ name: d.id.name, kind: `${decl.kind}-var`, charStart: d.start, charEnd: d.end, exported, visibility });
+      if (d.id?.type === 'Identifier' && d.id.name) {
+        out.push({
+          name: d.id.name,
+          kind: `${decl.kind}-var`,
+          charStart: d.start,
+          charEnd: d.end,
+          exported,
+          visibility,
+        });
+      }
     }
     return;
   }
   if (TYPE_DECL.has(decl.type) && typeof decl.id?.name === 'string') {
-    out.push({ name: decl.id.name, kind: decl.type, charStart: decl.start, charEnd: decl.end, exported, visibility });
+    out.push({
+      name: decl.id.name,
+      kind: decl.type,
+      charStart: decl.start,
+      charEnd: decl.end,
+      exported,
+      visibility,
+    });
   }
 }

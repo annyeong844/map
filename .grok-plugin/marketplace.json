@@ -16,13 +16,7 @@
       "category": "tools",
       "source": "./",
       "homepage": "https://github.com/annyeong844/map",
-      "keywords": [
-        "code-map",
-        "retrieval",
-        "mcp",
-        "code-navigation",
-        "skill"
-      ]
+      "keywords": ["code-map", "retrieval", "mcp", "code-navigation", "skill"]
     }
   ]
 }

@@ -1,8 +1,40 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["eslint", "typescript", "unicorn", "oxc", "import"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "allow",
+    "pedantic": "allow",
+    "perf": "allow",
+    "style": "allow",
+    "restriction": "allow",
+    "nursery": "allow"
+  },
   "rules": {
-    "import/no-cycle": "error"
+    "curly": ["error", "multi-line", "consistent"],
+    "eqeqeq": ["error", "always", { "null": "ignore" }],
+    "import/no-cycle": "error",
+    "import/no-duplicates": "error",
+    "import/no-self-import": "error",
+    "no-loop-func": "error",
+    "no-promise-executor-return": "error",
+    "no-shadow": "error",
+    "no-unneeded-ternary": "error",
+    "oxc/no-map-spread": "error",
+    "prefer-const": "error",
+    "sort-imports": [
+      "error",
+      {
+        "allowSeparatedGroups": true,
+        "ignoreCase": true,
+        "ignoreDeclarationSort": true,
+        "ignoreMemberSort": false,
+        "memberSyntaxSortOrder": ["none", "all", "multiple", "single"]
+      }
+    ],
+    "typescript/no-require-imports": "error",
+    "unicorn/consistent-function-scoping": "error",
+    "unicorn/no-nested-ternary": "error"
   },
   "overrides": [
     {
@@ -13,8 +45,8 @@
           {
             "patterns": [
               {
-                "group": ["../cli/**", "../mcp/**", "../../code-oracle/**"],
-                "message": "Core must not depend on CLI, MCP, or Oracle adapters."
+                "group": ["../**", "../../**", "../../../**"],
+                "message": "Core is a leaf owner and may import only sibling core modules or declared external dependencies."
               }
             ]
           }
@@ -29,8 +61,14 @@
           {
             "patterns": [
               {
-                "group": ["../mcp/**"],
-                "message": "CLI commands and the MCP adapter must meet through core owners."
+                "group": [
+                  "../mcp/**",
+                  "../../code-oracle/**",
+                  "../../hooks/**",
+                  "../../scripts/**",
+                  "../../test/**"
+                ],
+                "message": "CLI may depend only on CLI peers, core, and the version leaf."
               }
             ]
           }
@@ -45,8 +83,14 @@
           {
             "patterns": [
               {
-                "group": ["../cli/**"],
-                "message": "The MCP adapter must not depend on CLI commands."
+                "group": [
+                  "../cli/**",
+                  "../../code-oracle/**",
+                  "../../hooks/**",
+                  "../../scripts/**",
+                  "../../test/**"
+                ],
+                "message": "MCP may depend only on MCP peers, core, and the version leaf."
               }
             ]
           }
@@ -54,15 +98,81 @@
       }
     },
     {
-      "files": ["code-oracle/**/*.ts"],
+      "files": ["src/version.ts"],
       "rules": {
         "no-restricted-imports": [
           "error",
           {
             "patterns": [
               {
-                "group": ["../src/**", "../../src/**"],
+                "group": ["./**", "../**"],
+                "message": "The version module is a leaf and must not depend on another project owner."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["code-oracle/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../src/**",
+                  "../hooks/**",
+                  "../scripts/**",
+                  "../test/**",
+                  "./scripts/**",
+                  "./test/**"
+                ],
                 "message": "Oracle stays an isolated optional service; do not couple it to code-map core."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["scripts/**/*.{ts,mjs}"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../src/cli/**",
+                  "../src/mcp/**",
+                  "../code-oracle/**",
+                  "../hooks/**",
+                  "../test/**"
+                ],
+                "message": "Tooling may inspect core/version owners but must not couple to runtime adapters or tests."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["hooks/**/*.mjs"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../src/**",
+                  "../code-oracle/**",
+                  "../scripts/**",
+                  "../test/**"
+                ],
+                "message": "Hooks are standalone host adapters and must not pull project runtime owners into the host process."
               }
             ]
           }

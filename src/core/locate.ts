@@ -27,6 +27,7 @@ const searchTables = new WeakMap<MapIndex, SearchTable>();
 const resultCaches = new WeakMap<MapIndex, Map<string, Scored[]>>();
 const RESULT_CACHE_SIZE = 32;
 const RESULT_CACHE_MAX_HITS = 64;
+const DEFAULT_LOCATE_LIMIT = 20;
 
 export interface LocateOptions {
   /** Filter by AST kind (substring, case-insensitive). e.g. "function", "method", "class". */
@@ -45,19 +46,124 @@ export interface LocatedResult {
 
 // Drop these from a multi-word query — they carry no routing signal.
 const STOP = new Set([
-  'the', 'a', 'an', 'of', 'to', 'in', 'for', 'and', 'or', 'is', 'are', 'how', 'where', 'what', 'that', 'this', 'with', 'between', 'two', 'into', 'from', 'on', 'it', 'its',
-  'by', 'as', 'at', 'be', 'do', 'does', 'when', 'which', 'we', 'i', 'you',
+  'the',
+  'a',
+  'an',
+  'of',
+  'to',
+  'in',
+  'for',
+  'and',
+  'or',
+  'is',
+  'are',
+  'how',
+  'where',
+  'what',
+  'that',
+  'this',
+  'with',
+  'between',
+  'two',
+  'into',
+  'from',
+  'on',
+  'it',
+  'its',
+  'by',
+  'as',
+  'at',
+  'be',
+  'do',
+  'does',
+  'when',
+  'which',
+  'we',
+  'i',
+  'you',
 ]);
 
 // An action verb in the query implies the impact point is code that *does* it
 // (a function/method), not a type that merely names it.
 const ACTION = new Set([
-  'compute', 'build', 'parse', 'run', 'handle', 'resolve', 'load', 'save', 'create', 'make', 'get', 'set', 'find', 'detect', 'scan', 'render', 'format', 'validate', 'check',
-  'update', 'add', 'remove', 'delete', 'diff', 'sort', 'filter', 'walk', 'emit', 'read', 'write', 'fetch', 'send', 'start', 'stop', 'init', 'process', 'analyze', 'extract',
-  'generate', 'apply', 'merge', 'split', 'count', 'compare', 'verify',
+  'compute',
+  'build',
+  'parse',
+  'run',
+  'handle',
+  'resolve',
+  'load',
+  'save',
+  'create',
+  'make',
+  'get',
+  'set',
+  'find',
+  'detect',
+  'scan',
+  'render',
+  'format',
+  'validate',
+  'check',
+  'update',
+  'add',
+  'remove',
+  'delete',
+  'diff',
+  'sort',
+  'filter',
+  'walk',
+  'emit',
+  'read',
+  'write',
+  'fetch',
+  'send',
+  'start',
+  'stop',
+  'init',
+  'process',
+  'analyze',
+  'extract',
+  'generate',
+  'apply',
+  'merge',
+  'split',
+  'count',
+  'compare',
+  'verify',
 ]);
 const FN_KINDS = new Set(['FunctionDeclaration', 'ClassMethod', 'default']);
-const TYPE_KINDS = new Set(['TSInterfaceDeclaration', 'TSTypeAliasDeclaration', 'TSEnumDeclaration']);
+const TYPE_KINDS = new Set([
+  'TSInterfaceDeclaration',
+  'TSTypeAliasDeclaration',
+  'TSEnumDeclaration',
+]);
+
+const ASCII_UPPER_A = 65;
+const ASCII_UPPER_Z = 90;
+const ASCII_LOWER_A = 97;
+const ASCII_LOWER_Z = 122;
+const ASCII_DIGIT_0 = 48;
+const ASCII_DIGIT_9 = 57;
+const ASCII_CASE_OFFSET = 32;
+const MAX_WORD_MASK_NAME_LENGTH = 30;
+
+const TIER_EXACT = 100;
+const TIER_CASE_INSENSITIVE_EXACT = 92;
+const TIER_WORD = 80;
+const TIER_PREFIX = 70;
+const TIER_SUBSTRING = 50;
+const TIER_FUZZY = 30;
+const MIN_FUZZY_TERM_LENGTH = 3;
+const MAX_LENGTH_PENALTY = 20;
+const LENGTH_PENALTY_FACTOR = 0.5;
+
+function kindPreference(kind: string, verbQuery: boolean): number {
+  if (!verbQuery) return 0;
+  if (FN_KINDS.has(kind)) return 1;
+  if (TYPE_KINDS.has(kind)) return -1;
+  return 0;
+}
 
 interface Term {
   raw: string;
@@ -75,10 +181,14 @@ function queryTerms(q: string): Term[] {
   return out;
 }
 
-const isUpperCode = (code: number): boolean => code >= 65 && code <= 90;
-const isLowerCode = (code: number): boolean => code >= 97 && code <= 122;
-const isDigitCode = (code: number): boolean => code >= 48 && code <= 57;
-const isWordCode = (code: number): boolean => isUpperCode(code) || isLowerCode(code) || isDigitCode(code);
+const isUpperCode = (code: number): boolean =>
+  code >= ASCII_UPPER_A && code <= ASCII_UPPER_Z;
+const isLowerCode = (code: number): boolean =>
+  code >= ASCII_LOWER_A && code <= ASCII_LOWER_Z;
+const isDigitCode = (code: number): boolean =>
+  code >= ASCII_DIGIT_0 && code <= ASCII_DIGIT_9;
+const isWordCode = (code: number): boolean =>
+  isUpperCode(code) || isLowerCode(code) || isDigitCode(code);
 
 /** Reference implementation path for the rare case where Unicode lowercasing
  * changes string length. It compares one query term while walking identifier
@@ -98,7 +208,11 @@ function hasSubwordStreaming(name: string, low: string): boolean {
     }
     const prev = name.charCodeAt(i - 1);
     const next = i + 1 < name.length ? name.charCodeAt(i + 1) : -1;
-    const boundary = isUpperCode(code) && (isLowerCode(prev) || isDigitCode(prev) || (isUpperCode(prev) && isLowerCode(next)));
+    const boundary =
+      isUpperCode(code) &&
+      (isLowerCode(prev) ||
+        isDigitCode(prev) ||
+        (isUpperCode(prev) && isLowerCode(next)));
     if (boundary) {
       if (sameLowerAscii(name, start, i, low)) return true;
       start = i;
@@ -107,11 +221,16 @@ function hasSubwordStreaming(name: string, low: string): boolean {
   return false;
 }
 
-function sameLowerAscii(name: string, start: number, end: number, low: string): boolean {
+function sameLowerAscii(
+  name: string,
+  start: number,
+  end: number,
+  low: string,
+): boolean {
   if (end - start !== low.length) return false;
   for (let i = 0; i < low.length; i++) {
     let code = name.charCodeAt(start + i);
-    if (isUpperCode(code)) code += 32;
+    if (isUpperCode(code)) code += ASCII_CASE_OFFSET;
     if (code !== low.charCodeAt(i)) return false;
   }
   return true;
@@ -120,7 +239,7 @@ function sameLowerAscii(name: string, start: number, end: number, low: string): 
 /** Pack a normal short identifier's segment boundaries into one 31-bit scalar.
  * Later terms test it in O(1), retaining no arrays/Sets. Long names stream. */
 function subwordBoundaryMask(name: string): number | null {
-  if (name.length > 30) return null;
+  if (name.length > MAX_WORD_MASK_NAME_LENGTH) return null;
   let mask = 0;
   let start = -1;
   for (let i = 0; i <= name.length; i++) {
@@ -139,7 +258,12 @@ function subwordBoundaryMask(name: string): number | null {
     }
     const prev = name.charCodeAt(i - 1);
     const next = i + 1 < name.length ? name.charCodeAt(i + 1) : -1;
-    if (isUpperCode(code) && (isLowerCode(prev) || isDigitCode(prev) || (isUpperCode(prev) && isLowerCode(next)))) {
+    if (
+      isUpperCode(code) &&
+      (isLowerCode(prev) ||
+        isDigitCode(prev) ||
+        (isUpperCode(prev) && isLowerCode(next)))
+    ) {
       mask |= 1 << i;
       start = i;
     }
@@ -158,9 +282,18 @@ function isMaskedSubword(mask: number, start: number, end: number): boolean {
 /** Test one lowercased query term against camel/snake/kebab segments. Built-in
  * `indexOf` narrows the work to actual occurrences; boundary checks preserve the
  * old splitter's acronym and camel-case rules without retaining a Set per entry. */
-function hasSubword(name: string, nameLow: string, low: string, firstAt: number, normalized: SearchEntry): boolean {
+function hasSubword(
+  name: string,
+  nameLow: string,
+  low: string,
+  firstAt: number,
+  normalized: SearchEntry,
+): boolean {
   if (name.length !== nameLow.length) return hasSubwordStreaming(name, low);
-  const mask = normalized.wordMask === undefined ? (normalized.wordMask = subwordBoundaryMask(name)) : normalized.wordMask;
+  const mask =
+    normalized.wordMask === undefined
+      ? (normalized.wordMask = subwordBoundaryMask(name))
+      : normalized.wordMask;
   if (mask === null) return hasSubwordStreaming(name, low);
   for (let at = firstAt; at !== -1; at = nameLow.indexOf(low, at + 1)) {
     if (isMaskedSubword(mask, at, at + low.length)) return true;
@@ -208,7 +341,11 @@ function toHits(scored: Scored[]): LocateHit[] {
   }));
 }
 
-function resultCacheKey(query: string, opts: LocateOptions, limit: number): string {
+function resultCacheKey(
+  query: string,
+  opts: LocateOptions,
+  limit: number,
+): string {
   const kind = opts.kind ?? '';
   const file = opts.file ?? '';
   return `${limit}:${kind.length}:${kind}:${file.length}:${file}:${query}`;
@@ -257,7 +394,9 @@ function offerTop(heap: Scored[], value: Scored, limit: number): void {
     if (left >= heap.length) return;
     const right = left + 1;
     let worse = left;
-    if (right < heap.length && compareScored(heap[right], heap[left]) > 0) worse = right;
+    if (right < heap.length && compareScored(heap[right], heap[left]) > 0) {
+      worse = right;
+    }
     if (compareScored(heap[worse], heap[i]) <= 0) return;
     const swap = heap[i];
     heap[i] = heap[worse];
@@ -278,11 +417,18 @@ function offerTop(heap: Scored[], value: Scored, limit: number): void {
  * A query may be a bare name ("buildIndex"), a multi-word concept ("compute the
  * diff"), a path-scoped name ("alias-map#buildAliasMap"), or a path fragment.
  */
-function locateScored(index: MapIndex, query: string, opts: LocateOptions = {}): Scored[] {
-  const requestedLimit = opts.limit ?? 20;
-  const limit = Number.isFinite(requestedLimit) ? Math.max(0, Math.trunc(requestedLimit)) : index.entries.length;
+function locateScored(
+  index: MapIndex,
+  query: string,
+  opts: LocateOptions = {},
+): Scored[] {
+  const requestedLimit = opts.limit ?? DEFAULT_LOCATE_LIMIT;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.trunc(requestedLimit))
+    : index.entries.length;
   if (limit === 0) return [];
-  const cacheKey = limit <= RESULT_CACHE_MAX_HITS ? resultCacheKey(query, opts, limit) : '';
+  const cacheKey =
+    limit <= RESULT_CACHE_MAX_HITS ? resultCacheKey(query, opts, limit) : '';
   if (cacheKey) {
     const cached = cachedResult(index, cacheKey);
     if (cached) return cached;
@@ -301,7 +447,9 @@ function locateScored(index: MapIndex, query: string, opts: LocateOptions = {}):
   // Embedded path#name syntax denotes a scope when it names an exact v13 file.
   // File fragments and the explicit `opts.file` substring filter retain their
   // broader scan semantics.
-  const fileRange = pathScope ? exactFileEntryRange(index, pathScope) : undefined;
+  const fileRange = pathScope
+    ? exactFileEntryRange(index, pathScope)
+    : undefined;
   const exactFile = fileRange ? pathScope : '';
   const fileNeedle = filePart.toLowerCase();
   const kindNeedle = (opts.kind ?? '').toLowerCase();
@@ -316,10 +464,30 @@ function locateScored(index: MapIndex, query: string, opts: LocateOptions = {}):
   if (exactBucket) {
     const exactNamed = Array.isArray(exactBucket) ? exactBucket : [exactBucket];
     for (const entry of exactNamed) {
-      if (exactFile ? entry.file !== exactFile : fileNeedle && !entry.file.toLowerCase().includes(fileNeedle)) continue;
-      if (kindNeedle && !entry.kind.toLowerCase().includes(kindNeedle)) continue;
-      const kindPrior = verbQuery ? (FN_KINDS.has(entry.kind) ? 1 : TYPE_KINDS.has(entry.kind) ? -1 : 0) : 0;
-      offerTop(scored, { entry, tier: 100, match: 'exact', matched: terms.length, kindPrior, lenPen: 0, fanIn: entry.fanIn ?? 0 }, limit);
+      if (
+        exactFile
+          ? entry.file !== exactFile
+          : fileNeedle && !entry.file.toLowerCase().includes(fileNeedle)
+      ) {
+        continue;
+      }
+      if (kindNeedle && !entry.kind.toLowerCase().includes(kindNeedle)) {
+        continue;
+      }
+      const kindPrior = kindPreference(entry.kind, verbQuery);
+      offerTop(
+        scored,
+        {
+          entry,
+          tier: TIER_EXACT,
+          match: 'exact',
+          matched: terms.length,
+          kindPrior,
+          lenPen: 0,
+          fanIn: entry.fanIn ?? 0,
+        },
+        limit,
+      );
     }
     if (scored.length) {
       scored.sort(compareScored);
@@ -333,18 +501,41 @@ function locateScored(index: MapIndex, query: string, opts: LocateOptions = {}):
   const end = fileRange?.end ?? index.entries.length;
   for (let i = start; i < end; i++) {
     const e = index.entries[i];
-    const normalized = normalizedEntries[i] ??= {};
-    if (!exactFile && fileNeedle && !(normalized.fileLow ??= e.file.toLowerCase()).includes(fileNeedle)) continue;
-    if (kindNeedle && !(normalized.kindLow ??= e.kind.toLowerCase()).includes(kindNeedle)) continue;
+    const normalized = (normalizedEntries[i] ??= {});
+    if (
+      !exactFile &&
+      fileNeedle &&
+      !(normalized.fileLow ??= e.file.toLowerCase()).includes(fileNeedle)
+    ) {
+      continue;
+    }
+    if (
+      kindNeedle &&
+      !(normalized.kindLow ??= e.kind.toLowerCase()).includes(kindNeedle)
+    ) {
+      continue;
+    }
 
     if (terms.length === 0) {
-      offerTop(scored, { entry: e, tier: 1, match: 'any', matched: 0, kindPrior: 0, lenPen: 0, fanIn: e.fanIn ?? 0 }, limit);
+      offerTop(
+        scored,
+        {
+          entry: e,
+          tier: 1,
+          match: 'any',
+          matched: 0,
+          kindPrior: 0,
+          lenPen: 0,
+          fanIn: e.fanIn ?? 0,
+        },
+        limit,
+      );
       continue;
     }
 
     let best = 0;
     let matched = 0;
-    const nameLow = normalized.nameLow ??= e.name.toLowerCase();
+    const nameLow = (normalized.nameLow ??= e.name.toLowerCase());
     for (const t of terms) {
       const tier = termTier(e.name, nameLow, normalized, t);
       if (tier > 0) matched++;
@@ -352,12 +543,19 @@ function locateScored(index: MapIndex, query: string, opts: LocateOptions = {}):
     }
     if (best === 0) continue;
 
-    let kindPrior = 0;
-    if (verbQuery) kindPrior = FN_KINDS.has(e.kind) ? 1 : TYPE_KINDS.has(e.kind) ? -1 : 0;
+    const kindPrior = kindPreference(e.kind, verbQuery);
 
     offerTop(
       scored,
-      { entry: e, tier: best, match: tierLabel(best), matched, kindPrior, lenPen: lengthPenalty(e.name, namePart), fanIn: e.fanIn ?? 0 },
+      {
+        entry: e,
+        tier: best,
+        match: tierLabel(best),
+        matched,
+        kindPrior,
+        lenPen: lengthPenalty(e.name, namePart),
+        fanIn: e.fanIn ?? 0,
+      },
       limit,
     );
   }
@@ -368,46 +566,71 @@ function locateScored(index: MapIndex, query: string, opts: LocateOptions = {}):
   return scored;
 }
 
-export function locate(index: MapIndex, query: string, opts: LocateOptions = {}): LocateHit[] {
+export function locate(
+  index: MapIndex,
+  query: string,
+  opts: LocateOptions = {},
+): LocateHit[] {
   return toHits(locateScored(index, query, opts));
 }
 
 /** Locate plus the already-scored entry objects. Read resolution uses this to
  * avoid scanning the whole index again merely to turn a winning id back into
  * the entry that produced it. */
-export function locateWithEntries(index: MapIndex, query: string, opts: LocateOptions = {}): LocatedResult {
+export function locateWithEntries(
+  index: MapIndex,
+  query: string,
+  opts: LocateOptions = {},
+): LocatedResult {
   const scored = locateScored(index, query, opts);
   return { hits: toHits(scored), entries: scored.map((item) => item.entry) };
 }
 
-function termTier(name: string, nl: string, normalized: SearchEntry, t: Term): number {
-  if (name === t.raw) return 100;
-  if (nl === t.low) return 92;
+function termTier(
+  name: string,
+  nl: string,
+  normalized: SearchEntry,
+  t: Term,
+): number {
+  if (name === t.raw) return TIER_EXACT;
+  if (nl === t.low) return TIER_CASE_INSENSITIVE_EXACT;
   const at = nl.indexOf(t.low);
   if (at !== -1) {
-    if (hasSubword(name, nl, t.low, at, normalized)) return 80; // whole subword: "diff" in computeDiff
-    if (at === 0) return 70;
-    return 50;
+    if (hasSubword(name, nl, t.low, at, normalized)) return TIER_WORD; // whole subword: "diff" in computeDiff
+    if (at === 0) return TIER_PREFIX;
+    return TIER_SUBSTRING;
   }
-  if (t.low.length >= 3 && isSubsequence(t.low, nl)) return 30;
+  if (t.low.length >= MIN_FUZZY_TERM_LENGTH && isSubsequence(t.low, nl)) {
+    return TIER_FUZZY;
+  }
   return 0;
 }
 
 function tierLabel(tier: number): string {
   switch (tier) {
-    case 100: return 'exact';
-    case 92: return 'ci-exact';
-    case 80: return 'word';
-    case 70: return 'prefix';
-    case 50: return 'substring';
-    case 30: return 'fuzzy';
-    default: return '';
+    case TIER_EXACT:
+      return 'exact';
+    case TIER_CASE_INSENSITIVE_EXACT:
+      return 'ci-exact';
+    case TIER_WORD:
+      return 'word';
+    case TIER_PREFIX:
+      return 'prefix';
+    case TIER_SUBSTRING:
+      return 'substring';
+    case TIER_FUZZY:
+      return 'fuzzy';
+    default:
+      return '';
   }
 }
 
 /** Prefer the closest-length name among same-tier matches (buildIndex > buildIndexFromCacheLazily). */
 function lengthPenalty(name: string, q: string): number {
-  return Math.min(20, Math.max(0, name.length - q.length) * 0.5);
+  return Math.min(
+    MAX_LENGTH_PENALTY,
+    Math.max(0, name.length - q.length) * LENGTH_PENALTY_FACTOR,
+  );
 }
 
 function isSubsequence(needle: string, hay: string): boolean {

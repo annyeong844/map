@@ -1,9 +1,9 @@
 node_modules/
 dist/
-.map-index.json
-*.log
-*.tmp
 .cache/
 .audit/
 .bench/
 .claude/
+.map-index.json
+*.log
+*.tmp

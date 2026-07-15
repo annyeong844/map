@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Sync a standalone code-oracle install (server.ts + a *platform-correct* node_modules)
+// Sync a standalone code-oracle install (runtime sources + a platform-correct node_modules)
 // from this source tree to a target dir, then `npm install` there.
 //
 // Why this exists: `npm i -g <local path>` SYMLINKS back to the source tree, so it
@@ -16,7 +16,7 @@
 //   node scripts\sync-win.mjs C:\Users\you\.local\code-oracle-win
 //
 // Then wire the MCP to: <that platform's node> <targetDir>/server.ts
-import { cpSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -29,14 +29,37 @@ const target = resolve(
 );
 
 mkdirSync(target, { recursive: true });
-for (const f of ['server.ts', 'package.json', 'tsconfig.json', 'package-lock.json']) {
+const runtimeSources = readdirSync(SRC, { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+  .map((entry) => entry.name)
+  .sort();
+const runtimeSourceSet = new Set(runtimeSources);
+for (const entry of readdirSync(target, { withFileTypes: true })) {
+  if (
+    entry.isFile() &&
+    entry.name.endsWith('.ts') &&
+    !runtimeSourceSet.has(entry.name)
+  ) {
+    rmSync(join(target, entry.name));
+  }
+}
+for (const f of [
+  ...runtimeSources,
+  'package.json',
+  'tsconfig.json',
+  'package-lock.json',
+]) {
   const s = join(SRC, f);
   if (existsSync(s)) cpSync(s, join(target, f));
 }
 console.log(`synced source -> ${target}`);
 
 // Static command (no user input) as a single shell string — avoids DEP0190 (args + shell).
-const r = spawnSync('npm install --omit=dev', { cwd: target, stdio: 'inherit', shell: true });
+const r = spawnSync('npm install --omit=dev', {
+  cwd: target,
+  stdio: 'inherit',
+  shell: true,
+});
 if (r.status !== 0) {
   console.error('npm install failed in target');
   process.exit(r.status || 1);
@@ -45,6 +68,9 @@ if (r.status !== 0) {
 const tnp = join(target, 'node_modules', '@typescript');
 if (existsSync(tnp)) {
   const bins = readdirSync(tnp).filter((d) => d.startsWith('native-preview'));
-  console.log('native binary:', bins.join(', ') || '(none — check optional deps)');
+  console.log(
+    'native binary:',
+    bins.join(', ') || '(none — check optional deps)',
+  );
 }
 console.log(`done. wire MCP: <node> ${join(target, 'server.ts')}`);

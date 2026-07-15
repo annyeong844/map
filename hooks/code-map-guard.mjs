@@ -13,21 +13,33 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+const SESSION_ID_MAX_LENGTH = 64;
 const proceed = () => process.exit(0); // never break the user's tool call
 
 let raw = '';
 try {
   raw = readFileSync(0, 'utf8');
 } catch {
-  try { raw = readFileSync('/dev/stdin', 'utf8'); } catch { proceed(); }
+  try {
+    raw = readFileSync('/dev/stdin', 'utf8');
+  } catch {
+    proceed();
+  }
 }
 let data;
-try { data = JSON.parse(raw); } catch { proceed(); }
+try {
+  data = JSON.parse(raw);
+} catch {
+  proceed();
+}
 
 const tool = data?.tool_name || '';
-const cmd = typeof data?.tool_input?.command === 'string' ? data.tool_input.command : '';
+const cmd =
+  typeof data?.tool_input?.command === 'string' ? data.tool_input.command : '';
 const cwd = data?.tool_input?.cwd || data?.cwd || process.cwd();
-const session = String(data?.session_id || 'nosession').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+const session = String(data?.session_id || 'nosession')
+  .replace(/[^A-Za-z0-9_-]/g, '')
+  .slice(0, SESSION_ID_MAX_LENGTH);
 
 // Gate 1 — only act inside a code-map-indexed repo. Walk up for .map-index.json.
 function indexed(dir) {
@@ -45,18 +57,28 @@ if (!indexed(cwd)) proceed();
 // Gate 2 — is this a shell code read/scan we route differently?
 const SRC = /\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|py|pyi)\b/;
 const isGrepTool = tool === 'Grep';
-const bodyRead = tool === 'Bash' && /\b(?:cat|sed|head|tail|awk)\b/.test(cmd) && SRC.test(cmd);
-const discovery = isGrepTool || (tool === 'Bash' && /\b(?:grep|rg|ack|ag)\b/.test(cmd));
+const bodyRead =
+  tool === 'Bash' && /\b(?:cat|sed|head|tail|awk)\b/.test(cmd) && SRC.test(cmd);
+const discovery =
+  isGrepTool || (tool === 'Bash' && /\b(?:grep|rg|ack|ag)\b/.test(cmd));
 if (!bodyRead && !discovery) proceed();
 
 // Throttle — re-inject at most once per window per session (periodic, not every turn).
 const WINDOW_MS = 90_000;
 const state = join(tmpdir(), `code-map-guard-${session}.json`);
 let last = 0;
-try { last = Number(JSON.parse(readFileSync(state, 'utf8')).last) || 0; } catch { /* absent/corrupt throttle state means no prior reminder */ }
+try {
+  last = Number(JSON.parse(readFileSync(state, 'utf8')).last) || 0;
+} catch {
+  /* absent/corrupt throttle state means no prior reminder */
+}
 const now = Date.now();
 if (now - last < WINDOW_MS) proceed();
-try { writeFileSync(state, JSON.stringify({ last: now })); } catch { /* fail open when throttle persistence is unavailable */ }
+try {
+  writeFileSync(state, JSON.stringify({ last: now }));
+} catch {
+  /* fail open when throttle persistence is unavailable */
+}
 
 const reminder = bodyRead
   ? 'code-map routing — this repo is indexed (.map-index.json). Read a known symbol body with the code-map `read` tool (by `path#name` or id), not cat/sed/head/tail: `read` re-anchors when the file has drifted and returns just the symbol. For several known refs, make one batched `read` (refs: [...]). Do not shell-read a body you can fetch by coordinate.'

@@ -26,7 +26,7 @@
   likewise means this process is stale; restart and make a normal `read`.
 
 Reading **known** symbols is the win. On pure **discovery**, grep alone wins — the double-call
-(grep to find *and* read on top) loses; the rules above are what keep discovery a win.
+(grep to find _and_ read on top) loses; the rules above are what keep discovery a win.
 
 **Who-calls / where-defined / what-implements:** grep drowns on common names. If the type-aware
 sibling **code-oracle** is available (`callers`/`definition`/`implementations`; tsgo for TS/JS,

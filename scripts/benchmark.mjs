@@ -11,14 +11,17 @@ import { prepareLookup } from '../src/core/store.ts';
 import { INDEX_VERSION } from '../src/core/types.ts';
 import { token } from '../src/core/util.ts';
 
-const count = (name, fallback) => Math.max(1, Number(process.env[name] ?? fallback));
+const count = (name, fallback) =>
+  Math.max(1, Number(process.env[name] ?? fallback));
 const BUILD_SYMBOLS = count('MAP_BENCH_BUILD_SYMBOLS', 2_000);
 const LOCATE_ENTRIES = count('MAP_BENCH_LOCATE_ENTRIES', 50_000);
 const LINE_ENTRIES = count('MAP_BENCH_LINE_ENTRIES', 20_000);
 const BARREL_DEPTH = count('MAP_BENCH_BARREL_DEPTH', 10_000);
 const FANIN_IMPORTERS = count('MAP_BENCH_FANIN_IMPORTERS', 50_000);
 const SAMPLES = count('MAP_BENCH_SAMPLES', 5);
-const LOOKUP_SCALES = String(process.env.MAP_BENCH_LOOKUP_SCALES ?? '7000,70000')
+const LOOKUP_SCALES = String(
+  process.env.MAP_BENCH_LOOKUP_SCALES ?? '7000,70000',
+)
   .split(',')
   .map((value) => Math.max(1, Number(value.trim())))
   .filter(Number.isFinite);
@@ -58,7 +61,10 @@ const measurePrepared = async (name, prepare, run) => {
 
 const buildRoot = mkdtempSync(join(tmpdir(), 'map-benchmark-build-'));
 try {
-  const buildSource = Array.from({ length: BUILD_SYMBOLS }, (_, i) => `export function f${i}(x: number) { return x + ${i}; }\n`).join('');
+  const buildSource = Array.from(
+    { length: BUILD_SYMBOLS },
+    (_, i) => `export function f${i}(x: number) { return x + ${i}; }\n`,
+  ).join('');
   writeFileSync(join(buildRoot, 'large.ts'), buildSource);
   let built;
   await measure('build.full', async () => {
@@ -69,7 +75,10 @@ try {
     const report = await buildIndex({ root: buildRoot, previous: built.index });
     return { reusedFiles: report.reused, unchanged: report.unchanged };
   });
-  writeFileSync(join(buildRoot, 'large.ts'), `// body-only edit\n${buildSource}`);
+  writeFileSync(
+    join(buildRoot, 'large.ts'),
+    `// body-only edit\n${buildSource}`,
+  );
   await measure('build.incremental.bodyOnly', async () => {
     const report = await buildIndex({ root: buildRoot, previous: built.index });
     return { changedFiles: report.changed, fanInReused: report.fanInReused };
@@ -86,34 +95,87 @@ const locateEntries = Array.from({ length: LOCATE_ENTRIES }, (_, i) => ({
   line: Math.floor(i / 100) + 1,
   searchText: `function computeSymbol${i}`,
   fanIn: i % 17,
-})).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line);
+})).sort((a, b) => {
+  if (a.file < b.file) return -1;
+  if (a.file > b.file) return 1;
+  return a.line - b.line;
+});
 const locateIndex = {
-  meta: { tool: 'code-map', version: INDEX_VERSION, generated: '', builtAtMs: 0, root: process.cwd(), entryCount: LOCATE_ENTRIES },
-  fileTokens: {}, fileStats: {}, fileImports: {}, entries: locateEntries,
+  meta: {
+    tool: 'code-map',
+    version: INDEX_VERSION,
+    generated: '',
+    builtAtMs: 0,
+    root: process.cwd(),
+    entryCount: LOCATE_ENTRIES,
+  },
+  fileTokens: {},
+  fileStats: {},
+  fileImports: {},
+  entries: locateEntries,
 };
-await measure('locate.cold', async () => ({ hits: locate(locateIndex, 'compute', { limit: 20 }).length }));
-await measure('locate.warm', async () => ({ hits: locate(locateIndex, 'compute', { limit: 20 }).length }));
+await measure('locate.cold', async () => ({
+  hits: locate(locateIndex, 'compute', { limit: 20 }).length,
+}));
+await measure('locate.warm', async () => ({
+  hits: locate(locateIndex, 'compute', { limit: 20 }).length,
+}));
 const pathTarget = LOCATE_ENTRIES - 1;
 const pathRemainder = pathTarget % 100;
 const pathFile = `src/f${String(pathRemainder).padStart(3, '0')}.ts`;
-await measurePrepared('locate.pathScoped.cold', async () => ({
-  meta: { tool: 'code-map', version: INDEX_VERSION, generated: '', builtAtMs: 0, root: process.cwd(), entryCount: LOCATE_ENTRIES },
-  fileTokens: {}, fileStats: {}, fileImports: {}, entries: locateEntries,
-}), async (index) => ({ hits: locate(index, `${pathFile}#compteSymbol${pathTarget}`, { limit: 20 }).length }));
+await measurePrepared(
+  'locate.pathScoped.cold',
+  async () => ({
+    meta: {
+      tool: 'code-map',
+      version: INDEX_VERSION,
+      generated: '',
+      builtAtMs: 0,
+      root: process.cwd(),
+      entryCount: LOCATE_ENTRIES,
+    },
+    fileTokens: {},
+    fileStats: {},
+    fileImports: {},
+    entries: locateEntries,
+  }),
+  async (index) => ({
+    hits: locate(index, `${pathFile}#compteSymbol${pathTarget}`, { limit: 20 })
+      .length,
+  }),
+);
 
 const pathReadRoot = mkdtempSync(join(tmpdir(), 'map-benchmark-path-read-'));
 try {
   const pathLines = [];
-  for (let i = pathRemainder; i < LOCATE_ENTRIES; i += 100) pathLines.push(`function computeSymbol${i}() {}\n`);
+  for (let i = pathRemainder; i < LOCATE_ENTRIES; i += 100) {
+    pathLines.push(`function computeSymbol${i}() {}\n`);
+  }
   const pathText = pathLines.join('');
   const pathDir = join(pathReadRoot, 'src');
   mkdirSync(pathDir, { recursive: true });
   writeFileSync(join(pathReadRoot, pathFile), pathText);
   const pathToken = token(pathText);
-  await measurePrepared('read.pathExact.cold', async () => ({
-    meta: { tool: 'code-map', version: INDEX_VERSION, generated: '', builtAtMs: 0, root: pathReadRoot, entryCount: LOCATE_ENTRIES },
-    fileTokens: { [pathFile]: pathToken }, fileStats: {}, fileImports: {}, entries: locateEntries,
-  }), async (index) => ({ status: read(index, `${pathFile}#computeSymbol${pathTarget}`).status }));
+  await measurePrepared(
+    'read.pathExact.cold',
+    async () => ({
+      meta: {
+        tool: 'code-map',
+        version: INDEX_VERSION,
+        generated: '',
+        builtAtMs: 0,
+        root: pathReadRoot,
+        entryCount: LOCATE_ENTRIES,
+      },
+      fileTokens: { [pathFile]: pathToken },
+      fileStats: {},
+      fileImports: {},
+      entries: locateEntries,
+    }),
+    async (index) => ({
+      status: read(index, `${pathFile}#computeSymbol${pathTarget}`).status,
+    }),
+  );
 } finally {
   rmSync(pathReadRoot, { recursive: true, force: true });
 }
@@ -128,13 +190,27 @@ for (const size of LOOKUP_SCALES) {
     line: Math.floor(i / 500) + 1,
     searchText: `function symbol${i}`,
   }));
-  const result = await measurePrepared(`lookup.prepare.${size}`, async () => ({
-    meta: { tool: 'code-map', version: INDEX_VERSION, generated: '', builtAtMs: 0, root: process.cwd(), entryCount: size },
-    fileTokens: {}, fileStats: {}, fileImports: {}, entries,
-  }), async (index) => {
-    const lookup = prepareLookup(index);
-    return { ids: lookup.byId.size, names: lookup.byName.size };
-  });
+  const result = await measurePrepared(
+    `lookup.prepare.${size}`,
+    async () => ({
+      meta: {
+        tool: 'code-map',
+        version: INDEX_VERSION,
+        generated: '',
+        builtAtMs: 0,
+        root: process.cwd(),
+        entryCount: size,
+      },
+      fileTokens: {},
+      fileStats: {},
+      fileImports: {},
+      entries,
+    }),
+    async (index) => {
+      const lookup = prepareLookup(index);
+      return { ids: lookup.byId.size, names: lookup.byName.size };
+    },
+  );
   lookupMeasurements.push({ size, ms: result.ms });
 }
 if (lookupMeasurements.length >= 2) {
@@ -173,16 +249,38 @@ for (const size of READ_SCALES) {
     });
     const contentToken = token(text);
     const makeIndex = () => ({
-      meta: { tool: 'code-map', version: INDEX_VERSION, generated: '', builtAtMs: 0, root, entryCount: entries.length },
-      fileTokens: { 'large.txt': contentToken }, fileStats: {}, fileImports: {}, entries,
+      meta: {
+        tool: 'code-map',
+        version: INDEX_VERSION,
+        generated: '',
+        builtAtMs: 0,
+        root,
+        entryCount: entries.length,
+      },
+      fileTokens: { 'large.txt': contentToken },
+      fileStats: {},
+      fileImports: {},
+      entries,
     });
-    const refs = Array.from({ length: 64 }, (_, i) => `large.txt#s${Math.min(size - 1, Math.floor(((i + 1) * size) / 64) - 1)}`);
-    const cold = await measurePrepared(`read.charBatch64.${size}.cold`, async () => makeIndex(), async (index) => ({ results: readMany(index, refs).length }));
-    await measurePrepared(`read.charBatch64.${size}.warm`, async () => {
-      const index = makeIndex();
-      readMany(index, refs);
-      return index;
-    }, async (index) => ({ results: readMany(index, refs).length }));
+    const refs = Array.from(
+      { length: 64 },
+      (_, i) =>
+        `large.txt#s${Math.min(size - 1, Math.floor(((i + 1) * size) / 64) - 1)}`,
+    );
+    const cold = await measurePrepared(
+      `read.charBatch64.${size}.cold`,
+      async () => makeIndex(),
+      async (index) => ({ results: readMany(index, refs).length }),
+    );
+    await measurePrepared(
+      `read.charBatch64.${size}.warm`,
+      async () => {
+        const index = makeIndex();
+        readMany(index, refs);
+        return index;
+      },
+      async (index) => ({ results: readMany(index, refs).length }),
+    );
     charReadMeasurements.push({ size, ms: cold.ms });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -205,20 +303,47 @@ try {
   const text = chunks.join('');
   writeFileSync(join(readRoot, 'large.txt'), text);
   const lineEntries = Array.from({ length: LINE_ENTRIES }, (_, i) => ({
-    id: `large.txt#s${i}`, name: `s${i}`, kind: 'line', file: 'large.txt', line: i + 1, searchText: `line ${i}`,
+    id: `large.txt#s${i}`,
+    name: `s${i}`,
+    kind: 'line',
+    file: 'large.txt',
+    line: i + 1,
+    searchText: `line ${i}`,
   }));
   const contentToken = token(text);
   const makeIndex = (entries) => ({
-    meta: { tool: 'code-map', version: INDEX_VERSION, generated: '', builtAtMs: 0, root: readRoot, entryCount: entries.length },
-    fileTokens: { 'large.txt': contentToken }, fileStats: {}, fileImports: {}, entries,
+    meta: {
+      tool: 'code-map',
+      version: INDEX_VERSION,
+      generated: '',
+      builtAtMs: 0,
+      root: readRoot,
+      entryCount: entries.length,
+    },
+    fileTokens: { 'large.txt': contentToken },
+    fileStats: {},
+    fileImports: {},
+    entries,
   });
-  const refs = Array.from({ length: 64 }, (_, i) => `large.txt#s${Math.min(LINE_ENTRIES - 1, i * Math.floor(LINE_ENTRIES / 64))}`);
-  await measurePrepared('read.lineBatch64.cold', async () => makeIndex(lineEntries), async (index) => ({ results: readMany(index, refs).length }));
-  await measurePrepared('read.lineBatch64.warm', async () => {
-    const index = makeIndex(lineEntries);
-    readMany(index, refs);
-    return index;
-  }, async (index) => ({ results: readMany(index, refs).length }));
+  const refs = Array.from(
+    { length: 64 },
+    (_, i) =>
+      `large.txt#s${Math.min(LINE_ENTRIES - 1, i * Math.floor(LINE_ENTRIES / 64))}`,
+  );
+  await measurePrepared(
+    'read.lineBatch64.cold',
+    async () => makeIndex(lineEntries),
+    async (index) => ({ results: readMany(index, refs).length }),
+  );
+  await measurePrepared(
+    'read.lineBatch64.warm',
+    async () => {
+      const index = makeIndex(lineEntries);
+      readMany(index, refs);
+      return index;
+    },
+    async (index) => ({ results: readMany(index, refs).length }),
+  );
 } finally {
   rmSync(readRoot, { recursive: true, force: true });
 }
@@ -226,8 +351,18 @@ try {
 const barrelFiles = Array.from({ length: BARREL_DEPTH }, (_, i) => `f${i}.ts`);
 barrelFiles.push('use.ts');
 const barrelImports = new Map();
-for (let i = 0; i < BARREL_DEPTH - 1; i++) barrelImports.set(`f${i}.ts`, [{ source: `./f${i + 1}`, name: '*', reexport: true }]);
-barrelImports.set('use.ts', Array.from({ length: 200 }, (_, i) => ({ source: './f0', name: `symbol${i}` })));
+for (let i = 0; i < BARREL_DEPTH - 1; i++) {
+  barrelImports.set(`f${i}.ts`, [
+    { source: `./f${i + 1}`, name: '*', reexport: true },
+  ]);
+}
+barrelImports.set(
+  'use.ts',
+  Array.from({ length: 200 }, (_, i) => ({
+    source: './f0',
+    name: `symbol${i}`,
+  })),
+);
 await measure('fanIn.deepBarrel', async () => {
   const fanIn = computeFanIn(barrelFiles, barrelImports);
   return { depth: BARREL_DEPTH, names: 200, resolved: fanIn.size };
@@ -240,17 +375,33 @@ for (let i = 0; i < BARREL_DEPTH - 1; i++) {
     { source: `./f${i + 1}`, name: '*', reexport: true },
   ]);
 }
-mixedBarrelImports.set('use.ts', Array.from({ length: BARREL_DEPTH - 1 }, (_, i) => ({ source: './f0', name: `special${i}` })));
+mixedBarrelImports.set(
+  'use.ts',
+  Array.from({ length: BARREL_DEPTH - 1 }, (_, i) => ({
+    source: './f0',
+    name: `special${i}`,
+  })),
+);
 await measure('fanIn.mixedBarrel', async () => {
   const fanIn = computeFanIn(barrelFiles, mixedBarrelImports);
   return { depth: BARREL_DEPTH, names: BARREL_DEPTH - 1, resolved: fanIn.size };
 });
 
-const flatFiles = ['target.ts', ...Array.from({ length: FANIN_IMPORTERS }, (_, i) => `use${i}.ts`)];
-const flatImports = new Map(flatFiles.slice(1).map((file) => [file, [{ source: './target', name: 'target' }]]));
+const flatFiles = [
+  'target.ts',
+  ...Array.from({ length: FANIN_IMPORTERS }, (_, i) => `use${i}.ts`),
+];
+const flatImports = new Map(
+  flatFiles
+    .slice(1)
+    .map((file) => [file, [{ source: './target', name: 'target' }]]),
+);
 await measure('fanIn.flat', async () => {
   const fanIn = computeFanIn(flatFiles, flatImports);
-  return { importers: FANIN_IMPORTERS, counted: fanIn.get('target.ts::target') ?? 0 };
+  return {
+    importers: FANIN_IMPORTERS,
+    counted: fanIn.get('target.ts::target') ?? 0,
+  };
 });
 
 console.log(JSON.stringify(results, null, 2));

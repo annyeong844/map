@@ -103,7 +103,10 @@ export interface MapIndex {
    * Per-file import/re-export edges (`{ source, name }`), cached so incremental
    * rebuilds can recompute global fan-in without re-reading unchanged files.
    */
-  fileImports: Record<string, { source: string; name: string; reexport?: boolean }[]>;
+  fileImports: Record<
+    string,
+    { source: string; name: string; reexport?: boolean }[]
+  >;
   entries: MapEntry[];
 }
 
@@ -140,29 +143,81 @@ export type ReadStatus =
   | 'anchor-lost' // file changed and the signature anchor is gone; re-index to refresh
   | 'not-found'; // nothing found
 
-export interface ReadResult {
-  status: ReadStatus;
+export interface ReadCandidate {
+  line: number;
+  preview: string;
+}
+
+export interface ReadAim {
+  /** `unanchored`: the file changed and the symbol's range couldn't be re-confined,
+   * so the snippet was NOT searched (a whole-file match could land in another symbol). */
+  status: 'hit' | 'ambiguous' | 'not-in-symbol' | 'unanchored';
+  matches: { line: number; charStart: number; charEnd: number }[];
+}
+
+interface ReadResultBase {
   id: string;
   file: string;
-  /** 1-based line range actually returned (best-effort when relocated). */
+  /** 1-based start line actually returned (best-effort when relocated). */
   line: number;
-  endLine?: number;
-  /** The raw source. The evidence. null only for anchor-lost/not-found. */
-  raw: string | null;
-  /** Human-facing caveat when the result is not a clean exact slice. */
-  note?: string;
-  /** Candidate locations for the ambiguous status. */
-  candidates?: { line: number; preview: string }[];
   /**
    * Sub-symbol designator: present only when `read` was given a `snippet`. The
    * LLM designates a target line by quoting it; this resolves it to exact char
    * range(s) INSIDE the symbol. `ambiguous` = the snippet occurs more than once
    * in the symbol (another "classroom" in the same building — hold fire).
    */
-  aim?: {
-    /** `unanchored`: the file changed and the symbol's range couldn't be re-confined,
-     * so the snippet was NOT searched (a whole-file match could land in another symbol). */
-    status: 'hit' | 'ambiguous' | 'not-in-symbol' | 'unanchored';
-    matches: { line: number; charStart: number; charEnd: number }[];
-  };
+  aim?: ReadAim;
 }
+
+interface ExactReadResult extends ReadResultBase {
+  status: 'exact';
+  /** 1-based end line actually returned. */
+  endLine: number;
+  /** The raw source. The evidence. */
+  raw: string;
+  /** Present for line-only slices whose end boundary is best-effort. */
+  note?: string;
+  candidates?: never;
+}
+
+interface RelocatedReadResult extends ReadResultBase {
+  status: 'relocated';
+  /** 1-based best-effort end line after re-anchoring. */
+  endLine: number;
+  raw: string;
+  note: string;
+  candidates?: never;
+}
+
+interface AmbiguousReadResult extends ReadResultBase {
+  status: 'ambiguous';
+  endLine?: never;
+  raw: null;
+  note: string;
+  /** Candidate locations are mandatory when no single landing site is safe. */
+  candidates: ReadCandidate[];
+}
+
+interface AnchorLostReadResult extends ReadResultBase {
+  status: 'anchor-lost';
+  endLine?: never;
+  raw: null;
+  note: string;
+  candidates?: never;
+}
+
+interface NotFoundReadResult extends ReadResultBase {
+  status: 'not-found';
+  endLine?: never;
+  raw: null;
+  note: string;
+  /** Unresolved-name responses historically serialize an empty candidate list. */
+  candidates?: [];
+}
+
+export type ReadResult =
+  | ExactReadResult
+  | RelocatedReadResult
+  | AmbiguousReadResult
+  | AnchorLostReadResult
+  | NotFoundReadResult;

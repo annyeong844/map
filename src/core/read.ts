@@ -1,9 +1,22 @@
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
-import { locateWithEntries, type LocatedResult } from './locate.ts';
+import { type LocatedResult, locateWithEntries } from './locate.ts';
 import type { MapEntry, MapIndex, ReadResult } from './types.ts';
-import { buildLineIndex, indexedLineAt, indexedOffsetOfLine, indexOfAll, token, tryReadFile, type LineIndex } from './util.ts';
-import { exactFileEntryRange, getPreparedLookup, nextSiblingLine, type FileEntryRange } from './store.ts';
+import {
+  buildLineIndex,
+  indexedLineAt,
+  indexedOffsetOfLine,
+  indexOfAll,
+  type LineIndex,
+  token,
+  tryReadFile,
+} from './util.ts';
+import {
+  exactFileEntryRange,
+  type FileEntryRange,
+  getPreparedLookup,
+  nextSiblingLine,
+} from './store.ts';
 
 /**
  * Resolve `relFile` under `root`, refusing anything that escapes it — a `..`
@@ -11,13 +24,19 @@ import { exactFileEntryRange, getPreparedLookup, nextSiblingLine, type FileEntry
  * committed in a downloaded repo), so a malicious `entry.file` must not make the
  * server read outside the project root. Returns the absolute path, or null to refuse.
  */
-function fileWithinRoot(rootAbs: string, realRoot: string | null, relFile: string): string | null {
+function fileWithinRoot(
+  rootAbs: string,
+  realRoot: string | null,
+  relFile: string,
+): string | null {
   const target = resolvePath(rootAbs, relFile);
   if (target !== rootAbs && !target.startsWith(rootAbs + sep)) return null; // lexical containment
   try {
     const real = realpathSync(target);
     const currentRealRoot = realRoot ?? realpathSync(rootAbs);
-    if (real !== currentRealRoot && !real.startsWith(currentRealRoot + sep)) return null; // symlink escape
+    if (real !== currentRealRoot && !real.startsWith(currentRealRoot + sep)) {
+      return null;
+    } // symlink escape
   } catch {
     /* not yet on disk — the lexical check already held */
   }
@@ -26,6 +45,9 @@ function fileWithinRoot(rootAbs: string, realRoot: string | null, relFile: strin
 
 /** Lines of trailing context for line-only symbols with no known sibling boundary. */
 const LINE_ONLY_WINDOW = 80;
+const ANCHOR_PREVIEW_LENGTH = 60;
+const MAX_AMBIGUOUS_CANDIDATES = 12;
+const SOURCE_PREVIEW_LENGTH = 120;
 
 interface FileSnapshot {
   text: string | null;
@@ -62,7 +84,11 @@ function stateFor(index: MapIndex): RuntimeState {
   if (cached) return cached;
   const rootAbs = resolvePath(index.meta.root);
   let realRoot: string | null = null;
-  try { realRoot = realpathSync(rootAbs); } catch { /* root may appear later */ }
+  try {
+    realRoot = realpathSync(rootAbs);
+  } catch {
+    /* root may appear later */
+  }
   const tables = {
     linesByFile: new Map<string, { token: string; lines: LineIndex }>(),
     rootAbs,
@@ -88,18 +114,28 @@ function contextFor(index: MapIndex, refs: string[] = []): ReadContext {
   const byId = new Map<string, MapEntry>();
   const byName = new Map<string, MapEntry | null>();
   const rangesByFile = new Map<string, FileEntryRange | undefined>();
-  const scoped = new Map<string, { range: FileEntryRange; refs: Set<string> }>();
+  const scoped = new Map<
+    string,
+    { range: FileEntryRange; refs: Set<string> }
+  >();
   let requiresFullScan = false;
   for (const ref of needed) {
     const file = exactFileFromRef(ref);
-    if (!file) { requiresFullScan = true; break; }
+    if (!file) {
+      requiresFullScan = true;
+      break;
+    }
     let range: FileEntryRange | undefined;
-    if (rangesByFile.has(file)) range = rangesByFile.get(file);
-    else {
+    if (rangesByFile.has(file)) {
+      range = rangesByFile.get(file);
+    } else {
       range = exactFileEntryRange(index, file);
       rangesByFile.set(file, range);
     }
-    if (!range) { requiresFullScan = true; break; }
+    if (!range) {
+      requiresFullScan = true;
+      break;
+    }
     const group = scoped.get(file);
     if (group) group.refs.add(ref);
     else scoped.set(file, { range, refs: new Set([ref]) });
@@ -116,31 +152,50 @@ function contextFor(index: MapIndex, refs: string[] = []): ReadContext {
     for (const entry of index.entries) inspect(entry, needed);
   } else {
     for (const { range, refs: wanted } of scoped.values()) {
-      for (let i = range.start; i < range.end; i++) inspect(index.entries[i], wanted);
+      for (let i = range.start; i < range.end; i++) {
+        inspect(index.entries[i], wanted);
+      }
     }
   }
   for (const ref of needed) {
     context.exactChecked.add(ref);
     const exact = byId.get(ref);
-    if (exact) context.resolvedRefs.set(ref, exact);
-    else if (byName.has(ref)) context.resolvedRefs.set(ref, byName.get(ref) ?? null);
+    if (exact) {
+      context.resolvedRefs.set(ref, exact);
+    } else if (byName.has(ref)) {
+      context.resolvedRefs.set(ref, byName.get(ref) ?? null);
+    }
   }
   return context;
 }
 
-function snapshotFor(index: MapIndex, file: string, cache: FileCache): FileSnapshot {
+function snapshotFor(
+  index: MapIndex,
+  file: string,
+  cache: FileCache,
+): FileSnapshot {
   const cached = cache.get(file);
   if (cached) return cached;
   const { rootAbs, realRoot } = stateFor(index);
   const path = fileWithinRoot(rootAbs, realRoot, file);
   const text = path == null ? null : tryReadFile(path);
   const contentToken = text == null ? null : token(text);
-  const snapshot = { text, fresh: contentToken != null && contentToken === index.fileTokens[file], refused: path == null, lines: null, contentToken };
+  const snapshot = {
+    text,
+    fresh: contentToken != null && contentToken === index.fileTokens[file],
+    refused: path == null,
+    lines: null,
+    contentToken,
+  };
   cache.set(file, snapshot);
   return snapshot;
 }
 
-function linesFor(index: MapIndex, file: string, snapshot: FileSnapshot): LineIndex {
+function linesFor(
+  index: MapIndex,
+  file: string,
+  snapshot: FileSnapshot,
+): LineIndex {
   if (snapshot.lines) return snapshot.lines;
   const state = stateFor(index);
   if (snapshot.contentToken) {
@@ -151,7 +206,12 @@ function linesFor(index: MapIndex, file: string, snapshot: FileSnapshot): LineIn
     }
   }
   snapshot.lines = buildLineIndex(snapshot.text ?? '');
-  if (snapshot.contentToken) state.linesByFile.set(file, { token: snapshot.contentToken, lines: snapshot.lines });
+  if (snapshot.contentToken) {
+    state.linesByFile.set(file, {
+      token: snapshot.contentToken,
+      lines: snapshot.lines,
+    });
+  }
   return snapshot.lines;
 }
 
@@ -163,12 +223,18 @@ function linesFor(index: MapIndex, file: string, snapshot: FileSnapshot): LineIn
  * not the whole function. Folded into `read` rather than a separate tool: the
  * snippet is just a finer coordinate on the same "give me the bytes here" call.
  */
-export function read(index: MapIndex, ref: string, opts: { snippet?: string } = {}): ReadResult {
+export function read(
+  index: MapIndex,
+  ref: string,
+  opts: { snippet?: string } = {},
+): ReadResult {
   const context = contextFor(index);
   const result = readCore(index, ref, context);
   if (opts.snippet) {
     const entry = resolve(index, ref, context);
-    if (entry) result.aim = computeAim(index, entry, opts.snippet, context.files);
+    if (entry) {
+      result.aim = computeAim(index, entry, opts.snippet, context.files);
+    }
   }
   return result;
 }
@@ -187,7 +253,12 @@ export function readMany(index: MapIndex, refs: string[]): ReadResult[] {
  * `unanchored` (a whole-file search could match an identical snippet in a *different*
  * symbol and falsely report `hit`). `ambiguous` when the snippet occurs >1× inside.
  */
-function computeAim(index: MapIndex, entry: MapEntry, snippet: string, cache: FileCache): ReadResult['aim'] {
+function computeAim(
+  index: MapIndex,
+  entry: MapEntry,
+  snippet: string,
+  cache: FileCache,
+): ReadResult['aim'] {
   const snapshot = snapshotFor(index, entry.file, cache);
   const { text, fresh } = snapshot;
   if (text == null) return { status: 'unanchored', matches: [] };
@@ -223,7 +294,11 @@ function computeAim(index: MapIndex, entry: MapEntry, snippet: string, cache: Fi
   if (!local.length) return { status: 'not-in-symbol', matches: [] };
   const lines = linesFor(index, entry.file, snapshot);
   const matches = local.map((at) => {
-    return { line: indexedLineAt(lines, at), charStart: at, charEnd: at + snippet.length };
+    return {
+      line: indexedLineAt(lines, at),
+      charStart: at,
+      charEnd: at + snippet.length,
+    };
   });
   return { status: matches.length > 1 ? 'ambiguous' : 'hit', matches };
 }
@@ -238,7 +313,15 @@ function computeAim(index: MapIndex, entry: MapEntry, snippet: string, cache: Fi
  * The point: in a long session most of the working set sits in untouched files, so the agent
  * refreshes only the delta instead of re-reading everything.
  */
-export function changed(index: MapIndex, refs: string[]): { unchanged: string[]; changed: ReadResult[]; filesChecked: number; filesChanged: number } {
+export function changed(
+  index: MapIndex,
+  refs: string[],
+): {
+  unchanged: string[];
+  changed: ReadResult[];
+  filesChecked: number;
+  filesChanged: number;
+} {
   const unchanged: string[] = [];
   const changedOut: ReadResult[] = [];
   const context = contextFor(index, refs);
@@ -250,46 +333,96 @@ export function changed(index: MapIndex, refs: string[]): { unchanged: string[];
       continue;
     }
     filesChecked.add(entry.file);
-    if (snapshotFor(index, entry.file, context.files).fresh) unchanged.push(entry.id);
-    else changedOut.push(readCore(index, ref, context)); // file moved → re-anchor + current slice
+    if (snapshotFor(index, entry.file, context.files).fresh) {
+      unchanged.push(entry.id);
+    } else {
+      changedOut.push(readCore(index, ref, context));
+    } // file moved → re-anchor + current slice
   }
   let filesChanged = 0;
-  for (const file of filesChecked) if (!snapshotFor(index, file, context.files).fresh) filesChanged++;
-  return { unchanged, changed: changedOut, filesChecked: filesChecked.size, filesChanged };
+  for (const file of filesChecked) {
+    if (!snapshotFor(index, file, context.files).fresh) filesChanged++;
+  }
+  return {
+    unchanged,
+    changed: changedOut,
+    filesChecked: filesChecked.size,
+    filesChanged,
+  };
 }
 
-function readCore(index: MapIndex, ref: string, context: ReadContext): ReadResult {
+function readCore(
+  index: MapIndex,
+  ref: string,
+  context: ReadContext,
+): ReadResult {
   const entry = resolve(index, ref, context);
   if (!entry) {
     const { hits } = locatedFor(index, ref, context);
+    const candidates = hits.map((hit) => ({
+      line: hit.line,
+      preview: `${hit.id}  ·  ${hit.signature}`,
+    }));
+    if (hits.length) {
+      return {
+        status: 'ambiguous',
+        id: ref,
+        file: '',
+        line: 0,
+        raw: null,
+        note: `"${ref}" did not resolve to one symbol. Pick an id from the candidates.`,
+        candidates,
+      };
+    }
     return {
-      status: hits.length ? 'ambiguous' : 'not-found',
+      status: 'not-found',
       id: ref,
       file: '',
       line: 0,
       raw: null,
-      note: hits.length
-        ? `"${ref}" did not resolve to one symbol. Pick an id from the candidates.`
-        : `No symbol matches "${ref}".`,
-      candidates: hits.map((h) => ({ line: h.line, preview: `${h.id}  ·  ${h.signature}` })),
+      note: `No symbol matches "${ref}".`,
+      candidates: [],
     };
   }
 
   const snapshot = snapshotFor(index, entry.file, context.files);
   const { text, fresh, refused } = snapshot;
   if (refused) {
-    return { status: 'not-found', id: entry.id, file: entry.file, line: entry.line, raw: null, note: `Refused: "${entry.file}" resolves outside the index root.` };
+    return {
+      status: 'not-found',
+      id: entry.id,
+      file: entry.file,
+      line: entry.line,
+      raw: null,
+      note: `Refused: "${entry.file}" resolves outside the index root.`,
+    };
   }
   if (text == null) {
-    return { status: 'not-found', id: entry.id, file: entry.file, line: entry.line, raw: null, note: `File not readable: ${entry.file}` };
+    return {
+      status: 'not-found',
+      id: entry.id,
+      file: entry.file,
+      line: entry.line,
+      raw: null,
+      note: `File not readable: ${entry.file}`,
+    };
   }
 
   // 1 — coordinates still trustworthy.
   if (fresh) {
     if (entry.charStart != null && entry.charEnd != null) {
       const raw = text.slice(entry.charStart, entry.charEnd);
-      const endLine = entry.endLine ?? indexedLineAt(linesFor(index, entry.file, snapshot), entry.charEnd);
-      return { status: 'exact', id: entry.id, file: entry.file, line: entry.line, endLine, raw };
+      const endLine =
+        entry.endLine ??
+        indexedLineAt(linesFor(index, entry.file, snapshot), entry.charEnd);
+      return {
+        status: 'exact',
+        id: entry.id,
+        file: entry.file,
+        line: entry.line,
+        endLine,
+        raw,
+      };
     }
     return sliceLineWindow(index, entry, snapshot, 'exact');
   }
@@ -313,7 +446,14 @@ function readCore(index: MapIndex, ref: string, context: ReadContext): ReadResul
         note: 'File changed since indexing. Re-anchored on the signature line; the end boundary is best-effort — verify it covers the whole symbol.',
       };
     }
-    return sliceLineWindow(index, entry, snapshot, 'relocated', 'File changed since indexing; re-anchored by signature line.', startLine);
+    return sliceLineWindow(
+      index,
+      entry,
+      snapshot,
+      'relocated',
+      'File changed since indexing; re-anchored by signature line.',
+      startLine,
+    );
   }
 
   if (hits.length > 1) {
@@ -324,8 +464,11 @@ function readCore(index: MapIndex, ref: string, context: ReadContext): ReadResul
       file: entry.file,
       line: entry.line,
       raw: null,
-      note: `File changed; the anchor "${entry.searchText.slice(0, 60)}" now matches ${hits.length} sites. Inspect candidates.`,
-      candidates: hits.slice(0, 12).map((off) => ({ line: indexedLineAt(lines, off), preview: previewAt(text, off, lines) })),
+      note: `File changed; the anchor "${entry.searchText.slice(0, ANCHOR_PREVIEW_LENGTH)}" now matches ${hits.length} sites. Inspect candidates.`,
+      candidates: hits.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((off) => ({
+        line: indexedLineAt(lines, off),
+        preview: previewAt(text, off, lines),
+      })),
     };
   }
 
@@ -336,13 +479,19 @@ function readCore(index: MapIndex, ref: string, context: ReadContext): ReadResul
     file: entry.file,
     line: entry.line,
     raw: null,
-    note: `File changed and the signature anchor "${entry.searchText.slice(0, 60)}" is no longer present — the symbol was renamed or removed. Re-run \`map index\` to refresh coordinates.`,
+    note: `File changed and the signature anchor "${entry.searchText.slice(0, ANCHOR_PREVIEW_LENGTH)}" is no longer present — the symbol was renamed or removed. Re-run \`map index\` to refresh coordinates.`,
   };
 }
 
 /** Resolve a ref to one entry: exact id, else an unambiguous locate top hit. */
-function resolve(index: MapIndex, ref: string, context: ReadContext): MapEntry | null {
-  if (context.resolvedRefs.has(ref)) return context.resolvedRefs.get(ref) ?? null;
+function resolve(
+  index: MapIndex,
+  ref: string,
+  context: ReadContext,
+): MapEntry | null {
+  if (context.resolvedRefs.has(ref)) {
+    return context.resolvedRefs.get(ref) ?? null;
+  }
 
   const lookup = getPreparedLookup(index);
   if (lookup) {
@@ -404,6 +553,22 @@ function sliceLineWindow(
   index: MapIndex,
   entry: MapEntry,
   snapshot: FileSnapshot,
+  status: 'exact',
+  note?: string,
+  startLine?: number,
+): Extract<ReadResult, { status: 'exact' }>;
+function sliceLineWindow(
+  index: MapIndex,
+  entry: MapEntry,
+  snapshot: FileSnapshot,
+  status: 'relocated',
+  note: string,
+  startLine?: number,
+): Extract<ReadResult, { status: 'relocated' }>;
+function sliceLineWindow(
+  index: MapIndex,
+  entry: MapEntry,
+  snapshot: FileSnapshot,
   status: 'exact' | 'relocated',
   note?: string,
   startLine = entry.line,
@@ -412,21 +577,49 @@ function sliceLineWindow(
   const lines = linesFor(index, entry.file, snapshot);
   const next = nextSiblingLine(index, entry);
   const span = next ? Math.max(0, next - entry.line - 1) : LINE_ONLY_WINDOW;
-  const endLine = Math.max(startLine, Math.min(startLine + span, lines.starts.length));
+  const endLine = Math.max(
+    startLine,
+    Math.min(startLine + span, lines.starts.length),
+  );
   const from = indexedOffsetOfLine(lines, startLine);
   const to = indexedOffsetOfLine(lines, endLine + 1);
+  const raw = text.slice(from, to);
+  if (status === 'relocated') {
+    if (note === undefined) {
+      throw new Error(
+        'A relocated read must explain its best-effort boundary.',
+      );
+    }
+    return {
+      status,
+      id: entry.id,
+      file: entry.file,
+      line: startLine,
+      endLine,
+      raw,
+      note,
+    };
+  }
   return {
     status,
     id: entry.id,
     file: entry.file,
     line: startLine,
     endLine,
-    raw: text.slice(from, to),
-    note: note ?? (entry.charStart == null ? 'Line-only symbol (no char range); bounded by next sibling — may include trailing lines.' : undefined),
+    raw,
+    note:
+      note ??
+      (entry.charStart == null
+        ? 'Line-only symbol (no char range); bounded by next sibling — may include trailing lines.'
+        : undefined),
   };
 }
 
-function locatedFor(index: MapIndex, ref: string, context: ReadContext): LocatedResult {
+function locatedFor(
+  index: MapIndex,
+  ref: string,
+  context: ReadContext,
+): LocatedResult {
   let located = context.locatedRefs.get(ref);
   if (!located) {
     located = locateWithEntries(index, ref, { limit: 8 });
@@ -439,5 +632,5 @@ function previewAt(text: string, off: number, lines: LineIndex): string {
   const start = indexedOffsetOfLine(lines, indexedLineAt(lines, off));
   let end = text.indexOf('\n', start);
   if (end === -1) end = text.length;
-  return text.slice(start, end).trim().slice(0, 120);
+  return text.slice(start, end).trim().slice(0, SOURCE_PREVIEW_LENGTH);
 }

@@ -19,7 +19,5 @@
     "grok",
     "skill"
   ],
-  "skills": [
-    "./skills/code-map-retrieval"
-  ]
+  "skills": ["./skills/code-map-retrieval"]
 }

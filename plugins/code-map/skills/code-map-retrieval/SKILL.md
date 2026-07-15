@@ -45,7 +45,9 @@ such as `C:\work\repo` and `/mnt/c/work/repo`.
 5. **Refreshing a previous working set** — call
    `read({ root: "/absolute/repo", refs: [...], changedOnly: true })`. Use the
    returned `unchanged` ids as authoritative and re-read only the changed
-   results.
+   results. The MCP session compares against bytes it returned before, so an
+   intervening index rebuild cannot erase the baseline; refs without a baseline
+   are returned conservatively.
 
 ## Precision and fallback
 

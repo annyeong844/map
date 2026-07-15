@@ -18,6 +18,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -85,6 +86,26 @@ export function tsgoSpawnCommand(bin: string): { cmd: string; args: string[] } {
   return nodeLauncher ? { cmd: process.execPath, args: [bin, ...args] } : { cmd: bin, args };
 }
 
+/** Resolve a package-managed tsgo from a trusted Node resolution anchor. This
+ * covers nested installs, workspace hoisting, and pnpm layouts. The platform
+ * package check rejects a wrapper left by another OS before it can cause LSP
+ * timeouts. */
+export function resolveTsgoPackageBin(
+  anchor: string | URL,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string | null {
+  try {
+    const from = createRequire(anchor);
+    const packageRoot = dirname(from.resolve('@typescript/native-preview/package.json'));
+    from.resolve(`@typescript/native-preview-${platform}-${arch}/package.json`);
+    return [join(packageRoot, 'bin/tsgo'), join(packageRoot, 'bin/tsgo.js')]
+      .find((candidate) => existsSync(candidate)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** The LSP backend for a language: how to spawn it + the LSP `languageId`. tsgo
  * for TS/JS, ty for Python — both speak the same LSP, so everything downstream
  * (framing, readiness, references/definition/implementation, cache) is shared. */
@@ -99,7 +120,11 @@ function backend(lang: Lang): { cmd: string; args: string[]; languageId: string 
     const platform = join(HERE, 'node_modules/@typescript', `native-preview-${process.platform}-${process.arch}`);
     // npm can leave a wrapper plus another OS's optional package in a shared
     // checkout. Treat that as unavailable now, not as two 40-second LSP timeouts.
-    return bin && existsSync(platform) ? { ...tsgoSpawnCommand(bin), languageId: 'typescript' } : null;
+    if (bin && existsSync(platform)) return { ...tsgoSpawnCommand(bin), languageId: 'typescript' };
+    // Resolve only from the server module's install tree. Falling back to the
+    // queried workspace would execute an untrusted dependency with MCP rights.
+    const resolved = resolveTsgoPackageBin(import.meta.url);
+    return resolved ? { ...tsgoSpawnCommand(resolved), languageId: 'typescript' } : null;
   }
   // Python via ty's language server. TY_CMD overrides (e.g. an absolute `ty`); default runs via uvx.
   return process.env.TY_CMD ? { cmd: process.env.TY_CMD, args: ['server'], languageId: 'python' } : { cmd: 'uvx', args: ['ty', 'server'], languageId: 'python' };

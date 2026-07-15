@@ -106,6 +106,11 @@ map stats                                    # 인덱스 개요
 넘기세요. MCP 도구로도 같은 `read`(절대 레포 경로 `root`, 단일 `ref`, batch용 `refs` 배열,
 선택적 `snippet`). Windows 경로와 `/mnt/<드라이브>/...` WSL 표기를 서로 바꿔 써도 됩니다.
 
+편집 뒤 이전 MCP 작업 세트를 갱신할 때는 같은 `refs`에 `changedOnly: true`를 보내세요.
+장기 실행 서버는 실제로 전에 반환한 슬라이스와 비교하므로, 중간에 자동 재인덱스가 끼어도
+편집된 심볼을 거짓 `unchanged`로 숨기지 않습니다. 세션 기준선이 없는 ref는 보수적으로 현재
+슬라이스를 반환합니다. 일회성 `map changed` CLI는 이전 세션이 없으므로 인덱스 기준입니다.
+
 ---
 
 <details>
@@ -251,7 +256,9 @@ claude mcp add code-oracle --scope user -- node /abs/path/to/map/code-oracle/ser
 GA `typescript@7.0.2`는 빌드 컴파일러 `tsc`만 노출하고, code-oracle가 LSP 서버로 쓰는
 `tsgo` launcher는 아직 제공하지 않습니다. 그래서 code-oracle는 최신
 `@typescript/native-preview` LSP 빌드를 정확히 핀합니다. launcher가 `bin/tsgo.js`에서
-확장자 없는 `bin/tsgo`로 바뀌었지만 둘 다 자동 감지하며, `TSGO_BIN`으로 직접 덮어쓸 수도 있습니다.
+확장자 없는 `bin/tsgo`로 바뀌었지만 둘 다 자동 감지합니다. 신뢰된 서버 설치 트리에서 Node
+패키지 해석도 시도하므로 workspace hoist/pnpm 배치를 지원하면서 조회 대상 workspace의
+의존성을 실행하지 않고, `TSGO_BIN`으로 직접 덮어쓸 수도 있습니다.
 
 세션은 첫 checker 요청에서 지연 시작합니다(~수초~20s, 레포 크기별). 시작 비용을 미리 내는 편이
 확실히 이득일 때만 `CODE_ORACLE_PREWARM=1`을 설정하세요. MCP 하나당 warm 세션은 기본 2개로

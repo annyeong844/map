@@ -109,6 +109,12 @@ symbol name you find to `read`. As an MCP tool it's the same `read` (absolute re
 `ref`, a `refs` array for batch, optional `snippet`). Windows and `/mnt/<drive>/...` WSL root
 spellings are interchangeable.
 
+To refresh a prior MCP working set after edits, send the same `refs` with
+`changedOnly: true`. The long-lived server compares against the slices it actually returned,
+so an automatic index rebuild cannot turn an edited symbol into a false `unchanged`; a ref with
+no session baseline is returned conservatively. The one-shot `map changed` CLI remains
+index-relative because it has no prior session.
+
 ---
 
 <details>
@@ -265,7 +271,9 @@ that checkout as above. Core code-map remains independently installable and one-
 GA `typescript@7.0.2` exposes the build compiler as `tsc`, but not the `tsgo` launcher that
 code-oracle uses for its LSP server. Code-oracle therefore pins the current
 `@typescript/native-preview` LSP build. Its launcher changed from `bin/tsgo.js` to
-extensionless `bin/tsgo`; both layouts are detected, and `TSGO_BIN` remains an explicit override.
+extensionless `bin/tsgo`; both layouts are detected. Node package resolution from the trusted
+server install tree also supports hoisted workspace/pnpm layouts without executing a dependency
+from the queried workspace; `TSGO_BIN` remains an explicit override.
 
 Sessions start lazily on the first checker query (~seconds–20s by repo size); set
 `CODE_ORACLE_PREWARM=1` only when paying that cost at startup is worthwhile. Warm sessions are

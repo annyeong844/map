@@ -10,13 +10,14 @@
  *
  *   MAP_INDEX=/path/.map-index.json  node src/mcp/server.ts
  */
+import { createHash } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { changed, read, readMany } from '../core/read.ts';
 import { loadIndex, prepareLookup } from '../core/store.ts';
-import type { MapIndex } from '../core/types.ts';
+import type { MapIndex, ReadResult } from '../core/types.ts';
 import { VERSION } from '../version.ts';
 
 const PROTOCOL = '2025-06-18';
@@ -43,6 +44,7 @@ function findUp(name: string, start: string): string | null {
 // from the server cwd. Per-call `root` selection overrides this default below.
 const configuredIndexPath = process.env.MAP_INDEX ?? argIndex();
 const MAX_INDEX_RUNTIMES = 8;
+const MAX_OBSERVATIONS = 8192;
 
 /** Resolve an explicit index, or discover the nearest one from `start`. Kept as
  * a function because an index may be created after the long-lived server starts. */
@@ -72,6 +74,7 @@ interface IndexRuntime {
   size: number;
   ctimeMs: number;
   ino: number;
+  observations: Map<string, string>;
 }
 
 // A global MCP can serve several workspaces. Keep the warmed lookup tables for
@@ -85,7 +88,7 @@ function runtimeFor(indexPath: string): IndexRuntime {
     indexRuntimes.set(indexPath, cached);
     return cached;
   }
-  const runtime: IndexRuntime = { index: null, mtimeMs: 0, size: -1, ctimeMs: 0, ino: -1 };
+  const runtime: IndexRuntime = { index: null, mtimeMs: 0, size: -1, ctimeMs: 0, ino: -1, observations: new Map() };
   indexRuntimes.set(indexPath, runtime);
   if (indexRuntimes.size > MAX_INDEX_RUNTIMES) {
     const oldest = indexRuntimes.keys().next().value as string | undefined;
@@ -151,7 +154,7 @@ export const TOOLS = [
       properties: {
         ref: { type: 'string', description: 'A symbol id, or a bare name / "path#name".' },
         refs: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 64, uniqueItems: true, description: 'Read several INDEPENDENT, already-known symbols in one call (ids or names). One result per ref. Use sequential single reads when later reads depend on earlier ones.' },
-        changedOnly: { type: 'boolean', description: 'With `refs`: a working-set DELTA — return current slices only for symbols whose file changed since indexing, plus an `unchanged` id list. Refresh what you read earlier without re-paying tokens for the stable parts (a "git status" for your reads).' },
+        changedOnly: { type: 'boolean', description: 'With `refs`: a working-set DELTA against this MCP session\'s prior reads — return only changed current slices plus an `unchanged` id list. Index rebuilds do not erase the read baseline; refs without one are returned conservatively.' },
         snippet: { type: 'string', description: 'Optional: verbatim text from inside the symbol — resolved to exact char range(s). Applies when reading a single `ref`.' },
         root: { type: 'string', description: 'Absolute path to the indexed repository. Pass this on every call when the MCP server is global or starts outside the repo. Accepts native Windows/Linux paths and Windows↔WSL spellings.' },
       },
@@ -177,7 +180,7 @@ export function callTool(name: string, args: Record<string, unknown>): string {
   if (!runtime.index) {
     return JSON.stringify({ error: `No code-map index found at ${indexPath}. Run \`map index --root <repo>\`, then pass \`root\` as that repository's absolute path.` }, null, 2);
   }
-  return dispatch(runtime.index, name, args);
+  return dispatch(runtime.index, name, args, runtime.observations);
 }
 
 function uniqueRefs(values: unknown[], max = 64): { refs: string[]; total: number } {
@@ -192,9 +195,67 @@ function uniqueRefs(values: unknown[], max = 64): { refs: string[]; total: numbe
   return { refs, total: seen.size };
 }
 
+function observationFingerprint(result: ReadResult): string {
+  const hash = createHash('sha256').update(JSON.stringify([
+    result.status,
+    result.id,
+    result.file,
+    result.line,
+    result.endLine ?? null,
+    result.candidates ?? null,
+  ]));
+  hash.update(result.raw == null ? '\x00' : '\x01');
+  if (result.raw != null) hash.update(result.raw);
+  return hash.digest('base64url');
+}
+
+function rememberObservation(observations: Map<string, string>, key: string, fingerprint: string): void {
+  observations.delete(key);
+  observations.set(key, fingerprint);
+  while (observations.size > MAX_OBSERVATIONS) {
+    const oldest = observations.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    observations.delete(oldest);
+  }
+}
+
+function rememberResult(observations: Map<string, string>, ref: string, result: ReadResult): void {
+  const fingerprint = observationFingerprint(result);
+  rememberObservation(observations, ref, fingerprint);
+  if (result.id !== ref) rememberObservation(observations, result.id, fingerprint);
+}
+
+function observedDelta(index: MapIndex, refs: string[], observations: Map<string, string>): {
+  unchanged: string[];
+  changed: ReadResult[];
+  filesChecked: number;
+  filesChanged: number;
+} {
+  const results = readMany(index, refs);
+  const unchanged: string[] = [];
+  const changedOut: ReadResult[] = [];
+  const filesChecked = new Set<string>();
+  const filesChanged = new Set<string>();
+  for (let i = 0; i < refs.length; i++) {
+    const ref = refs[i];
+    const result = results[i];
+    if (result.file) filesChecked.add(result.file);
+    const fingerprint = observationFingerprint(result);
+    const previous = observations.get(ref) ?? observations.get(result.id);
+    const stable = result.status === 'exact' || result.status === 'relocated';
+    if (stable && previous === fingerprint) unchanged.push(result.id);
+    else {
+      changedOut.push(result);
+      if (result.file) filesChanged.add(result.file);
+    }
+    rememberResult(observations, ref, result);
+  }
+  return { unchanged, changed: changedOut, filesChecked: filesChecked.size, filesChanged: filesChanged.size };
+}
+
 /** Pure tool dispatch over a given index — exported so the protocol layer can be
  * exercised in tests without a live stdio process. */
-export function dispatch(index: MapIndex, name: string, args: Record<string, unknown>): string {
+export function dispatch(index: MapIndex, name: string, args: Record<string, unknown>, observations?: Map<string, string>): string {
   switch (name) {
     case 'read': {
       const hasRefs = args.refs !== undefined;
@@ -202,23 +263,30 @@ export function dispatch(index: MapIndex, name: string, args: Record<string, unk
       if (hasRefs && hasRef) return JSON.stringify({ error: 'Pass `ref` (single) OR `refs` (batch), not both.' }, null, 2);
       if (hasRefs) {
         if (!Array.isArray(args.refs) || args.refs.length === 0) return JSON.stringify({ error: '`refs` must be a non-empty array of symbol ids or names.' }, null, 2);
-        // Working-set drift delta: of a set you read earlier, return current slices only for
-        // the ones whose file changed since indexing — refresh the delta, not the whole set.
+        // Long-lived MCP calls compare with what this session actually returned before.
+        // Pure/one-shot dispatch has no session baseline, so it keeps the index-relative fallback.
         if (args.changedOnly) {
           const { refs } = uniqueRefs(args.refs);
-          return JSON.stringify(changed(index, refs));
+          return JSON.stringify(observations ? observedDelta(index, refs, observations) : changed(index, refs));
         }
         // Batch: one round-trip for many symbols — same slices, fewer turns. Dedupe (keep
         // first occurrence) and cap so a stray huge array can't blow up the context window.
         const MAX = 64;
         const { refs, total } = uniqueRefs(args.refs, MAX);
-        const out: Record<string, unknown> = { results: readMany(index, refs) };
+        const results = readMany(index, refs);
+        if (observations) {
+          for (let i = 0; i < refs.length; i++) rememberResult(observations, refs[i], results[i]);
+        }
+        const out: Record<string, unknown> = { results };
         if (total > MAX) out.note = `Read first ${MAX} of ${total} refs; split the rest into another call.`;
         // Compact (no pretty-print indentation) — leaner in context than N single pretty reads.
         return JSON.stringify(out);
       }
       if (!hasRef) return JSON.stringify({ error: 'Pass `ref` (a symbol id or name) or `refs` (an array).' }, null, 2);
-      return JSON.stringify(read(index, String(args.ref), { snippet: args.snippet ? String(args.snippet) : undefined }), null, 2);
+      const ref = String(args.ref);
+      const result = read(index, ref, { snippet: args.snippet ? String(args.snippet) : undefined });
+      if (observations) rememberResult(observations, ref, result);
+      return JSON.stringify(result, null, 2);
     }
     default:
       throw new Error(`unknown tool: ${name}`);

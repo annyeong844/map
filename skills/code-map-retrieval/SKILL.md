@@ -40,9 +40,10 @@ Native Linux, Windows (`C:\...`), and equivalent WSL (`/mnt/c/...`) spellings ar
 
 5. **Refreshing reads after the code changed**
    → one `read` with `root: "/absolute/repo", refs: [your working set]` and
-   `changedOnly: true`. It returns current slices only for symbols whose file changed, plus an
-   `unchanged` id list — a "git status for your reads." Don't re-read the unchanged ones; don't
-   re-grep the tree.
+   `changedOnly: true`. It compares with the slices this MCP session returned previously—even
+   if the index was rebuilt in between—and returns only changed slices plus an `unchanged` id
+   list. Refs without a session baseline are returned conservatively. Don't re-read the
+   unchanged ones; don't re-grep the tree.
 
 ## References / callers / definitions — escalate to code-oracle (type-aware), by judgment
 

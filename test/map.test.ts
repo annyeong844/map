@@ -158,6 +158,37 @@ test('a global MCP routes reads across child repositories by absolute root', asy
   assert.match(JSON.parse(callTool('read', { root: 'relative/repo', ref: 'alpha' })).error ?? '', /must be absolute/);
 });
 
+test('MCP changedOnly compares with the prior read even after an index refresh', async () => {
+  const root = repo({
+    'src/a.ts': 'export function alpha(): number { return 1; }\n',
+    'src/b.ts': 'export function beta(): number { return 2; }\n',
+  });
+  let built = await buildIndex({ root });
+  const indexPath = join(root, '.map-index.json');
+  saveIndex(built.index, indexPath);
+
+  const cold = JSON.parse(callTool('read', { root, refs: ['alpha', 'beta'], changedOnly: true }));
+  assert.deepEqual(cold.unchanged, []);
+  assert.deepEqual(cold.changed.map((result: { id: string }) => result.id), ['src/a.ts#alpha', 'src/b.ts#beta']);
+
+  const initial = JSON.parse(callTool('read', { root, refs: ['alpha', 'beta'] }));
+  assert.deepEqual(initial.results.map((result: { status: string }) => result.status), ['exact', 'exact']);
+
+  writeFileSync(join(root, 'src/a.ts'), 'export function alpha(): number { return 10; }\n');
+  built = await buildIndex({ root, previous: built.index });
+  saveIndex(built.index, indexPath);
+
+  const delta = JSON.parse(callTool('read', { root, refs: ['alpha', 'beta'], changedOnly: true }));
+  assert.deepEqual(delta.unchanged, ['src/b.ts#beta']);
+  assert.equal(delta.changed.length, 1);
+  assert.equal(delta.changed[0].id, 'src/a.ts#alpha');
+  assert.match(delta.changed[0].raw ?? '', /return 10/);
+
+  const stable = JSON.parse(callTool('read', { root, refs: ['alpha', 'beta'], changedOnly: true }));
+  assert.deepEqual(stable.unchanged, ['src/a.ts#alpha', 'src/b.ts#beta']);
+  assert.deepEqual(stable.changed, []);
+});
+
 test('the global MCP bounds warmed repository runtimes', async () => {
   const container = repo({});
   const roots: string[] = [];

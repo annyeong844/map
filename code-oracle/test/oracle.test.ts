@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
-import { ContentLengthDecoder, disposeAll, projectSnapshot, query, resolveNamePosition, scanProjectEpoch, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
+import { ContentLengthDecoder, disposeAll, projectSnapshot, query, resolveNamePosition, resolveTsgoPackageBin, scanProjectEpoch, TOOLS, tsgoSpawnCommand, type OracleSym } from '../server.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const installedTsgo = ['tsgo', 'tsgo.js']
@@ -167,6 +167,31 @@ test('concurrent project snapshots share one exact scan', async () => {
     assert.equal(snapshots[0].files.size, 129);
   } finally {
     disposeAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('tsgo package resolution follows a hoisted Node dependency layout', () => {
+  const root = mkdtempSync(join(tmpdir(), 'code-oracle-hoisted-tsgo-'));
+  try {
+    const scope = join(root, 'node_modules/@typescript');
+    const packageRoot = join(scope, 'native-preview');
+    const platformRoot = join(scope, `native-preview-${process.platform}-${process.arch}`);
+    mkdirSync(join(packageRoot, 'bin'), { recursive: true });
+    mkdirSync(platformRoot, { recursive: true });
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@typescript/native-preview',
+      exports: { './package.json': './package.json' },
+    }));
+    writeFileSync(join(platformRoot, 'package.json'), JSON.stringify({
+      name: `@typescript/native-preview-${process.platform}-${process.arch}`,
+      exports: { './package.json': './package.json' },
+    }));
+    const launcher = join(packageRoot, 'bin/tsgo');
+    writeFileSync(launcher, '#!/usr/bin/env node\n');
+
+    assert.equal(resolveTsgoPackageBin(join(root, 'client.cjs')), launcher);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

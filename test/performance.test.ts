@@ -370,6 +370,35 @@ test('line-only batch resolves sibling boundaries and preserves exact slices', (
   );
 });
 
+test('a final line-only symbol reaches EOF instead of stopping at an arbitrary window', () => {
+  const tail = 'CLEAN_LINE_ONLY_TAIL_SENTINEL';
+  const text = [
+    'legacy symbol',
+    ...Array.from({ length: 160 }, (_, i) => `body line ${i}`),
+    tail,
+    '',
+  ].join('\n');
+  const root = repo({ 'legacy.txt': text });
+  const entry: MapEntry = {
+    id: 'legacy.txt#symbol',
+    name: 'symbol',
+    kind: 'line',
+    file: 'legacy.txt',
+    line: 1,
+    searchText: 'legacy symbol',
+  };
+  const index = syntheticIndex(root, [entry], {
+    'legacy.txt': token(text),
+  });
+
+  const result = read(index, entry.id, { snippet: tail });
+  assert.equal(result.status, 'exact');
+  assert.match(result.raw ?? '', new RegExp(`${tail}\\n$`));
+  assert.equal(result.aim?.status, 'hit');
+  assert.equal(result.aim?.matches[0]?.line, 162);
+  assert.match(result.note ?? '', /next sibling or EOF/);
+});
+
 test('ordered line-only boundaries are logarithmic; legacy unsorted indexes stay correct', () => {
   const base: MapEntry[] = Array.from({ length: 8_192 }, (_, i) => ({
     id: `f${String(Math.floor(i / 8)).padStart(4, '0')}.txt#s${i}`,

@@ -76,6 +76,23 @@ function helper(): number {
 
 after(disposeMcpState);
 
+test('Codex routing skill discovers a deferred read before falling back', () => {
+  const rootSkill = readFileSync(
+    new URL('../skills/code-map-retrieval/SKILL.md', import.meta.url),
+    'utf8',
+  );
+  const pluginSkill = readFileSync(
+    new URL(
+      '../plugins/code-map/skills/code-map-retrieval/SKILL.md',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.equal(pluginSkill, rootSkill);
+  assert.match(rootSkill, /mcp__code_map__read/);
+  assert.match(rootSkill, /before declaring `read` unavailable/);
+});
+
 test('CLI and MCP expose the package version from one source', () => {
   const cli = spawnSync(
     process.execPath,

@@ -15,6 +15,11 @@ those bytes.
 
 ## Route
 
+- Codex installs this routing skill and its host MCP separately. A plugin card
+  showing `Tools: (none)` does not prove that `read` is absent.
+- Codex may defer `mcp__code_map__read` instead of showing it in the static tool
+  list. Search the deferred/available tool registry for that exact name and try
+  it before declaring `read` unavailable.
 - Known id, name, or `path#name`: call `read` directly. Do not grep or whole-file
   read it first.
 - Several independent refs: make one `refs` call (maximum 64) with
@@ -34,8 +39,9 @@ the evidence.
 
 Indexes refresh lazily. For suspected stale code or configuration, retry with
 `diagnostics: true`; start a new MCP session when `restartRequired` is true or a
-never-read ref is incorrectly reported unchanged. If `read` is unavailable, use
-normal repository tools and say so.
+never-read ref is incorrectly reported unchanged. Only treat `read` as
+unavailable after the deferred lookup or an actual call fails; then use normal
+repository tools and say so.
 
 Use code-oracle, when available, for type-aware callers, definitions, and
 implementations; honor its reported coverage limits.

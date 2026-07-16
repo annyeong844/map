@@ -44,8 +44,6 @@ function fileWithinRoot(
   return target;
 }
 
-/** Lines of trailing context for line-only symbols with no known sibling boundary. */
-const LINE_ONLY_WINDOW = 80;
 const ANCHOR_PREVIEW_LENGTH = 60;
 const MAX_AMBIGUOUS_CANDIDATES = 12;
 const SOURCE_PREVIEW_LENGTH = 120;
@@ -349,7 +347,7 @@ function computeAim(
     lo = current?.start ?? hits[0];
     hi = current?.end ?? fallbackRelocatedEnd(index, entry, text, hits[0]);
   } else {
-    // Line-only symbol (no char range): bound by the next indexed sibling.
+    // Line-only symbol (no char range): bound by the next indexed sibling or EOF.
     const lines = linesFor(index, entry.file, snapshot);
     let startLine = entry.line;
     if (!fresh) {
@@ -357,10 +355,9 @@ function computeAim(
       if (hits.length !== 1) return { status: 'unanchored', matches: [] };
       startLine = indexedLineAt(lines, hits[0]);
     }
-    const next = nextSiblingLine(index, entry);
-    const span = next ? next - entry.line : LINE_ONLY_WINDOW;
-    lo = indexedOffsetOfLine(lines, startLine);
-    hi = indexedOffsetOfLine(lines, startLine + span);
+    const range = lineOnlyRange(index, entry, snapshot, startLine);
+    lo = range.from;
+    hi = range.to;
   }
 
   const local = indexOfAll(text, snippet, lo, hi);
@@ -625,7 +622,31 @@ function resolve(
   return resolved;
 }
 
-/** Bound a line-only symbol by its next indexed sibling in the same file. */
+function lineOnlyRange(
+  index: MapIndex,
+  entry: MapEntry,
+  snapshot: FileSnapshot,
+  startLine: number,
+): { from: number; to: number; endLine: number } {
+  const lines = linesFor(index, entry.file, snapshot);
+  const next = nextSiblingLine(index, entry);
+  const endLine = next
+    ? Math.max(
+        startLine,
+        Math.min(
+          startLine + Math.max(0, next - entry.line - 1),
+          lines.starts.length,
+        ),
+      )
+    : Math.max(startLine, lines.starts.length);
+  return {
+    from: indexedOffsetOfLine(lines, startLine),
+    to: next ? indexedOffsetOfLine(lines, endLine + 1) : lines.textLength,
+    endLine,
+  };
+}
+
+/** Bound a line-only symbol by its next indexed sibling in the same file, or EOF. */
 function sliceLineWindow(
   index: MapIndex,
   entry: MapEntry,
@@ -651,15 +672,12 @@ function sliceLineWindow(
   startLine = entry.line,
 ): ReadResult {
   const text = snapshot.text ?? '';
-  const lines = linesFor(index, entry.file, snapshot);
-  const next = nextSiblingLine(index, entry);
-  const span = next ? Math.max(0, next - entry.line - 1) : LINE_ONLY_WINDOW;
-  const endLine = Math.max(
+  const { from, to, endLine } = lineOnlyRange(
+    index,
+    entry,
+    snapshot,
     startLine,
-    Math.min(startLine + span, lines.starts.length),
   );
-  const from = indexedOffsetOfLine(lines, startLine);
-  const to = indexedOffsetOfLine(lines, endLine + 1);
   const raw = text.slice(from, to);
   if (status === 'relocated') {
     if (note === undefined) {
@@ -687,7 +705,7 @@ function sliceLineWindow(
     note:
       note ??
       (entry.charStart == null
-        ? 'Line-only symbol (no char range); bounded by next sibling — may include trailing lines.'
+        ? 'Line-only symbol (no char range); bounded by next sibling or EOF — may include trailing lines.'
         : undefined),
   };
 }

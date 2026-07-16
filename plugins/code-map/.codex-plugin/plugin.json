@@ -1,6 +1,6 @@
 {
   "name": "code-map",
-  "version": "0.9.0-rc.1+codex.20260715142825",
+  "version": "0.9.0-rc.1+codex.20260716033401",
   "description": "Codex-first routing for exact, drift-resistant code-map symbol reads.",
   "author": {
     "name": "annyeong844",

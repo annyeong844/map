@@ -17,6 +17,7 @@ import {
   INDEX_VERSION,
   type MapEntry,
   type MapIndex,
+  ORDERED_ENTRIES_VERSION,
 } from '../src/core/types.ts';
 import { token } from '../src/core/util.ts';
 
@@ -507,7 +508,7 @@ test('ordered line-only boundaries are logarithmic; legacy unsorted indexes stay
     },
   ];
   const legacy = syntheticIndex(process.cwd(), legacyEntries);
-  legacy.meta.version = INDEX_VERSION - 1;
+  legacy.meta.version = ORDERED_ENTRIES_VERSION - 1;
   assert.equal(nextSiblingLine(legacy, legacyEntries[0]), 2);
   assert.equal(nextSiblingLine(legacy, legacyEntries[3]), 3);
 });

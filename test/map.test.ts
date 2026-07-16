@@ -1197,8 +1197,51 @@ test('read returns the exact source when the file is unchanged', async () => {
   assert.equal(r.status, 'exact');
   assert.equal(
     r.raw,
-    'function alpha(x: number): number {\n  return x + 1;\n}',
+    'export function alpha(x: number): number {\n  return x + 1;\n}',
   );
+});
+
+test('read preserves direct top-level export syntax for every declaration shape', async () => {
+  const declarations = {
+    alpha: 'export function alpha(): number { return 1; }',
+    Beta: 'export class Beta { method(): number { return 2; } }',
+    gamma: 'export const gamma = 3, delta = 4;',
+    delta: 'export const gamma = 3, delta = 4;',
+    Shape: 'export interface Shape { value: number }',
+    Alias: 'export type Alias = string | number;',
+    Choice: 'export enum Choice { One }',
+    omega: 'export default function omega(): number { return 5; }',
+  } as const;
+  const root = repo({
+    'src/exports.ts': `${[...new Set(Object.values(declarations))].join('\n')}\n`,
+  });
+  const { index } = await buildIndex({ root });
+
+  for (const [name, expected] of Object.entries(declarations)) {
+    const entry = index.entries.find((candidate) => candidate.name === name);
+    assert.ok(entry, `${name} is indexed`);
+    const result = read(index, entry.id);
+    assert.equal(result.status, 'exact');
+    assert.equal(result.raw, expected, `${name} keeps its export wrapper`);
+  }
+
+  const method = index.entries.find((candidate) => candidate.name === 'method');
+  assert.ok(method, 'class method is indexed');
+  assert.equal(
+    read(index, method.id).raw,
+    'method(): number { return 2; }',
+    'nested methods keep their own declaration boundary',
+  );
+});
+
+test('read preserves the wrapper of an anonymous default export', async () => {
+  const source = 'export default (): number => 1;';
+  const { index } = await buildIndex({
+    root: repo({ 'src/default.ts': `${source}\n` }),
+  });
+  const entry = index.entries.find((candidate) => candidate.name === 'default');
+  assert.ok(entry, 'default export is indexed');
+  assert.equal(read(index, entry.id).raw, source);
 });
 
 test('class methods are indexed with exact coordinates', async () => {

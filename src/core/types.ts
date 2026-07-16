@@ -9,7 +9,7 @@
  * exact spot. What the spot *means* is never the map's claim.
  */
 
-export const INDEX_VERSION = 13;
+export const INDEX_VERSION = 14;
 /** Entries have been globally ordered by file, then line, since this format. */
 export const ORDERED_ENTRIES_VERSION = 13;
 

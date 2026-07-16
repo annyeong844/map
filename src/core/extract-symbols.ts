@@ -269,7 +269,7 @@ export function extractSymbols(
         continue;
       }
       if (isDeclNode(node.declaration)) {
-        pushDecl(node.declaration, true, symbols);
+        pushDecl(node.declaration, true, symbols, node);
       }
       for (const spec of node.specifiers ?? []) {
         if (spec.type !== 'ExportSpecifier') continue;
@@ -309,17 +309,16 @@ export function extractSymbols(
         decl.id?.name
       ) {
         const at = symbols.length;
-        pushDecl(decl, true, symbols);
+        pushDecl(decl, true, symbols, node);
         if (symbols[at]) symbols[at].default = true; // foo is also the module's `default` export
         continue;
       }
       // Anonymous default (or an expression): a single 'default' entry.
-      const t = decl ?? node;
       symbols.push({
         name: 'default',
         kind: 'default',
-        charStart: t.start,
-        charEnd: t.end,
+        charStart: node.start,
+        charEnd: node.end,
         exported: true,
       });
       continue;
@@ -330,15 +329,22 @@ export function extractSymbols(
   return { symbols: consolidateLocalExports(symbols), imports, refs };
 }
 
-function pushDecl(decl: DeclNode, exported: boolean, out: SymbolRec[]): void {
+function pushDecl(
+  decl: DeclNode,
+  exported: boolean,
+  out: SymbolRec[],
+  topLevelRange?: { start: number; end: number },
+): void {
   const visibility = exported ? undefined : 'module-private';
+  const topLevelStart = topLevelRange?.start ?? decl.start;
+  const topLevelEnd = topLevelRange?.end ?? decl.end;
   if (decl.type === 'FunctionDeclaration') {
     if (decl.id?.name) {
       out.push({
         name: decl.id.name,
         kind: 'FunctionDeclaration',
-        charStart: decl.start,
-        charEnd: decl.end,
+        charStart: topLevelStart,
+        charEnd: topLevelEnd,
         exported,
         visibility,
       });
@@ -352,8 +358,8 @@ function pushDecl(decl: DeclNode, exported: boolean, out: SymbolRec[]): void {
     out.push({
       name: decl.id.name,
       kind: 'ClassDeclaration',
-      charStart: decl.start,
-      charEnd: decl.end,
+      charStart: topLevelStart,
+      charEnd: topLevelEnd,
       exported,
       visibility,
       extends: superName,
@@ -382,8 +388,8 @@ function pushDecl(decl: DeclNode, exported: boolean, out: SymbolRec[]): void {
         out.push({
           name: d.id.name,
           kind: `${decl.kind}-var`,
-          charStart: d.start,
-          charEnd: d.end,
+          charStart: topLevelRange?.start ?? d.start,
+          charEnd: topLevelRange?.end ?? d.end,
           exported,
           visibility,
         });
@@ -395,8 +401,8 @@ function pushDecl(decl: DeclNode, exported: boolean, out: SymbolRec[]): void {
     out.push({
       name: decl.id.name,
       kind: decl.type,
-      charStart: decl.start,
-      charEnd: decl.end,
+      charStart: topLevelStart,
+      charEnd: topLevelEnd,
       exported,
       visibility,
     });

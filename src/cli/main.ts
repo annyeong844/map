@@ -92,12 +92,17 @@ async function main(): Promise<void> {
         console.log(
           `No changes — index current (${report.index.meta.entryCount} symbols, ${report.filesIndexed} files). Not rewritten.`,
         );
+        if (report.filesInvalid.length) {
+          console.log(
+            `  ${report.filesInvalid.length} Python files remain syntax-invalid (last-known-good symbols preserved) — first: ${report.filesInvalid[0]}`,
+          );
+        }
       } else {
         console.log(
           `Indexed ${report.index.meta.entryCount} symbols across ${report.filesIndexed} files`,
         );
         console.log(
-          `  exported defs: ${report.defs}   methods: ${report.methods}   private defs: ${report.privateDefs}`,
+          `  exported defs: ${report.defs}   methods: ${report.methods}   private defs: ${report.privateDefs}   nested defs: ${report.nestedDefs}`,
         );
         console.log(
           `  reused: ${report.reused}   re-read: ${report.changed}${flags.force ? ' (forced full)' : ''}   fan-in: ${report.fanInReused ? 'reused' : 'recomputed'}`,
@@ -105,6 +110,11 @@ async function main(): Promise<void> {
         if (report.filesMissing.length) {
           console.log(
             `  ${report.filesMissing.length} files unreadable (anchors weakened) — first: ${report.filesMissing[0]}`,
+          );
+        }
+        if (report.filesInvalid.length) {
+          console.log(
+            `  ${report.filesInvalid.length} Python files syntax-invalid (last-known-good symbols preserved) — first: ${report.filesInvalid[0]}`,
           );
         }
         console.log(`  root: ${report.index.meta.root}`);
@@ -291,10 +301,12 @@ function summary(report: BuildReport) {
     defs: report.defs,
     methods: report.methods,
     privateDefs: report.privateDefs,
+    nestedDefs: report.nestedDefs,
     reused: report.reused,
     changed: report.changed,
     fanInReused: report.fanInReused,
     filesMissing: report.filesMissing.length,
+    filesInvalid: report.filesInvalid.length,
     root: report.index.meta.root,
   };
 }

@@ -1,0 +1,10 @@
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+
+# Build dependencies can contribute generated code to the prebuilt binary.
+ignore-build-dependencies = false
+ignore-dev-dependencies = true

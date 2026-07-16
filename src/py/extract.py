@@ -26,10 +26,53 @@ import os
 import sys
 
 SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", "dist", "build", ".mypy_cache", ".pytest_cache", ".tox", ".ruff_cache", "site-packages"}
+STATEMENT_CONTAINERS = (ast.stmt, ast.ExceptHandler)
+if hasattr(ast, "match_case"):  # Python 3.10+
+    STATEMENT_CONTAINERS += (ast.match_case,)
 
 
 def token(text):  # matches src/core/util.ts token()
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def source_lines(src):
+    """Return logical Python lines and UTF-16 starts without normalizing bytes."""
+    lines = []
+    starts = [0]
+    char_starts = [0]
+    line_start = 0
+    total_u16 = 0
+    i = 0
+    while i < len(src):
+        ch = src[i]
+        if ch == "\r" or ch == "\n":
+            lines.append(src[line_start:i])
+            total_u16 += 1
+            i += 1
+            if ch == "\r" and i < len(src) and src[i] == "\n":
+                total_u16 += 1
+                i += 1
+            line_start = i
+            starts.append(total_u16)
+            char_starts.append(i)
+            continue
+        total_u16 += 2 if ord(ch) > 0xFFFF else 1
+        i += 1
+    lines.append(src[line_start:])
+    return lines, starts, char_starts, total_u16
+
+
+def binding_names(target):
+    stack = [target]
+    while stack:
+        item = stack.pop()
+        item_type = type(item)
+        if item_type is ast.Name:
+            yield item
+        elif item_type is ast.Starred:
+            stack.append(item.value)
+        elif item_type is ast.Tuple or item_type is ast.List:
+            stack.extend(reversed(item.elts))
 
 
 def list_py(root):
@@ -55,7 +98,7 @@ def to_module_file(from_file, node, fileset):
         cand = "/".join(base + mod)
     else:
         cand = (node.module or "").replace(".", "/")
-    for p in (cand + ".py", cand + "/__init__.py"):
+    for p in (cand + ".py", cand + ".pyi", cand + "/__init__.py", cand + "/__init__.pyi"):
         if p in fileset:
             return p
     return None
@@ -64,36 +107,52 @@ def to_module_file(from_file, node, fileset):
 def extract(root, only, files=None):
     all_files = list_py(root) if files is None else [f.replace("\\", "/") for f in files if f.endswith((".py", ".pyi"))]
     fileset = set(all_files)
-    targets = [f for f in all_files if not only or f in only]
-    entries, file_imports, file_tokens, file_refs, files_missing = [], {}, {}, {}, []
+    onlyset = set(only or ())
+    targets = [f for f in all_files if not onlyset or f in onlyset]
+    entries, file_imports, file_tokens, file_refs, files_missing, files_invalid = [], {}, {}, {}, [], []
 
     for file in targets:
+        path = os.path.join(root, file)
         try:
-            with open(os.path.join(root, file), encoding="utf-8") as source:
+            # Preserve CRLF bytes so hashes and UTF-16 coordinates match Node's
+            # readFile(..., "utf8") view of the same on-disk source.
+            with open(path, encoding="utf-8", newline="") as source:
                 src = source.read()
+        except UnicodeDecodeError:
+            try:
+                with open(path, "rb") as source:
+                    src = source.read().decode("utf-8", "replace")
+            except Exception:
+                files_missing.append(file)
+                continue
+            file_tokens[file] = token(src)
+            file_imports[file] = []
+            file_refs[file] = {}
+            files_invalid.append(file)
+            continue
         except Exception:
             files_missing.append(file)
             continue
         file_tokens[file] = token(src)
         imports = []
         file_imports[file] = imports
+        # ast.parse(str) rejects a leading U+FEFF even though a UTF-8 BOM is a
+        # legal Python source prefix. Parse without it, then add its one UTF-16
+        # unit back to every absolute coordinate so Node still slices `src`.
+        parse_src = src[1:] if src.startswith("\ufeff") else src
+        source_prefix_u16 = len(src) - len(parse_src)
         try:
-            tree = ast.parse(src)
+            tree = ast.parse(parse_src)
         except Exception:
             file_refs[file] = {}
+            files_invalid.append(file)
             continue
 
-        lines = src.split("\n")
+        lines, line_u16, line_chars, parsed_u16 = source_lines(parse_src)
+        total_u16 = source_prefix_u16 + parsed_u16
         # One UTF-16 base per line replaces the former `len(src)+1` Python-int
         # array (tens of MB per large file). ASCII columns are then O(1); only a
         # non-ASCII declaration line builds a small byte→UTF-16 boundary map.
-        line_u16 = []
-        total_u16 = 0
-        for i, line in enumerate(lines):
-            line_u16.append(total_u16)
-            total_u16 += len(line) if line.isascii() else len(line.encode("utf-16-le")) // 2
-            if i + 1 < len(lines):
-                total_u16 += 1  # `\n`
         byte_to_u16 = {}
 
         def u16_col(line_index, byte_col):
@@ -120,34 +179,67 @@ def extract(root, only, files=None):
             index = lineno - 1
             if not 0 <= index < len(lines):
                 return total_u16
-            return line_u16[index] + u16_col(index, col)
+            return source_prefix_u16 + line_u16[index] + u16_col(index, col)
 
         def sig(lineno):
             return (lines[lineno - 1].strip() if 0 <= lineno - 1 < len(lines) else "")[:200]
 
+        def char_off(lineno, byte_col):
+            index = lineno - 1
+            if not 0 <= index < len(lines):
+                return len(parse_src)
+            prefix = lines[index].encode("utf-8")[:byte_col].decode("utf-8")
+            return line_chars[index] + len(prefix)
+
         refs = {}
-        for ref_node in ast.walk(tree):
-            name = None
-            if isinstance(ref_node, ast.Name):
-                name = ref_node.id
-            elif isinstance(ref_node, ast.Attribute):
-                name = ref_node.attr
-            if name:
-                refs[name] = refs.get(name, 0) + 1
         file_refs[file] = refs
 
-        def emit(node, name, kind, classname=None, bases=None):
-            cs, ce = off(node.lineno, node.col_offset), off(node.end_lineno, node.end_col_offset)
+        def emit(node, name, kind, classname=None, bases=None, namepath=None):
+            signature_start = off(node.lineno, node.col_offset)
+            decorators = getattr(node, "decorator_list", ())
+            if decorators:
+                first_decorator = min(decorators, key=lambda item: (item.lineno, item.col_offset))
+                start_line = first_decorator.lineno
+                cs = off(first_decorator.lineno, max(0, first_decorator.col_offset - 1))
+            else:
+                start_line = node.lineno
+                cs = signature_start
+            ce = off(node.end_lineno, node.end_col_offset)
             rec = {"name": name, "kind": kind, "file": file, "charStart": cs, "charEnd": ce,
-                   "line": node.lineno, "endLine": node.end_lineno,
+                   "line": start_line, "endLine": node.end_lineno,
                    "searchText": sig(node.lineno) or name, "exported": not name.startswith("_")}
+            if signature_start != cs:
+                rec["anchorOffset"] = signature_start - cs
             refs[name] = refs.get(name, 0) + 1  # declaration occurrence
+            if namepath and namepath != name:
+                rec["namePath"] = namepath
             if name.startswith("_"):
                 rec["visibility"] = "module-private"
             if classname:
                 rec["className"] = classname
             if bases:
                 rec["extends"] = bases[0]  # primary base — single string, matches TS `extends`
+            return rec
+
+        def emit_binding(node, target, value, kind):
+            name = target.id
+            cs = off(node.lineno, node.col_offset)
+            anchor = off(target.lineno, target.col_offset)
+            ce = off(node.end_lineno, node.end_col_offset)
+            anchor_start_char = char_off(target.lineno, target.col_offset)
+            anchor_end_char = char_off(
+                value.lineno if value is not None else node.end_lineno,
+                value.col_offset if value is not None else node.end_col_offset,
+            )
+            search_text = parse_src[anchor_start_char:anchor_end_char].rstrip()[:200]
+            rec = {"name": name, "kind": kind, "file": file, "charStart": cs, "charEnd": ce,
+                   "line": node.lineno, "endLine": node.end_lineno,
+                   "searchText": search_text or name, "exported": not name.startswith("_")}
+            refs.setdefault(name, 0)
+            if anchor != cs:
+                rec["anchorOffset"] = anchor - cs
+            if name.startswith("_"):
+                rec["visibility"] = "module-private"
             return rec
 
         for node in tree.body:
@@ -159,17 +251,80 @@ def extract(root, only, files=None):
                 else:
                     for a in node.names:
                         imports.append({"source": a.name.replace(".", "/"), "name": a.asname or a.name})
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                entries.append(emit(node, node.name, "FunctionDeclaration"))
-            elif isinstance(node, ast.ClassDef):
-                bases = [b.id for b in node.bases if isinstance(b, ast.Name)]
-                entries.append(emit(node, node.name, "ClassDeclaration", bases=bases))
-                for m in node.body:
-                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        entries.append(emit(m, m.name, "ClassMethod", classname=node.name))
+
+        # Definitions can occur only in statement bodies. Keep this lexical walk
+        # out of expression-only branches. The sentinel avoids an enter/leave
+        # tuple per statement.
+        scope = []
+        scope_kinds = []
+        scope_exit = object()
+        stack = [tree]
+        while stack:
+            item = stack.pop()
+            if item is scope_exit:
+                scope_kinds.pop()
+                scope.pop()
+                continue
+
+            node_type = type(item)
+            opens_scope = False
+            if node_type is ast.FunctionDef or node_type is ast.AsyncFunctionDef:
+                namepath = "/".join((*scope, item.name))
+                is_method = bool(scope_kinds and scope_kinds[-1] == "class")
+                classname = "/".join(scope) if is_method else None
+                kind = "ClassMethod" if is_method else "FunctionDeclaration"
+                entries.append(emit(item, item.name, kind, classname=classname,
+                                    namepath=None if is_method else namepath))
+                scope.append(item.name)
+                scope_kinds.append("function")
+                opens_scope = True
+            elif node_type is ast.ClassDef:
+                bases = [item.bases[0].id] if item.bases and type(item.bases[0]) is ast.Name else None
+                namepath = "/".join((*scope, item.name))
+                entries.append(emit(item, item.name, "ClassDeclaration", bases=bases,
+                                    namepath=namepath))
+                scope.append(item.name)
+                scope_kinds.append("class")
+                opens_scope = True
+            elif not scope and node_type is ast.Assign:
+                for target_group in item.targets:
+                    for target in binding_names(target_group):
+                        entries.append(emit_binding(item, target, item.value, "assign-var"))
+            elif not scope and node_type is ast.AnnAssign:
+                for target in binding_names(item.target):
+                    entries.append(emit_binding(item, target, item.value, "ann-var"))
+            elif not scope and hasattr(ast, "TypeAlias") and node_type is ast.TypeAlias:
+                for target in binding_names(item.name):
+                    entries.append(emit_binding(item, target, item.value, "TypeAlias"))
+
+            if opens_scope:
+                stack.append(scope_exit)
+            for field_name in reversed(item._fields):
+                value = getattr(item, field_name, None)
+                if isinstance(value, list):
+                    for child in reversed(value):
+                        if isinstance(child, STATEMENT_CONTAINERS):
+                            stack.append(child)
+                elif isinstance(value, STATEMENT_CONTAINERS):
+                    stack.append(value)
+
+        # Node only consumes reference counts for declarations emitted above.
+        # Filtering during the one full AST walk preserves their exact counts but
+        # avoids building and serializing a dictionary of every unrelated local.
+        for ref_node in ast.walk(tree):
+            node_type = type(ref_node)
+            if node_type is ast.Name:
+                name = ref_node.id
+            elif node_type is ast.Attribute:
+                name = ref_node.attr
+            else:
+                continue
+            declaration_count = refs.get(name)
+            if declaration_count is not None:
+                refs[name] = declaration_count + 1
 
     return {"entries": entries, "fileImports": file_imports, "fileTokens": file_tokens,
-            "fileRefs": file_refs, "filesMissing": files_missing}
+            "fileRefs": file_refs, "filesMissing": files_missing, "filesInvalid": files_invalid}
 
 
 if __name__ == "__main__":

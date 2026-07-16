@@ -137,6 +137,7 @@ const TYPE_KINDS = new Set([
   'TSInterfaceDeclaration',
   'TSTypeAliasDeclaration',
   'TSEnumDeclaration',
+  'TypeAlias',
 ]);
 
 const ASCII_UPPER_A = 65;
@@ -350,6 +351,9 @@ function toHits(scored: Scored[]): LocateHit[] {
   return scored.map((s) => ({
     id: s.entry.id,
     name: s.entry.name,
+    namePath:
+      s.entry.namePath ??
+      (s.entry.className ? `${s.entry.className}/${s.entry.name}` : undefined),
     kind: s.entry.kind,
     file: s.entry.file,
     line: s.entry.line,

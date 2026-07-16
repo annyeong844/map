@@ -13,9 +13,11 @@ import { isRecord } from './util.ts';
  */
 export interface SymbolRec {
   name: string;
+  namePath?: string;
   kind: string;
   charStart: number;
   charEnd: number;
+  anchorOffset?: number;
   exported: boolean;
   className?: string;
   static?: boolean;

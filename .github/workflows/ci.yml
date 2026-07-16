@@ -15,6 +15,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
       - uses: actions/setup-node@v6
         with:
           node-version: '24' # source tests need >=23.6 native TS type-stripping; the package ships JS
@@ -23,8 +26,14 @@ jobs:
         with:
           python-version: '3.x'
       - run: npm ci
+      - run: npm run check:native
+      - run: npm run build:native
+      - run: npm run smoke:native
       - run: npm run typecheck # tsc --noEmit, strict
       - run: npm test
+      - run: node --test test/python.test.ts
+        env:
+          CODE_MAP_PY_BACKEND: stdlib
       - run: npm run lint # oxlint (correctness)
       - run: npm run check:versions
       - run: npm run check:package

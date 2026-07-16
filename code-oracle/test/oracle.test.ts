@@ -962,6 +962,19 @@ test(
           name: `value${index}`,
         });
       }
+      // didClose is an LSP notification: the Oracle writes it before returning,
+      // but the fake child may append its observation a scheduling turn later.
+      // Wait for delivery, while still failing if any close is genuinely absent.
+      await waitUntil(
+        () =>
+          existsSync(methodLog) &&
+          readFileSync(methodLog, 'utf8')
+            .split(/\r?\n/)
+            .filter((method) => method === 'textDocument/didClose').length ===
+            files.length,
+        1_000,
+        'didClose notifications did not reach the LSP',
+      );
       const methods = readFileSync(methodLog, 'utf8').trim().split(/\r?\n/);
       assert.equal(
         methods.filter((method) => method === 'textDocument/didOpen').length,

@@ -112,6 +112,7 @@ There is no background parser or polling child to orphan. Set `CODE_MAP_AUTO_IND
 
 ```bash
 map read "alias-map.ts#buildAliasMap"        # path-scoped name → exact slice
+map read "server.py#Outer/Inner/run"          # exact lexical path for nested symbols
 map read buildAliasMap                       # bare name (errors if ambiguous)
 map read withRetry --snippet "req.copy()"    # char range *inside* the symbol
 map read --refs "getModel,createMessage,withRetry"   # batch: many symbols, one call
@@ -124,6 +125,18 @@ symbol name you find to `read`. As an MCP tool it's the same `read` (absolute re
 spellings are interchangeable. If a Windows-hosted MCP reads a repo on native WSL ext4, pass the
 repo's `\\wsl.localhost\<distro>\...` UNC path as `root`; a WSL-hosted server also accepts the
 matching current-distro UNC spelling. `ref` stays repo-relative (`path#symbol`).
+An existing file's `path#symbol` form is strict: if that exact symbol or lexical path is absent,
+`read` returns candidates/failure instead of silently promoting a different fuzzy name. Class
+methods and nested Python declarations also accept `path#Outer/Inner/method`; previously exposed
+leaf IDs remain valid.
+Python module bindings proven by the AST—plain/annotated assignments and PEP 695 `type` aliases—are
+indexed too, while function locals and class fields stay outside the symbol surface.
+Exact slices require UTF-8 source (a UTF-8 BOM is supported); other source encodings are reported
+as degraded instead of being misdecoded or mislabeled as missing.
+Python slices include their leading decorators (`@dataclass`, `@property`, and so on). If a
+half-written Python file is temporarily syntax-invalid, incremental indexing keeps its
+last-known-good symbols stale rather than silently deleting them; CLI and MCP diagnostics expose
+the degraded file until its next valid edit.
 For UNC repositories, the Windows server asks that WSL distro's native Git for the
 gitignore-aware file list. This keeps the Windows and Linux corpus identical instead of making
 the two hosts rebuild the shared index back and forth.
@@ -211,19 +224,29 @@ never asked. The LLM reads the raw bytes and judges them fresh, every call.
 
 **Where the coordinates come from:** code-map parses the source tree itself (no external
 graph). Git-tracked files (`git ls-files`, so `.gitignore` is respected) → **TS/JS via
-`oxc-parser`**, **Python via a stdlib-`ast` backend** — both emit the same per-file
+`oxc-parser`**, **Python via a packaged native Ruff parser** (with an exact stdlib-`ast`
+fallback) — both emit the same per-file
 primitives (symbol coordinate + a `searchText` drift-anchor + a content token). `fanIn`
 (cross-file reference count) only breaks ties when a bare name resolves to more than one
-symbol. Honest scope: namespace / `export *` / alias imports aren't attributed.
+symbol. The native extractor parses files in one bounded parallel process; unsupported source
+platforms fall back to memory-aware, size-balanced short-lived Python workers. No parser process
+is resident after a build, and packaged installs need no Python runtime. Honest scope: namespace /
+`export *` / alias imports aren't attributed.
 
 </details>
 
 <details>
 <summary><b>🔌 Wiring it for real (install options + the efficiency win)</b></summary>
 
-**Requirements:** Node ≥ 23.6 (runs TypeScript directly, no build), one runtime dep
-(`oxc-parser`); `ripgrep` used for the file walk when present. Python 3 is auto-detected as
-`python3`/`python` on Unix and `py -3`/`python3`/`python` on Windows; `CODE_MAP_PYTHON` overrides it.
+**Requirements:** Node ≥ 23.6 (runs TypeScript directly, no build), one npm runtime dep
+(`oxc-parser`); `ripgrep` used for the file walk when present. Supported packages include the
+native Python extractor. Release CI builds and executes prebuilt binaries for Windows x64,
+Linux x64/arm64 (static musl), and macOS x64/arm64; npm installs never compile Rust. On an
+unsupported/source-only install, Python 3 is auto-detected as
+`python3`/`python` on Unix and `py -3`/`python3`/`python` on Windows. `CODE_MAP_PY_BACKEND=stdlib`
+forces that fallback, `CODE_MAP_PYTHON` selects its interpreter, and `CODE_MAP_PY_NATIVE` selects
+an explicit native executable. Source contributors can stage their host binary with
+`npm run build:native`.
 For a native WSL install, check `node --version` _inside WSL_—a current Windows Node does not
 upgrade a stale WSL Node, and code-map requires ≥23.6 in the environment that launches it.
 
@@ -421,9 +444,11 @@ code-map can _replace_ (not augment) the search.
 ```
 src/
   core/    types · files · extract-symbols (oxc) · fan-in · index-drift · build-index · locate · read · store
-  py/      extract.py   (Python: stdlib ast → the same per-file primitives)
+  py/      extract.py   (portable Python stdlib fallback)
   cli/     main.ts      (index / read / changed / stats / setup / version)
   mcp/     server.ts    (the single `read` tool, lazy auto-index + live-process diagnostics)
+native/
+  python-extractor/     (pinned Ruff parser → the same per-file primitives)
 test/      extract · exact-slice · methods · relocation · anchor-lost · incremental · fan-in
            · snippet-aim · batch · path-traversal refusal · Python
 ```

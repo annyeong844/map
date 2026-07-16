@@ -360,7 +360,13 @@ function disposeRuntime(runtime: IndexRuntime | undefined): void {
 }
 
 function ensureRootWatch(runtime: IndexRuntime, rootInput: string): void {
-  const root = resolve(rootInput);
+  const resolvedRoot = resolve(rootInput);
+  let root = resolvedRoot;
+  try {
+    root = realpathSync(resolvedRoot);
+  } catch {
+    // A disappearing root falls through to the watcher fallback below.
+  }
   if (
     runtime.root === root &&
     (runtime.watcher || runtime.watcherUnavailable)

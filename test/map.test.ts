@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -859,9 +860,10 @@ test('MCP source identity diagnostics cover transitive local modules', () => {
     'leaf.ts': 'export const value = 1;\n',
   });
   try {
+    const canonicalRoot = realpathSync(root);
     const files = discoverLocalModuleFiles(join(root, 'entry.ts'));
     assert.deepEqual(
-      files.map((file) => relative(root, file)),
+      files.map((file) => relative(canonicalRoot, file)),
       ['dep.ts', 'entry.ts', 'leaf.ts'],
     );
     const snapshot = sourceIdentitySnapshot(files);
@@ -870,7 +872,7 @@ test('MCP source identity diagnostics cover transitive local modules', () => {
       'export const value = 200; // changed after startup\n',
     );
     assert.deepEqual(
-      changedSourceFiles(snapshot).map((file) => relative(root, file)),
+      changedSourceFiles(snapshot).map((file) => relative(canonicalRoot, file)),
       ['leaf.ts'],
     );
   } finally {

@@ -19,9 +19,18 @@ import {
   statSync,
   watch as watchFs,
 } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NdjsonDecoder, type NdjsonEvent } from './ndjson.ts';
+import {
+  changedSourceFiles,
+  fileIdentity,
+  type FileIdentity,
+  resolveLocalModuleFiles,
+  sourceIdentitySnapshot,
+} from './source-identity.ts';
+export { sourceIdentityChanged } from './source-identity.ts';
+export type { FileIdentity } from './source-identity.ts';
 import {
   autoIndexDecision,
   type IndexDriftScan,
@@ -91,13 +100,26 @@ const MAX_NDJSON_LINE_BYTES = positiveInteger(
 const SOURCE_IDENTITY_POLL_MS = 2_000;
 const INSTANCE_STARTED_AT = new Date().toISOString();
 const SERVER_FILE = fileURLToPath(import.meta.url);
-
-export interface FileIdentity {
-  mtimeMs: number;
-  size: number;
-  ctimeMs: number;
-  ino: number;
-}
+const SERVER_SOURCE_SPECIFIERS = [
+  '../core/build-index.js',
+  '../core/extract-symbols.js',
+  '../core/fan-in.js',
+  '../core/files.js',
+  '../core/index-drift.js',
+  '../core/locate.js',
+  '../core/python-command.js',
+  '../core/read.js',
+  '../core/store.js',
+  '../core/types.js',
+  '../core/util.js',
+  '../version.js',
+  './ndjson.js',
+  './source-identity.js',
+] as const;
+export const MCP_SOURCE_FILES = resolveLocalModuleFiles(
+  SERVER_FILE,
+  SERVER_SOURCE_SPECIFIERS,
+);
 
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -226,37 +248,13 @@ let maxObservedMcpRequests = 0;
 let queuedMcpRequests = 0;
 let maxObservedQueuedMcpRequests = 0;
 
-function fileIdentity(path: string): FileIdentity | null {
-  try {
-    const value = statSync(path);
-    return {
-      mtimeMs: value.mtimeMs,
-      size: value.size,
-      ctimeMs: value.ctimeMs,
-      ino: value.ino,
-    };
-  } catch {
-    return null;
-  }
-}
-
+const SERVER_SOURCE_IDENTITIES_AT_START =
+  sourceIdentitySnapshot(MCP_SOURCE_FILES);
 const SERVER_SOURCE_AT_START = fileIdentity(SERVER_FILE);
 let serverSourceNow = SERVER_SOURCE_AT_START;
 let serverSourceCheckedAt = Date.now();
 let serverRestartRequired = false;
-
-export function sourceIdentityChanged(
-  start: FileIdentity | null,
-  current: FileIdentity | null,
-): boolean {
-  if (!start || !current) return start !== current;
-  return (
-    start.mtimeMs !== current.mtimeMs ||
-    start.size !== current.size ||
-    start.ctimeMs !== current.ctimeMs ||
-    start.ino !== current.ino
-  );
-}
+let serverChangedSourceFiles: string[] = [];
 
 /** Resolve an explicit index, or discover the nearest one from `start`. Kept as
  * a function because an index may be created after the long-lived server starts. */
@@ -568,6 +566,8 @@ export interface McpDiagnostics {
   indexAdmission: AdmissionStats;
   sourceAtStart: FileIdentity | null;
   sourceNow: FileIdentity | null;
+  sourceFileCount: number;
+  changedSourceFiles?: string[];
   restartRequired: boolean;
   warning?: string;
 }
@@ -578,11 +578,11 @@ export function mcpDiagnostics(forceSourceCheck = true): McpDiagnostics {
     Date.now() - serverSourceCheckedAt >= SOURCE_IDENTITY_POLL_MS
   ) {
     serverSourceNow = fileIdentity(SERVER_FILE);
-    serverSourceCheckedAt = Date.now();
-    serverRestartRequired = sourceIdentityChanged(
-      SERVER_SOURCE_AT_START,
-      serverSourceNow,
+    serverChangedSourceFiles = changedSourceFiles(
+      SERVER_SOURCE_IDENTITIES_AT_START,
     );
+    serverSourceCheckedAt = Date.now();
+    serverRestartRequired = serverChangedSourceFiles.length > 0;
   }
   return {
     version: VERSION,
@@ -606,11 +606,19 @@ export function mcpDiagnostics(forceSourceCheck = true): McpDiagnostics {
     indexAdmission: indexAdmission.stats(),
     sourceAtStart: SERVER_SOURCE_AT_START,
     sourceNow: serverSourceNow,
+    sourceFileCount: MCP_SOURCE_FILES.length,
+    ...(serverChangedSourceFiles.length > 0
+      ? {
+          changedSourceFiles: serverChangedSourceFiles.map(
+            (file) => relative(dirname(SERVER_FILE), file) || '.',
+          ),
+        }
+      : {}),
     restartRequired: serverRestartRequired,
     ...(serverRestartRequired
       ? {
           warning:
-            'This MCP server file changed after the process started. Start a new MCP session before treating its results as evidence.',
+            'MCP runtime source changed after startup. Restart before treating results as evidence.',
         }
       : {}),
   };

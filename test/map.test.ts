@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -24,10 +24,16 @@ import { locate } from '../src/core/locate.ts';
 import { changed, read } from '../src/core/read.ts';
 import { getPreparedLookup, loadIndex, saveIndex } from '../src/core/store.ts';
 import {
+  changedSourceFiles,
+  discoverLocalModuleFiles,
+  sourceIdentitySnapshot,
+} from '../src/mcp/source-identity.ts';
+import {
   callTool,
   callToolAsync,
   dispatch,
   disposeMcpState,
+  MCP_SOURCE_FILES,
   mcpDiagnostics,
   resolveIndexPath,
   sourceIdentityChanged,
@@ -839,6 +845,39 @@ test('MCP source identity diagnostics require a restart only after change', () =
   assert.equal(sourceIdentityChanged(identity, { ...identity, size: 5 }), true);
   assert.equal(sourceIdentityChanged(null, null), false);
   assert.equal(sourceIdentityChanged(identity, null), true);
+});
+
+test('MCP source identity diagnostics cover transitive local modules', () => {
+  const root = repo({
+    'entry.ts': "import './dep.js';\n",
+    'dep.ts': "export { value } from './leaf';\n",
+    'leaf.ts': 'export const value = 1;\n',
+  });
+  try {
+    const files = discoverLocalModuleFiles(join(root, 'entry.ts'));
+    assert.deepEqual(
+      files.map((file) => relative(root, file)),
+      ['dep.ts', 'entry.ts', 'leaf.ts'],
+    );
+    const snapshot = sourceIdentitySnapshot(files);
+    writeFileSync(
+      join(root, 'leaf.ts'),
+      'export const value = 200; // changed after startup\n',
+    );
+    assert.deepEqual(
+      changedSourceFiles(snapshot).map((file) => relative(root, file)),
+      ['leaf.ts'],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP source identity manifest covers its complete local module graph', () => {
+  const serverFile = fileURLToPath(
+    new URL('../src/mcp/server.ts', import.meta.url),
+  );
+  assert.deepEqual(MCP_SOURCE_FILES, discoverLocalModuleFiles(serverFile));
 });
 
 test(

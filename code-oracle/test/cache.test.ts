@@ -100,6 +100,59 @@ test('result cache evicts resident roots by bytes and reloads exact answers', ()
   }
 });
 
+test('staged results stay bounded and become persistent only after a later matching scan', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'oracle-result-stage-'));
+  const root = join(directory, 'root');
+  const epoch = 'epoch-a';
+  const value = oracleResult(root, 1);
+  const files = cacheFiles(directory, root);
+  const options = {
+    directory,
+    schema: 4,
+    maxBytes: 2048,
+    idleMs: 0,
+    persistDelayMs: 60_000,
+  };
+
+  try {
+    const cache = new ResultCacheStore(options);
+    cache.stage(root, epoch, 'query', value, 2);
+    assert.deepEqual(cache.lookup(root, epoch, 'query'), { hit: false });
+    assert.equal(cache.promoteStaged(root, epoch, 1), 0);
+    assert.deepEqual(cache.lookup(root, epoch, 'query'), { hit: false });
+    assert.equal(existsSync(files.snapshot), false);
+
+    assert.equal(cache.promoteStaged(root, 'epoch-b', 2), 0);
+    assert.deepEqual(cache.lookup(root, epoch, 'query'), { hit: false });
+
+    cache.stage(root, epoch, 'query', value, 3);
+    assert.equal(cache.promoteStaged(root, epoch, 3), 1);
+    assert.deepEqual(cache.lookup(root, epoch, 'query'), {
+      hit: true,
+      value,
+    });
+
+    for (let index = 0; index < 20; index++) {
+      const stagedRoot = join(directory, `staged-${index}`);
+      cache.stage(
+        stagedRoot,
+        epoch,
+        'query',
+        oracleResult(stagedRoot, index),
+        4,
+      );
+    }
+    assert.ok(cache.stats().residentBytes <= options.maxBytes);
+    cache.dispose();
+
+    const reloaded = new ResultCacheStore(options);
+    assert.equal(reloaded.lookup(root, epoch, 'query').hit, true);
+    reloaded.dispose();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('result cache discards only invalid snapshot, delta, and live-hit records', () => {
   const directory = mkdtempSync(join(tmpdir(), 'oracle-result-boundary-'));
   const root = join(directory, 'root');

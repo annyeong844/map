@@ -205,6 +205,7 @@ export class LspSession {
       ino: number;
     }
   >();
+  private documentHolds = new Map<string, number>();
   private initDone: Promise<void>;
   private warmed = false;
   private lastMsgAt = Date.now();
@@ -290,6 +291,8 @@ export class LspSession {
       pending.reject(diagnosed);
     }
     this.pending.clear();
+    this.opened.clear();
+    this.documentHolds.clear();
   }
 
   private terminateBackend(): void {
@@ -456,6 +459,42 @@ export class LspSession {
     return uri;
   }
 
+  /** Keep one synchronized document open for a bounded operation. Nested and
+   * concurrent users share the overlay; the last release sends didClose so the
+   * checker cannot retain every file ever queried by a long-lived session. */
+  async openDocument(file: string): Promise<{
+    uri: string;
+    release: () => void;
+  }> {
+    await this.initDone;
+    const uri = this.syncFile(file);
+    this.documentHolds.set(uri, (this.documentHolds.get(uri) ?? 0) + 1);
+    let released = false;
+    return {
+      uri,
+      release: () => {
+        if (released) return;
+        released = true;
+        const holds = this.documentHolds.get(uri) ?? 0;
+        if (holds > 1) {
+          this.documentHolds.set(uri, holds - 1);
+          return;
+        }
+        this.documentHolds.delete(uri);
+        if (!this.opened.delete(uri) || this.failure) return;
+        try {
+          this.notify('textDocument/didClose', { textDocument: { uri } });
+        } catch (error) {
+          this.fail(
+            error instanceof Error
+              ? error
+              : new Error('Closing an LSP document failed.', { cause: error }),
+          );
+        }
+      },
+    };
+  }
+
   async inferredStaticCallers(
     queriedFile: string,
     name: string | null,
@@ -514,7 +553,10 @@ export class LspSession {
 
     if (changed.length) {
       await this.initDone;
-      for (const path of changed) this.syncFile(path);
+      for (const path of changed) {
+        const document = await this.openDocument(path);
+        document.release();
+      }
       this.warmed = false;
       this.lastMsgAt = Date.now();
     }
@@ -556,17 +598,21 @@ export class LspSession {
     line: number,
     character: number,
   ): Promise<OracleLocation[]> {
-    await this.initDone;
-    const uri = this.syncFile(file);
-    await this.waitReady();
-    const params: Record<string, unknown> = {
-      textDocument: { uri },
-      position: { line, character },
-    };
-    if (method === 'textDocument/references') {
-      params.context = { includeDeclaration: false };
+    const document = await this.openDocument(file);
+    let response: unknown;
+    try {
+      await this.waitReady();
+      const params: Record<string, unknown> = {
+        textDocument: { uri: document.uri },
+        position: { line, character },
+      };
+      if (method === 'textDocument/references') {
+        params.context = { includeDeclaration: false };
+      }
+      response = await this.request(method, params);
+    } finally {
+      document.release();
     }
-    const response = await this.request(method, params);
     let values: unknown[] = [];
     if (Array.isArray(response)) values = response;
     else if (isObjectRecord(response)) values = [response];
@@ -604,11 +650,18 @@ export class LspSession {
     // didOpen-ing every implementation file merely to rank it: open documents
     // stay resident in the LSP and a wide hierarchy could otherwise grow memory
     // with its fan-out. Name resolution still syncs the actively queried file.
-    const uri = syncDocument ? this.syncFile(file) : pathToFileURL(file).href;
-    await this.waitReady();
-    const response = await this.request('textDocument/documentSymbol', {
-      textDocument: { uri },
-    });
+    const document = syncDocument ? await this.openDocument(file) : null;
+    let response: unknown;
+    try {
+      await this.waitReady();
+      response = await this.request('textDocument/documentSymbol', {
+        textDocument: {
+          uri: document?.uri ?? pathToFileURL(file).href,
+        },
+      });
+    } finally {
+      document?.release();
+    }
     if (!Array.isArray(response)) return [];
     let fileLines: string[] | null = null;
     const lineText = (ln: number): string => {
@@ -687,9 +740,12 @@ export class LspSession {
   /** Eagerly load the project (open a seed file + wait for quiescence) so the first
    * real query doesn't pay the cold warmup. Fire-and-forget at startup. */
   async prewarm(seedFile: string): Promise<void> {
-    await this.initDone;
-    this.syncFile(seedFile);
-    await this.waitReady();
+    const document = await this.openDocument(seedFile);
+    try {
+      await this.waitReady();
+    } finally {
+      document.release();
+    }
   }
 
   get ready(): boolean {
@@ -697,6 +753,17 @@ export class LspSession {
   }
 
   dispose(): void {
+    if (!this.failure) {
+      for (const uri of this.opened.keys()) {
+        try {
+          this.notify('textDocument/didClose', { textDocument: { uri } });
+        } catch {
+          break;
+        }
+      }
+    }
+    this.opened.clear();
+    this.documentHolds.clear();
     this.fail(new Error('LSP session disposed.'));
     this.terminateBackend();
   }

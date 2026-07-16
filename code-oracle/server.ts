@@ -70,7 +70,7 @@ export { ContentLengthDecoder, resolveNamePosition } from './lsp-session.ts';
 export type { OracleSym } from './lsp-session.ts';
 
 const PROTOCOL = '2025-06-18';
-const RESULT_SCHEMA = 5;
+const RESULT_SCHEMA = 6;
 const MINUTE_MS = 60_000;
 const DEFAULT_SESSION_IDLE_MINUTES = 10;
 const DEFAULT_MAX_ACTIVE_PROJECT_SCANS = 2;
@@ -927,7 +927,7 @@ async function collectLocations(
       }
       continue;
     }
-    const dedupeKey = `${absoluteFile}\t${location.line}`;
+    const dedupeKey = `${absoluteFile}\t${location.line}\t${location.character}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     if (location.basis) staticSupplementCount++;
@@ -986,6 +986,15 @@ async function formatQueryResults(
     tool === 'callers'
       ? located.filter((result) => !isImportLine(result.preview))
       : located;
+  const sharesSourceLine = (index: number): boolean => {
+    const current = relevantLocations[index];
+    const previous = relevantLocations[index - 1];
+    const next = relevantLocations[index + 1];
+    return (
+      (previous?.file === current.file && previous.line === current.line) ||
+      (next?.file === current.file && next.line === current.line)
+    );
+  };
   if (instantiationPromise) {
     const files = [
       ...new Set(relevantLocations.map((result) => result.absoluteFile)),
@@ -995,7 +1004,7 @@ async function formatQueryResults(
       instantiationPromise,
     ]);
     let likelyCount = 0;
-    const out = relevantLocations.map((result) => {
+    const out = relevantLocations.map((result, index) => {
       const container = implementationOwner(
         symbolsByFile.get(result.absoluteFile) ?? [],
         result.line0,
@@ -1005,24 +1014,24 @@ async function formatQueryResults(
       const signals = container ? (instantiations.get(container) ?? []) : [];
       const likelihood = signals.length ? 'likely' : 'possible';
       if (likelihood === 'likely') likelyCount++;
-      return {
+      const formatted: Record<string, unknown> = {
         file: result.file,
         line: result.line,
         preview: result.preview,
-        ...(result.basis ? { basis: result.basis } : {}),
         container,
         likelihood,
-        ...(signals.length
-          ? {
-              staticEvidence: signals.map((signal) => ({
-                kind: signal.kind,
-                file: signal.file,
-                line: signal.line,
-                preview: signal.preview,
-              })),
-            }
-          : {}),
       };
+      if (sharesSourceLine(index)) formatted.character = result.character;
+      if (result.basis) formatted.basis = result.basis;
+      if (signals.length) {
+        formatted.staticEvidence = signals.map((signal) => ({
+          kind: signal.kind,
+          file: signal.file,
+          line: signal.line,
+          preview: signal.preview,
+        }));
+      }
+      return formatted;
     });
     return {
       out,
@@ -1037,12 +1046,13 @@ async function formatQueryResults(
     };
   }
 
-  const out = relevantLocations.map((result) => {
+  const out = relevantLocations.map((result, index) => {
     const formatted: Record<string, unknown> = {
       file: result.file,
       line: result.line,
       preview: result.preview,
     };
+    if (sharesSourceLine(index)) formatted.character = result.character;
     if (result.basis) formatted.basis = result.basis;
     return formatted;
   });
@@ -1103,6 +1113,7 @@ async function query(
   const snapshot = await projectSnapshot(root);
   const epoch = snapshot.epoch;
   if (!snapshot.degradation) {
+    resultCache.promoteStaged(root, epoch, snapshot.scanSerial);
     const cached = resultCache.lookup(root, epoch, cacheKey);
     if (cached.hit) {
       invalidateCallerZerosProvedByDefinition(root, epoch, cached.value);
@@ -1122,8 +1133,10 @@ async function query(
   // comment-skipping text scan only if the LSP doesn't know the name.
   const run = async (): Promise<unknown> => {
     const lease = await checkerSessions.acquire(root, lang, be, snapshot);
+    let document: { release: () => void } | null = null;
     try {
       const sess = lease.session;
+      document = await sess.openDocument(file);
       const positionResult = await resolveQueryPosition(
         sess,
         file,
@@ -1240,9 +1253,20 @@ async function query(
         ...(pyRefsCaveat || hasDegradation ? { incomplete: true } : {}),
       };
       invalidateCallerZerosProvedByDefinition(root, epoch, result);
-      if (!hasDegradation) resultCache.store(root, epoch, cacheKey, result);
+      // A checker zero can mean "not indexed yet", not "proven absent".
+      // Empty responses are therefore not cacheable evidence.
+      if (!hasDegradation && result.count > 0) {
+        resultCache.stage(
+          root,
+          epoch,
+          cacheKey,
+          result,
+          projectSnapshots.nextValidationSerial(root),
+        );
+      }
       return result;
     } finally {
+      document?.release();
       lease.release();
     }
   };

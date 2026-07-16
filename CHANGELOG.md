@@ -2,6 +2,11 @@
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- Preserve the complete `export` / `export default` wrapper in exact top-level symbol reads and force legacy indexes to rebuild.
+- Keep distinct same-line Oracle references, close LSP document overlays after each query transaction, never cache checker zeroes, and stage positive answers until a later snapshot validates their epoch without an extra scan.
+
 ## 0.9.0-rc.1 — 2026-07-14
 
 First public release candidate.

@@ -53,6 +53,8 @@ export type ProjectScanDegradation = {
 };
 export type ProjectSnapshot = {
   epoch: Epoch;
+  /** Monotonic process-local id assigned when this root scan starts. */
+  scanSerial: number;
   files: Map<string, ProjectFile>;
   residentBytes: number;
   degradation: ProjectScanDegradation | null;
@@ -104,6 +106,7 @@ function fnv1a32(value: string): number {
 async function scanProject(
   root: string,
   signal?: AbortSignal,
+  scanSerial = 0,
 ): Promise<ProjectSnapshot> {
   signal?.throwIfAborted();
   let degradationCount = 0;
@@ -208,6 +211,7 @@ async function scanProject(
   }
   return {
     epoch: `${count.toString(FINGERPRINT_RADIX)}:${xor.toString(FINGERPRINT_RADIX)}:${sum.toString(FINGERPRINT_RADIX)}`,
+    scanSerial,
     files,
     residentBytes,
     degradation:
@@ -277,6 +281,8 @@ export class ProjectSnapshotStore {
     AbortableFlight<ProjectSnapshot>
   >();
   private generation = 0;
+  private nextScanSerial = 1;
+  private readonly latestStartedScan = new Map<string, number>();
 
   constructor(options: ProjectSnapshotOptions) {
     this.options = options;
@@ -295,10 +301,15 @@ export class ProjectSnapshotStore {
     const active = this.flights.get(root);
     if (active) return active.promise;
 
+    const scanSerial = this.nextScanSerial++;
+    this.latestStartedScan.set(root, scanSerial);
     const generation = this.generation;
     const controller = new AbortController();
     const flight = this.admission
-      .run(() => scanProject(root, controller.signal), controller.signal)
+      .run(
+        () => scanProject(root, controller.signal, scanSerial),
+        controller.signal,
+      )
       .then((snapshot) => {
         controller.signal.throwIfAborted();
         if (generation === this.generation && this.options.ttlMs > 0) {
@@ -321,6 +332,11 @@ export class ProjectSnapshotStore {
     return flight;
   }
 
+  /** The first root scan that is guaranteed to start after the current call. */
+  nextValidationSerial(root: string): number {
+    return (this.latestStartedScan.get(root) ?? 0) + 1;
+  }
+
   dispose(error = new Error('Project snapshot store is shutting down.')): void {
     this.generation++;
     for (const flight of this.flights.values()) {
@@ -329,6 +345,7 @@ export class ProjectSnapshotStore {
     this.admission.cancelQueued(error);
     this.flights.clear();
     this.cache.clear();
+    this.latestStartedScan.clear();
   }
 
   stats(): ProjectSnapshotStats {

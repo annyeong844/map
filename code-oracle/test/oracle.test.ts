@@ -198,6 +198,11 @@ process.stdin.on('data', (chunk) => {
           send(message.id, JSON.parse(process.env.FAKE_LSP_DEFINITION_RESULT || '[]'));
         } else if (
           message.method === 'textDocument/references' &&
+          process.env.FAKE_LSP_REFERENCES_RESULT
+        ) {
+          send(message.id, JSON.parse(process.env.FAKE_LSP_REFERENCES_RESULT));
+        } else if (
+          message.method === 'textDocument/references' &&
           definitionObserved
         ) {
           send(message.id, JSON.parse(process.env.FAKE_LSP_REFERENCES_AFTER_DEFINITION || '[]'));
@@ -268,6 +273,34 @@ async function stopOracle(
       }
     }
   }
+}
+
+async function callOracleTool(
+  lines: ReturnType<typeof createInterface>,
+  child: ChildProcessWithoutNullStreams,
+  id: number,
+  name: 'callers' | 'definition' | 'implementations',
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const response = once(lines, 'line', {
+    signal: AbortSignal.timeout(5_000),
+  });
+  child.stdin.write(
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    })}\n`,
+  );
+  const [line] = await response;
+  const message = JSON.parse(line as string) as {
+    error?: unknown;
+    result?: { content: { text: string }[] };
+  };
+  assert.equal(message.error, undefined, line as string);
+  assert.ok(message.result?.content[0]?.text, line as string);
+  return JSON.parse(message.result.content[0].text) as Record<string, unknown>;
 }
 
 after(() => disposeAll());
@@ -645,6 +678,11 @@ test('concurrent project snapshots share one exact scan', async () => {
       'overlapping callers must share one snapshot object',
     );
     assert.equal(snapshots[0].files.size, 129);
+    const later = await projectSnapshot(root);
+    assert.ok(
+      later.scanSerial > snapshots[0].scanSerial,
+      'a later scan needs a strictly newer validation serial',
+    );
   } finally {
     disposeAll();
     rmSync(root, { recursive: true, force: true });
@@ -726,7 +764,7 @@ test(
 );
 
 test(
-  'duplicate queries share work and same-epoch cache writes append one delta',
+  'duplicate queries share work and a later snapshot validates their cache entry',
   { timeout: 15_000 },
   async () => {
     const root = mkdtempSync(join(tmpdir(), 'code-oracle-query-flight-'));
@@ -743,89 +781,285 @@ test(
     writeFileSync(join(root, 'source.ts'), 'export const value = 1;\n');
     writeFakeLsp(fakeLsp);
 
-    const run = async (
-      requests: { id: number; character: number }[],
-    ): Promise<void> => {
-      const oracle = startOracle(root, fakeLsp, pidLog, {
-        FAKE_LSP_METHOD_LOG: methodLog,
+    const oracle = startOracle(root, fakeLsp, pidLog, {
+      FAKE_LSP_METHOD_LOG: methodLog,
+      FAKE_LSP_DEFINITION_RESULT: JSON.stringify([
+        lspLocation(join(root, 'source.ts'), 0, 13),
+      ]),
+    });
+    const lines = createInterface({ input: oracle.child.stdout });
+    const firstResponses = new Promise<string[]>((resolveResponses) => {
+      const received: string[] = [];
+      lines.on('line', (line) => {
+        received.push(line);
+        if (received.length === 2) resolveResponses(received);
       });
-      const lines = createInterface({ input: oracle.child.stdout });
-      const responses = new Promise<string[]>((resolveResponses) => {
-        const received: string[] = [];
-        lines.on('line', (line) => {
-          received.push(line);
-          if (received.length === requests.length) resolveResponses(received);
-        });
-      });
-      try {
-        for (const request of requests) {
-          oracle.child.stdin.write(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              id: request.id,
-              method: 'tools/call',
-              params: {
-                name: 'definition',
-                arguments: {
-                  root,
-                  file: join(root, 'source.ts'),
-                  line: 0,
-                  character: request.character,
-                },
-              },
-            }) + '\n',
-          );
-        }
-        const messages = await withTimeout(
-          responses,
-          5000,
-          `oracle queries timed out: ${oracle.stderr()}`,
-        );
-        for (const line of messages) {
-          assert.equal(JSON.parse(line).error, undefined, line);
-        }
-        const exited = once(oracle.child, 'exit');
-        oracle.child.stdin.end();
-        const [code] = await withTimeout(
-          exited,
-          3000,
-          `oracle did not flush and exit: ${oracle.stderr()}`,
-        );
-        assert.equal(code, 0, oracle.stderr());
-      } finally {
-        lines.close();
-        await stopOracle(oracle.child, readPids(pidLog));
-      }
-    };
+    });
 
     try {
       rmSync(cache, { force: true });
       rmSync(cacheLog, { force: true });
-      await run([
-        { id: 1, character: 13 },
-        { id: 2, character: 13 },
-      ]);
+      for (const id of [1, 2]) {
+        oracle.child.stdin.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id,
+            method: 'tools/call',
+            params: {
+              name: 'definition',
+              arguments: {
+                root,
+                file: join(root, 'source.ts'),
+                line: 0,
+                character: 13,
+              },
+            },
+          })}\n`,
+        );
+      }
+      const messages = await withTimeout(
+        firstResponses,
+        5_000,
+        `oracle queries timed out: ${oracle.stderr()}`,
+      );
+      for (const line of messages) {
+        assert.equal(JSON.parse(line).error, undefined, line);
+      }
+
+      // This different query's ordinary start snapshot validates the staged
+      // character-13 result without adding a second scan to the first query.
+      await callOracleTool(lines, oracle.child, 3, 'definition', {
+        root,
+        file: join(root, 'source.ts'),
+        line: 0,
+        character: 12,
+      });
+      const cached = await callOracleTool(
+        lines,
+        oracle.child,
+        4,
+        'definition',
+        {
+          root,
+          file: join(root, 'source.ts'),
+          line: 0,
+          character: 13,
+        },
+      );
+      assert.equal(cached.cached, true);
       const methods = readFileSync(methodLog, 'utf8').trim().split(/\s+/);
       assert.equal(
         methods.filter((method) => method === 'textDocument/definition').length,
-        1,
-        'identical requests must share one LSP call',
+        2,
+        'the duplicate and later cache hit must not add checker calls',
       );
-      const base = readFileSync(cache, 'utf8');
 
-      await run([{ id: 3, character: 12 }]);
-      assert.equal(
-        readFileSync(cache, 'utf8'),
-        base,
-        'same-epoch answers must not rewrite the full snapshot',
+      const exited = once(oracle.child, 'exit');
+      oracle.child.stdin.end();
+      const [code] = await withTimeout(
+        exited,
+        3_000,
+        `oracle did not flush and exit: ${oracle.stderr()}`,
       );
-      const deltas = readFileSync(cacheLog, 'utf8')
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line));
-      assert.equal(deltas.length, 1);
-      assert.match(deltas[0].key, /#0:12$/);
+      assert.equal(code, 0, oracle.stderr());
+      assert.equal(existsSync(cache), true, 'validated answers were not saved');
     } finally {
+      lines.close();
+      await stopOracle(oracle.child, readPids(pidLog));
+      rmSync(cache, { force: true });
+      rmSync(cacheLog, { force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'callers preserve distinct references that share one source line',
+  { timeout: 10_000 },
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'code-oracle-same-line-'));
+    const fakeLsp = join(root, 'fake-lsp.mjs');
+    const pidLog = join(root, 'lsp-pids.txt');
+    const definitionFile = join(root, 'definition.ts');
+    const callerFile = join(root, 'caller.ts');
+    const callerLine =
+      'export const both = (): void => { target(); target(); };';
+    const firstCharacter = callerLine.indexOf('target');
+    const secondCharacter = callerLine.indexOf('target', firstCharacter + 1);
+    writeFileSync(
+      join(root, 'tsconfig.json'),
+      JSON.stringify({ include: ['*.ts'] }),
+    );
+    writeFileSync(definitionFile, 'export function target(): void {}\n');
+    writeFileSync(
+      callerFile,
+      `import { target } from './definition.js';\n${callerLine}\n`,
+    );
+    writeFakeLsp(fakeLsp);
+    const oracle = startOracle(root, fakeLsp, pidLog, {
+      CODE_ORACLE_PREWARM: '0',
+      FAKE_LSP_REFERENCES_RESULT: JSON.stringify([
+        lspLocation(callerFile, 1, firstCharacter),
+        lspLocation(callerFile, 1, secondCharacter),
+      ]),
+    });
+    const lines = createInterface({ input: oracle.child.stdout });
+    try {
+      const result = await callOracleTool(lines, oracle.child, 1, 'callers', {
+        root,
+        file: definitionFile,
+        line: 0,
+        character: 16,
+      });
+      assert.equal(
+        result.count,
+        2,
+        `same-line calls were collapsed: ${JSON.stringify(result)}`,
+      );
+      assert.deepEqual(
+        (result.results as { character?: number }[]).map(
+          (location) => location.character,
+        ),
+        [firstCharacter, secondCharacter],
+      );
+    } finally {
+      lines.close();
+      await stopOracle(oracle.child, readPids(pidLog));
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'completed queries close every document opened in a warm LSP session',
+  { timeout: 10_000 },
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'code-oracle-did-close-'));
+    const fakeLsp = join(root, 'fake-lsp.mjs');
+    const pidLog = join(root, 'lsp-pids.txt');
+    const methodLog = join(root, 'lsp-methods.txt');
+    writeFileSync(
+      join(root, 'tsconfig.json'),
+      JSON.stringify({ include: ['*.ts'] }),
+    );
+    const files = Array.from({ length: 3 }, (_, index) => {
+      const file = join(root, `source-${index}.ts`);
+      writeFileSync(file, `export const value${index} = ${index};\n`);
+      return file;
+    });
+    writeFakeLsp(fakeLsp);
+    const oracle = startOracle(root, fakeLsp, pidLog, {
+      CODE_ORACLE_PREWARM: '0',
+      CODE_ORACLE_SESSION_IDLE_MS: '60000',
+      FAKE_LSP_METHOD_LOG: methodLog,
+    });
+    const lines = createInterface({ input: oracle.child.stdout });
+    try {
+      for (const [index, file] of files.entries()) {
+        await callOracleTool(lines, oracle.child, index + 1, 'definition', {
+          root,
+          file,
+          name: `value${index}`,
+        });
+      }
+      const methods = readFileSync(methodLog, 'utf8').trim().split(/\r?\n/);
+      assert.equal(
+        methods.filter((method) => method === 'textDocument/didOpen').length,
+        files.length,
+      );
+      assert.equal(
+        methods.filter((method) => method === 'textDocument/didClose').length,
+        files.length,
+        `open documents accumulated in the warm session: ${methods.join(', ')}`,
+      );
+    } finally {
+      lines.close();
+      await stopOracle(oracle.child, readPids(pidLog));
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a query never persists its result under an epoch changed during the LSP read',
+  { timeout: 10_000 },
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'code-oracle-epoch-race-'));
+    const fakeLsp = join(root, 'fake-lsp.mjs');
+    const pidLog = join(root, 'lsp-pids.txt');
+    const methodLog = join(root, 'lsp-methods.txt');
+    const source = join(root, 'source.ts');
+    const digest = createHash('sha256').update(root).digest('hex').slice(0, 16);
+    const cache = join(HERE, '../.cache', `${digest}.json`);
+    const cacheLog = join(HERE, '../.cache', `${digest}.jsonl`);
+    writeFileSync(
+      join(root, 'tsconfig.json'),
+      JSON.stringify({ include: ['*.ts'] }),
+    );
+    writeFileSync(source, 'export const value = 1;\n');
+    writeFakeLsp(fakeLsp);
+    const oldEpoch = await scanProjectEpoch(root);
+    const oracle = startOracle(root, fakeLsp, pidLog, {
+      CODE_ORACLE_PREWARM: '0',
+      FAKE_LSP_METHOD_LOG: methodLog,
+      FAKE_LSP_DELAY_METHOD: 'textDocument/definition',
+      FAKE_LSP_DELAY_MS: '750',
+    });
+    const lines = createInterface({ input: oracle.child.stdout });
+    try {
+      rmSync(cache, { force: true });
+      rmSync(cacheLog, { force: true });
+      const pending = callOracleTool(lines, oracle.child, 1, 'definition', {
+        root,
+        file: source,
+        line: 0,
+        character: 13,
+      });
+      await waitUntil(
+        () =>
+          existsSync(methodLog) &&
+          readFileSync(methodLog, 'utf8').includes('textDocument/definition'),
+        3_000,
+        `the delayed LSP read never started: ${oracle.stderr()}`,
+      );
+      writeFileSync(source, 'export const value = 2;\n');
+      const currentEpoch = await scanProjectEpoch(root);
+      assert.notEqual(currentEpoch, oldEpoch, 'fixture epoch did not change');
+      await pending;
+      const retried = await callOracleTool(
+        lines,
+        oracle.child,
+        2,
+        'definition',
+        { root, file: source, line: 0, character: 13 },
+      );
+      assert.equal(
+        retried.cached,
+        false,
+        'the changed epoch reused the staged pre-change answer',
+      );
+      const methods = readFileSync(methodLog, 'utf8').trim().split(/\r?\n/);
+      assert.equal(
+        methods.filter((method) => method === 'textDocument/definition').length,
+        2,
+      );
+
+      const exited = once(oracle.child, 'exit');
+      oracle.child.stdin.end();
+      const [code] = await withTimeout(
+        exited,
+        3_000,
+        `Oracle did not flush and exit: ${oracle.stderr()}`,
+      );
+      assert.equal(code, 0, oracle.stderr());
+      assert.equal(
+        existsSync(cache) || existsSync(cacheLog),
+        false,
+        'the stale start epoch was persisted after the project changed',
+      );
+    } finally {
+      lines.close();
+      await stopOracle(oracle.child, readPids(pidLog));
       rmSync(cache, { force: true });
       rmSync(cacheLog, { force: true });
       rmSync(root, { recursive: true, force: true });
@@ -934,7 +1168,7 @@ test(
 );
 
 test(
-  'a definition proof invalidates a cached zero callers answer',
+  'zero callers answers are never cached and a later definition proof is observed',
   { timeout: 10_000 },
   async () => {
     const root = mkdtempSync(join(tmpdir(), 'code-oracle-caller-proof-'));
@@ -1013,6 +1247,10 @@ test(
       assert.equal(first.count, 0);
       assert.equal(first.cached, false);
 
+      const repeated = await call('callers', definitionFile, 0, 16);
+      assert.equal(repeated.count, 0);
+      assert.equal(repeated.cached, false);
+
       const proof = await call('definition', callerFile, 1, callerCharacter);
       assert.equal(proof.count, 1);
       assert.equal(proof.results[0]?.file, 'definition.ts');
@@ -1028,7 +1266,7 @@ test(
       const methods = readFileSync(methodLog, 'utf8').trim().split(/\r?\n/);
       assert.equal(
         methods.filter((method) => method === 'textDocument/references').length,
-        2,
+        3,
       );
     } finally {
       lines.close();

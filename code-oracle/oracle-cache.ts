@@ -26,7 +26,18 @@ type CacheDelta = {
   key: string;
   value: unknown;
 };
-type CacheResident = { bytes: number; entryBytes: Map<string, number> };
+type StagedCacheEntry = {
+  epoch: string;
+  key: string;
+  value: CachedOracleResult;
+  minScanSerial: number;
+  bytes: number;
+};
+type CacheResident = {
+  bytes: number;
+  entryBytes: Map<string, number>;
+  stagedEntries: Map<string, StagedCacheEntry>;
+};
 type DirtyCache = { reset: boolean; keys: Set<string> };
 type BoundedCacheText = {
   text: string | null;
@@ -153,6 +164,7 @@ export class ResultCacheStore {
     this.residents.set(cache, {
       bytes: CACHE_ENTRY_OVERHEAD_BYTES,
       entryBytes: new Map(),
+      stagedEntries: new Map(),
     });
     return cache;
   }
@@ -198,6 +210,7 @@ export class ResultCacheStore {
         Buffer.byteLength(cache.epoch) +
         NUMBER_STORAGE_BYTES,
       entryBytes: new Map(),
+      stagedEntries: new Map(),
     };
     for (const [key, value] of Object.entries(cache.entries)) {
       const bytes = this.valueBytes(key, value);
@@ -209,15 +222,31 @@ export class ResultCacheStore {
   }
 
   private reset(cache: Cache, epoch: string): void {
+    const prior = this.residentFor(cache);
+    let stagedBytes = 0;
+    for (const staged of prior.stagedEntries.values()) {
+      stagedBytes += staged.bytes;
+    }
     cache.epoch = epoch;
     cache.entries = {};
     this.residents.set(cache, {
       bytes:
         CACHE_ENTRY_OVERHEAD_BYTES +
         Buffer.byteLength(epoch) +
-        NUMBER_STORAGE_BYTES,
+        NUMBER_STORAGE_BYTES +
+        stagedBytes,
       entryBytes: new Map(),
+      stagedEntries: prior.stagedEntries,
     });
+  }
+
+  private deleteStaged(cache: Cache, stagedKey: string): boolean {
+    const resident = this.residentFor(cache);
+    const staged = resident.stagedEntries.get(stagedKey);
+    if (!staged) return false;
+    resident.stagedEntries.delete(stagedKey);
+    resident.bytes -= staged.bytes;
+    return true;
   }
 
   private setEntry(cache: Cache, key: string, value: unknown): boolean {
@@ -228,6 +257,16 @@ export class ResultCacheStore {
     resident.entryBytes.delete(key);
     resident.entryBytes.set(key, bytes);
     resident.bytes += bytes - previousBytes;
+    while (
+      resident.bytes > this.options.maxBytes &&
+      resident.stagedEntries.size > 0
+    ) {
+      const oldest = resident.stagedEntries.keys().next().value as
+        | string
+        | undefined;
+      if (oldest === undefined) break;
+      this.deleteStaged(cache, oldest);
+    }
     let trimmed = false;
     while (
       resident.bytes > this.options.maxBytes &&
@@ -481,6 +520,81 @@ export class ResultCacheStore {
     const trimmed = this.setEntry(cache, key, value);
     this.schedulePersist(root, key, reset || trimmed);
     this.caches.set(root, cache, this.cacheWeight(root, cache));
+  }
+
+  /** Hold an answer in the same byte budget without making it readable or
+   * persistent. A later project scan must prove that the query's start epoch
+   * still holds before promoteStaged can publish it. */
+  stage(
+    root: string,
+    epoch: string,
+    key: string,
+    value: unknown,
+    minScanSerial: number,
+  ): void {
+    if (
+      !isCachedOracleResult(value) ||
+      !Number.isSafeInteger(minScanSerial) ||
+      minScanSerial < 0
+    ) {
+      return;
+    }
+    const cache = this.load(root);
+    const resident = this.residentFor(cache);
+    const stagedKey = `${epoch}\0${key}`;
+    this.deleteStaged(cache, stagedKey);
+    const bytes =
+      this.valueBytes(key, value) +
+      Buffer.byteLength(epoch) +
+      NUMBER_STORAGE_BYTES;
+    resident.stagedEntries.set(stagedKey, {
+      epoch,
+      key,
+      value,
+      minScanSerial,
+      bytes,
+    });
+    resident.bytes += bytes;
+    while (
+      resident.bytes > this.options.maxBytes &&
+      resident.stagedEntries.size > 0
+    ) {
+      const oldest = resident.stagedEntries.keys().next().value as
+        | string
+        | undefined;
+      if (oldest === undefined) break;
+      this.deleteStaged(cache, oldest);
+    }
+    this.caches.set(root, cache, this.cacheWeight(root, cache));
+  }
+
+  /** Publish only staged answers whose required post-query scan has completed.
+   * A different observed epoch discards them; an older/concurrent scan leaves
+   * them pending for a genuinely later observation. */
+  promoteStaged(root: string, epoch: string, scanSerial: number): number {
+    if (!Number.isSafeInteger(scanSerial) || scanSerial < 0) return 0;
+    const cache = this.load(root);
+    const resident = this.residentFor(cache);
+    const eligible: StagedCacheEntry[] = [];
+    let changed = false;
+    for (const [stagedKey, staged] of resident.stagedEntries) {
+      if (staged.minScanSerial > scanSerial) continue;
+      this.deleteStaged(cache, stagedKey);
+      changed = true;
+      if (staged.epoch === epoch) eligible.push(staged);
+    }
+    if (eligible.length > 0) {
+      const reset = cache.epoch !== epoch;
+      if (reset) this.reset(cache, epoch);
+      for (const staged of eligible) {
+        const trimmed = this.setEntry(cache, staged.key, staged.value);
+        this.schedulePersist(root, staged.key, reset || trimmed);
+      }
+    }
+    if (changed) {
+      this.caches.set(root, cache, this.cacheWeight(root, cache));
+    }
+    return eligible.length;
   }
 
   flush(): void {

@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -59,6 +60,10 @@ const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+
+function canonicalTempDir(prefix: string): string {
+  return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
+}
 
 function frame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value));
@@ -317,7 +322,7 @@ test(
   'initialize and ping identify a stale running Oracle from its own bytes',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-runtime-id-'));
+    const root = canonicalTempDir('code-oracle-runtime-id-');
     const copiedServer = join(root, 'server.ts');
     const runtimeSources = readdirSync(ORACLE_ROOT, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
@@ -428,7 +433,7 @@ test(
 );
 
 test('query validates the MCP boundary before paths or checker state are touched', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'code-oracle-input-'));
+  const root = canonicalTempDir('code-oracle-input-');
   const file = join(root, 'source.ts');
   writeFileSync(file, 'export const value = 1;\n');
   try {
@@ -487,7 +492,7 @@ test('query validates the MCP boundary before paths or checker state are touched
 });
 
 test('query contains real files under an absolute non-broad root', async (t) => {
-  const container = mkdtempSync(join(tmpdir(), 'code-oracle-scope-'));
+  const container = canonicalTempDir('code-oracle-scope-');
   const root = join(container, 'repo');
   const outside = join(container, 'outside');
   mkdirSync(root);
@@ -618,7 +623,7 @@ test('static instantiation hints ignore comments and strings and retain strong c
 });
 
 test('tsgo spawn accepts the new extensionless Node launcher and legacy/native binaries', () => {
-  const root = mkdtempSync(join(tmpdir(), 'code-oracle-tsgo-'));
+  const root = canonicalTempDir('code-oracle-tsgo-');
   try {
     const extensionless = join(root, 'tsgo');
     const legacy = join(root, 'tsgo.js');
@@ -664,7 +669,7 @@ test('Content-Length decoding is linear-safe across byte splits and packed frame
 });
 
 test('concurrent project snapshots share one exact scan', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'code-oracle-snapshot-flight-'));
+  const root = canonicalTempDir('code-oracle-snapshot-flight-');
   try {
     writeFileSync(join(root, 'tsconfig.json'), '{}');
     for (let i = 0; i < 128; i++) {
@@ -690,7 +695,7 @@ test('concurrent project snapshots share one exact scan', async () => {
 });
 
 test('tsgo package resolution follows a hoisted Node dependency layout', () => {
-  const root = mkdtempSync(join(tmpdir(), 'code-oracle-hoisted-tsgo-'));
+  const root = canonicalTempDir('code-oracle-hoisted-tsgo-');
   try {
     const scope = join(root, 'node_modules/@typescript');
     const packageRoot = join(scope, 'native-preview');
@@ -731,7 +736,7 @@ test(
   'startup is lazy unless prewarm is explicitly enabled',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-lazy-'));
+    const root = canonicalTempDir('code-oracle-lazy-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     writeFileSync(
@@ -767,7 +772,7 @@ test(
   'duplicate queries share work and a later snapshot validates their cache entry',
   { timeout: 15_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-query-flight-'));
+    const root = canonicalTempDir('code-oracle-query-flight-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const methodLog = join(root, 'lsp-methods.txt');
@@ -877,7 +882,7 @@ test(
   'callers preserve distinct references that share one source line',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-same-line-'));
+    const root = canonicalTempDir('code-oracle-same-line-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const definitionFile = join(root, 'definition.ts');
@@ -934,7 +939,7 @@ test(
   'completed queries close every document opened in a warm LSP session',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-did-close-'));
+    const root = canonicalTempDir('code-oracle-did-close-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const methodLog = join(root, 'lsp-methods.txt');
@@ -997,7 +1002,7 @@ test(
   'a query never persists its result under an epoch changed during the LSP read',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-epoch-race-'));
+    const root = canonicalTempDir('code-oracle-epoch-race-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const methodLog = join(root, 'lsp-methods.txt');
@@ -1084,7 +1089,7 @@ test(
   'warm sessions are LRU-bounded and idle-reaped',
   { timeout: 15_000 },
   async () => {
-    const base = mkdtempSync(join(tmpdir(), 'code-oracle-pool-'));
+    const base = canonicalTempDir('code-oracle-pool-');
     const firstRoot = join(base, 'first');
     const secondRoot = join(base, 'second');
     const fakeLsp = join(base, 'fake-lsp.mjs');
@@ -1184,7 +1189,7 @@ test(
   'zero callers answers are never cached and a later definition proof is observed',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-caller-proof-'));
+    const root = canonicalTempDir('code-oracle-caller-proof-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const methodLog = join(root, 'lsp-methods.txt');
@@ -1295,7 +1300,7 @@ test(
   'an LSP JSON-RPC error stays an error and is never cached as a zero result',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-response-error-'));
+    const root = canonicalTempDir('code-oracle-response-error-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const methodLog = join(root, 'lsp-methods.txt');
@@ -1377,7 +1382,7 @@ test(
   'project evidence read failures are surfaced instead of claiming a clean zero',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-degraded-scan-'));
+    const root = canonicalTempDir('code-oracle-degraded-scan-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const definitionFile = join(root, 'definition.ts');
@@ -1447,7 +1452,7 @@ test(
   'unique-root Oracle queries wait instead of multiplying active LSP sessions',
   { timeout: 15_000 },
   async () => {
-    const base = mkdtempSync(join(tmpdir(), 'code-oracle-admission-'));
+    const base = canonicalTempDir('code-oracle-admission-');
     const fakeLsp = join(base, 'fake-lsp.mjs');
     const pidLog = join(base, 'lsp-pids.txt');
     writeFakeLsp(fakeLsp);
@@ -1587,7 +1592,7 @@ test(
   'an LSP request timeout fails honestly and terminates the poisoned backend',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-timeout-'));
+    const root = canonicalTempDir('code-oracle-timeout-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     writeFileSync(
@@ -1677,7 +1682,7 @@ test(
   'stdin EOF shuts down an in-flight prewarm and reaps its LSP',
   { timeout: 10_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-eof-'));
+    const root = canonicalTempDir('code-oracle-eof-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     writeFileSync(
@@ -1721,7 +1726,7 @@ test(
   'stdin EOF aborts an active project scan before spawning an LSP',
   { timeout: 20_000 },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-eof-scan-'));
+    const root = canonicalTempDir('code-oracle-eof-scan-');
     const fakeLsp = join(root, 'fake-lsp.mjs');
     const pidLog = join(root, 'lsp-pids.txt');
     const source = join(root, 'source.ts');
@@ -1810,7 +1815,7 @@ test(
 );
 
 test('project fingerprint catches additions, deletions, and restored-mtime edits', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'code-oracle-epoch-'));
+  const root = canonicalTempDir('code-oracle-epoch-');
   const source = join(root, 'a.ts');
   const config = join(root, 'tsconfig.json');
   writeFileSync(config, JSON.stringify({ include: ['*.ts'] }));
@@ -1847,7 +1852,7 @@ test('project fingerprint catches additions, deletions, and restored-mtime edits
 });
 
 test('an active Oracle project scan observes cancellation', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'code-oracle-cancel-scan-'));
+  const root = canonicalTempDir('code-oracle-cancel-scan-');
   writeWideTsFixtures(root, 256);
   const controller = new AbortController();
   const scan = scanProjectEpoch(root, controller.signal);
@@ -1966,7 +1971,7 @@ test(
     timeout: 90_000,
   },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-'));
+    const root = canonicalTempDir('code-oracle-');
     writeFileSync(
       join(root, 'tsconfig.json'),
       JSON.stringify({
@@ -2084,7 +2089,7 @@ test(
     timeout: 90_000,
   },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-'));
+    const root = canonicalTempDir('code-oracle-');
     writeFileSync(
       join(root, 'tsconfig.json'),
       JSON.stringify({
@@ -2166,7 +2171,7 @@ test(
     timeout: 90_000,
   },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-inferred-mjs-'));
+    const root = canonicalTempDir('code-oracle-inferred-mjs-');
     const definitionFile = join(root, 'definition.mjs');
     try {
       writeFileSync(
@@ -2213,7 +2218,7 @@ test(
     timeout: 90_000,
   },
   async () => {
-    const root = mkdtempSync(join(tmpdir(), 'code-oracle-dirty-callers-'));
+    const root = canonicalTempDir('code-oracle-dirty-callers-');
     const definitionFile = join(root, 'definition.ts');
     const callerFile = join(root, 'caller.ts');
 

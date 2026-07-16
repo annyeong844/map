@@ -363,7 +363,7 @@ function ensureRootWatch(runtime: IndexRuntime, rootInput: string): void {
   const resolvedRoot = resolve(rootInput);
   let root = resolvedRoot;
   try {
-    root = realpathSync(resolvedRoot);
+    root = realpathSync.native(resolvedRoot);
   } catch {
     // A disappearing root falls through to the watcher fallback below.
   }

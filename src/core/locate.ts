@@ -326,6 +326,26 @@ function compareScored(a: Scored, b: Scored): number {
   );
 }
 
+function compareCandidateToScored(
+  entry: MapEntry,
+  tier: number,
+  matched: number,
+  kindPrior: number,
+  fanIn: number,
+  lenPen: number,
+  other: Scored,
+): number {
+  return (
+    other.tier - tier ||
+    other.matched - matched ||
+    other.kindPrior - kindPrior ||
+    other.fanIn - fanIn ||
+    lenPen - other.lenPen ||
+    entry.file.localeCompare(other.entry.file) ||
+    entry.line - other.entry.line
+  );
+}
+
 function toHits(scored: Scored[]): LocateHit[] {
   return scored.map((s) => ({
     id: s.entry.id,
@@ -403,6 +423,40 @@ function offerTop(heap: Scored[], value: Scored, limit: number): void {
     heap[worse] = swap;
     i = worse;
   }
+}
+
+/** Reject a losing candidate against the heap root before allocating its score
+ * record. A normal fuzzy scan keeps 20 results and rejects nearly everything. */
+function offerEntry(
+  heap: Scored[],
+  entry: MapEntry,
+  tier: number,
+  match: string,
+  matched: number,
+  kindPrior: number,
+  lenPen: number,
+  fanIn: number,
+  limit: number,
+): void {
+  if (
+    heap.length >= limit &&
+    compareCandidateToScored(
+      entry,
+      tier,
+      matched,
+      kindPrior,
+      fanIn,
+      lenPen,
+      heap[0],
+    ) >= 0
+  ) {
+    return;
+  }
+  offerTop(
+    heap,
+    { entry, tier, match, matched, kindPrior, lenPen, fanIn },
+    limit,
+  );
 }
 
 /**
@@ -517,19 +571,7 @@ function locateScored(
     }
 
     if (terms.length === 0) {
-      offerTop(
-        scored,
-        {
-          entry: e,
-          tier: 1,
-          match: 'any',
-          matched: 0,
-          kindPrior: 0,
-          lenPen: 0,
-          fanIn: e.fanIn ?? 0,
-        },
-        limit,
-      );
+      offerEntry(scored, e, 1, 'any', 0, 0, 0, e.fanIn ?? 0, limit);
       continue;
     }
 
@@ -545,17 +587,15 @@ function locateScored(
 
     const kindPrior = kindPreference(e.kind, verbQuery);
 
-    offerTop(
+    offerEntry(
       scored,
-      {
-        entry: e,
-        tier: best,
-        match: tierLabel(best),
-        matched,
-        kindPrior,
-        lenPen: lengthPenalty(e.name, namePart),
-        fanIn: e.fanIn ?? 0,
-      },
+      e,
+      best,
+      tierLabel(best),
+      matched,
+      kindPrior,
+      lengthPenalty(e.name, namePart),
+      e.fanIn ?? 0,
       limit,
     );
   }

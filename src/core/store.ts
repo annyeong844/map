@@ -133,8 +133,13 @@ export function prepareLookup(index: MapIndex): LookupTables {
   if (cached) return cached;
   const byId = new Map<string, MapEntry>();
   const byName = new Map<string, NameBucket>();
-  for (const entry of index.entries) {
+  const entries = index.entries;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     byId.set(entry.id, entry);
+  }
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const named = byName.get(entry.name);
     if (!named) byName.set(entry.name, entry);
     else if (Array.isArray(named)) named.push(entry);

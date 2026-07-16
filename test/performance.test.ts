@@ -259,6 +259,47 @@ test('one-shot exact batch resolves in one index pass without retaining lookup t
   );
 });
 
+test('path-scoped batches preserve exact-name fallback for names containing hashes', () => {
+  const text = 'first\nsecond\n';
+  const root = repo({ 'large.txt': text });
+  const entries: MapEntry[] = [
+    {
+      id: 'large.txt#first',
+      name: 'large.txt#alias-first',
+      kind: 'line',
+      file: 'large.txt',
+      line: 1,
+      endLine: 1,
+      charStart: 0,
+      charEnd: 6,
+      searchText: 'first',
+    },
+    {
+      id: 'large.txt#second',
+      name: 'large.txt#alias-second',
+      kind: 'line',
+      file: 'large.txt',
+      line: 2,
+      endLine: 2,
+      charStart: 6,
+      charEnd: text.length,
+      searchText: 'second',
+    },
+  ];
+  const index = syntheticIndex(root, entries, { 'large.txt': token(text) });
+
+  assert.deepEqual(
+    readMany(
+      index,
+      entries.map((entry) => entry.name),
+    ).map((result) => [result.status, result.id]),
+    [
+      ['exact', 'large.txt#first'],
+      ['exact', 'large.txt#second'],
+    ],
+  );
+});
+
 test('exact path-scoped read and fuzzy locate inspect only that v13 file range', () => {
   const root = repo({});
   const files = 1_024;

@@ -648,6 +648,96 @@ test('batched fan-in preserves re-export order and mixed-cycle semantics', () =>
   );
 });
 
+test('fan-in promotes singleton consumer buckets only for distinct importers', () => {
+  const files = [
+    'barrel-b.ts',
+    'barrel-c.ts',
+    'target.ts',
+    'use-b1.ts',
+    'use-b2.ts',
+    'use-c.ts',
+    'use-direct.ts',
+  ];
+  const imports = new Map<
+    string,
+    { source: string; name: string; reexport?: boolean }[]
+  >([
+    ['barrel-b.ts', [{ source: './target', name: 'x', reexport: true }]],
+    ['barrel-c.ts', [{ source: './target', name: 'x', reexport: true }]],
+    ['use-direct.ts', [{ source: './target', name: 'x' }]],
+    [
+      'use-b1.ts',
+      [
+        { source: './barrel-b', name: 'x' },
+        { source: './barrel-b', name: 'x' },
+      ],
+    ],
+    ['use-b2.ts', [{ source: './barrel-b', name: 'x' }]],
+    ['use-c.ts', [{ source: './barrel-c', name: 'x' }]],
+  ]);
+
+  const fanIn = computeFanIn(files, imports);
+  assert.equal(fanIn.get('target.ts::x'), 4);
+});
+
+test('fan-in promotes singleton routes without changing first-export order', () => {
+  const files = [
+    'barrel.ts',
+    'tail.ts',
+    'target-a.ts',
+    'target-b.ts',
+    'use.ts',
+  ];
+  const imports = new Map<
+    string,
+    { source: string; name: string; reexport?: boolean }[]
+  >([
+    [
+      'barrel.ts',
+      [
+        { source: './target-a', name: 'x', reexport: true },
+        { source: './target-b', name: 'x', reexport: true },
+        { source: './target-b', name: 'y', reexport: true },
+        { source: './tail', name: '*', reexport: true },
+      ],
+    ],
+    [
+      'use.ts',
+      [
+        { source: './barrel', name: 'x' },
+        { source: './barrel', name: 'y' },
+        { source: './barrel', name: 'z' },
+      ],
+    ],
+  ]);
+
+  const fanIn = computeFanIn(files, imports);
+  assert.equal(fanIn.get('target-a.ts::x'), 1);
+  assert.equal(fanIn.get('target-b.ts::x'), undefined);
+  assert.equal(fanIn.get('target-b.ts::y'), 1);
+  assert.equal(fanIn.get('tail.ts::z'), 1);
+});
+
+test('fan-in relative fast path preserves nested and normalized imports', () => {
+  const files = ['src/nested/value.ts', 'src/target.ts', 'src/use.ts'];
+  const imports = new Map<
+    string,
+    { source: string; name: string; reexport?: boolean }[]
+  >([
+    [
+      'src/use.ts',
+      [
+        { source: './nested/value', name: 'value' },
+        { source: './nested/../target', name: 'target' },
+      ],
+    ],
+  ]);
+
+  const fanIn = computeFanIn(files, imports);
+  assert.equal(fanIn.get('src/nested/value.ts::value'), 1);
+  assert.equal(fanIn.get('src/target.ts::target'), 1);
+});
+
 test('incremental no-op returns the prior snapshot and a deleted empty file invalidates it', async () => {
   const root = repo({
     'src/a.ts': 'export function a() { return 1 }\n',

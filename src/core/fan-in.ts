@@ -21,6 +21,30 @@ const JS_TO_TS: Record<string, readonly string[]> = {
   '.cjs': ['.cts'],
 };
 const JS_TO_TS_ENTRIES = Object.entries(JS_TO_TS);
+const DOT_CHAR_CODE = '.'.charCodeAt(0);
+const SLASH_CHAR_CODE = '/'.charCodeAt(0);
+
+/** Join the dominant `./name` import shape without paying for general path
+ * normalization. Dot segments and repeated separators deliberately fall back. */
+function simpleRelativeBase(fromFile: string, source: string): string | null {
+  if (
+    source.length <= 2 ||
+    source.charCodeAt(0) !== DOT_CHAR_CODE ||
+    source.charCodeAt(1) !== SLASH_CHAR_CODE ||
+    source.charCodeAt(2) === DOT_CHAR_CODE
+  ) {
+    return null;
+  }
+  for (let i = 2; i < source.length - 1; i++) {
+    if (source.charCodeAt(i) !== SLASH_CHAR_CODE) continue;
+    const next = source.charCodeAt(i + 1);
+    if (next === DOT_CHAR_CODE || next === SLASH_CHAR_CODE) return null;
+  }
+  const directoryEnd = fromFile.lastIndexOf('/') + 1;
+  return directoryEnd === 0
+    ? source.slice(2)
+    : fromFile.slice(0, directoryEnd) + source.slice(2);
+}
 
 /**
  * Resolve a relative import specifier against the known file set — no filesystem
@@ -38,7 +62,9 @@ function resolveRelative(
   // specifiers like 'react' never match a file path, so this is a no-op for TS.)
   if (fileSet.has(source)) return source;
   if (!source.startsWith('./') && !source.startsWith('../')) return null;
-  const base = pp.join(pp.dirname(fromFile), source);
+  const base =
+    simpleRelativeBase(fromFile, source) ??
+    pp.join(pp.dirname(fromFile), source);
 
   // 1. The specifier as written points at a real file (e.g. a genuine .js).
   if (fileSet.has(base)) return base;
@@ -75,15 +101,20 @@ export function computeFanIn(
 ): Map<string, number> {
   const fileSet = new Set(files);
 
-  // Resolve each module specifier once. Imports and re-export traversal often
-  // ask about the same `(from file, source)` pair many times.
-  const targetCache = new Map<string, Map<string, string | null>>();
+  // Edges are grouped by importer, and repeated imports from one source are
+  // adjacent in the dominant workloads. A one-entry cache keeps that fast path
+  // without allocating a nested Map for every one-shot importer.
+  let cachedFromFile: string | undefined;
+  let cachedSource: string | undefined;
+  let cachedTarget: string | null = null;
   const targetFor = (fromFile: string, source: string): string | null => {
-    let bySource = targetCache.get(fromFile);
-    if (!bySource) targetCache.set(fromFile, (bySource = new Map()));
-    if (bySource.has(source)) return bySource.get(source) ?? null;
+    if (fromFile === cachedFromFile && source === cachedSource) {
+      return cachedTarget;
+    }
     const target = resolveRelative(fromFile, source, fileSet);
-    bySource.set(source, target);
+    cachedFromFile = fromFile;
+    cachedSource = source;
+    cachedTarget = target;
     return target;
   };
 
@@ -92,41 +123,91 @@ export function computeFanIn(
     order: number;
   }
   interface Routes {
-    exact: Map<string, Route>;
+    exact?: Map<string, Route>;
+    exactName?: string;
+    exactRoute?: Route;
     wildcard?: Route;
     unconditional: boolean;
   }
 
   // Compile each barrel into O(1) named/wildcard route lookup while preserving
-  // source order (the first matching re-export remains authoritative).
+  // source order (the first matching re-export remains authoritative). Collect
+  // consumer requests in the same edge pass so flat graphs are not walked twice.
   const routesByFile = new Map<string, Routes>();
   const dominantExactNames = new Set<string>();
+  type Consumers = string | Set<string>;
+  const requests = new Map<string, Map<string, Consumers>>();
   for (const [f, edges] of importsByFile) {
     let routes: Routes | null = null;
     for (let order = 0; order < edges.length; order++) {
       const edge = edges[order];
-      if (!edge.reexport) continue;
-      routes ??= { exact: new Map(), unconditional: false };
+      if (!edge.reexport) {
+        if (!edge.name || edge.name === '*') continue;
+        const target = targetFor(f, edge.source);
+        if (!target) continue;
+        let byName = requests.get(target);
+        if (!byName) requests.set(target, (byName = new Map()));
+        const consumers = byName.get(edge.name);
+        if (consumers === undefined) {
+          byName.set(edge.name, f);
+        } else if (typeof consumers === 'string') {
+          if (consumers !== f) {
+            byName.set(edge.name, new Set([consumers, f]));
+          }
+        } else {
+          consumers.add(f);
+        }
+        continue;
+      }
+      routes ??= { unconditional: false };
       const route = { target: targetFor(f, edge.source), order };
-      if (edge.name === '*') routes.wildcard ??= route;
-      else if (!routes.exact.has(edge.name)) routes.exact.set(edge.name, route);
+      if (edge.name === '*') {
+        routes.wildcard ??= route;
+      } else if (routes.exact) {
+        if (!routes.exact.has(edge.name)) routes.exact.set(edge.name, route);
+      } else if (routes.exactName === undefined) {
+        routes.exactName = edge.name;
+        routes.exactRoute = route;
+      } else if (routes.exactName !== edge.name) {
+        routes.exact = new Map([
+          [routes.exactName, routes.exactRoute!],
+          [edge.name, route],
+        ]);
+        routes.exactName = undefined;
+        routes.exactRoute = undefined;
+      }
     }
     if (routes) {
       // A wildcard appearing before every named edge wins for every possible
       // symbol name. Such chains can be collapsed once independent of `name`.
       routes.unconditional = !!routes.wildcard;
       if (routes.wildcard) {
-        for (const exact of routes.exact.values()) {
-          if (exact.order < routes.wildcard.order) {
-            routes.unconditional = false;
-            break;
+        if (routes.exact) {
+          for (const exact of routes.exact.values()) {
+            if (exact.order < routes.wildcard.order) {
+              routes.unconditional = false;
+              break;
+            }
           }
+        } else if (
+          routes.exactRoute &&
+          routes.exactRoute.order < routes.wildcard.order
+        ) {
+          routes.unconditional = false;
         }
       }
-      for (const [name, exact] of routes.exact) {
-        if (!routes.wildcard || exact.order < routes.wildcard.order) {
-          dominantExactNames.add(name);
+      if (routes.exact) {
+        for (const [name, exact] of routes.exact) {
+          if (!routes.wildcard || exact.order < routes.wildcard.order) {
+            dominantExactNames.add(name);
+          }
         }
+      } else if (
+        routes.exactName !== undefined &&
+        routes.exactRoute &&
+        (!routes.wildcard || routes.exactRoute.order < routes.wildcard.order)
+      ) {
+        dominantExactNames.add(routes.exactName);
       }
       routesByFile.set(f, routes);
     }
@@ -135,7 +216,9 @@ export function computeFanIn(
   const pickRoute = (file: string, name: string): Route | null => {
     const routes = routesByFile.get(file);
     if (!routes) return null;
-    const exact = routes.exact.get(name);
+    const exact =
+      routes.exact?.get(name) ??
+      (routes.exactName === name ? routes.exactRoute : undefined);
     if (exact && (!routes.wildcard || exact.order < routes.wildcard.order)) {
       return exact;
     }
@@ -328,7 +411,7 @@ export function computeFanIn(
 
       const routes = routesByFile.get(file);
       const wildcard = routes?.wildcard;
-      if (routes) {
+      if (routes?.exact) {
         for (const [name, exact] of routes.exact) {
           if (
             !active.has(name) ||
@@ -336,6 +419,20 @@ export function computeFanIn(
           ) {
             continue;
           }
+          active.delete(name);
+          const terminal = exact.target ? resolveDef(exact.target, name) : file;
+          resolvedDefs.set(`${start}\0${name}`, terminal);
+          results.set(name, terminal);
+        }
+      } else {
+        const name = routes?.exactName;
+        const exact = routes?.exactRoute;
+        if (
+          name !== undefined &&
+          exact &&
+          active.has(name) &&
+          (!wildcard || exact.order < wildcard.order)
+        ) {
           active.delete(name);
           const terminal = exact.target ? resolveDef(exact.target, name) : file;
           resolvedDefs.set(`${start}\0${name}`, terminal);
@@ -352,33 +449,33 @@ export function computeFanIn(
     return results;
   };
 
-  // Batch consumers by the barrel they enter. Repeated imports of the same name
-  // share both module resolution and definition traversal.
-  const requests = new Map<string, Map<string, Set<string>>>();
-  for (const [fromFile, edges] of importsByFile) {
-    for (const edge of edges) {
-      if (!edge.name || edge.name === '*' || edge.reexport) continue; // re-exports forward, they don't consume
-      const target = targetFor(fromFile, edge.source);
-      if (!target) continue;
-      let byName = requests.get(target);
-      if (!byName) requests.set(target, (byName = new Map()));
-      let consumers = byName.get(edge.name);
-      if (!consumers) byName.set(edge.name, (consumers = new Set()));
-      consumers.add(fromFile);
-    }
-  }
-
-  const importers = new Map<string, Set<string>>(); // "defFile::name" -> set of importing files
+  const importers = new Map<string, Consumers>(); // "defFile::name" -> unique importing files
   for (const [target, byName] of requests) {
     const defs = resolveDefs(target, byName.keys());
     for (const [name, consumers] of byName) {
       const key = `${defs.get(name) ?? target}::${name}`;
-      const set = importers.get(key);
-      if (!set) importers.set(key, consumers);
-      else for (const fromFile of consumers) set.add(fromFile);
+      const existing = importers.get(key);
+      if (existing === undefined) {
+        importers.set(key, consumers);
+      } else if (typeof existing === 'string') {
+        if (typeof consumers === 'string') {
+          if (existing !== consumers) {
+            importers.set(key, new Set([existing, consumers]));
+          }
+        } else {
+          consumers.add(existing);
+          importers.set(key, consumers);
+        }
+      } else if (typeof consumers === 'string') {
+        existing.add(consumers);
+      } else {
+        for (const fromFile of consumers) existing.add(fromFile);
+      }
     }
   }
   const fanIn = new Map<string, number>();
-  for (const [key, set] of importers) fanIn.set(key, set.size);
+  for (const [key, consumers] of importers) {
+    fanIn.set(key, typeof consumers === 'string' ? 1 : consumers.size);
+  }
   return fanIn;
 }

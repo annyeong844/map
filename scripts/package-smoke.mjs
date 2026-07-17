@@ -18,15 +18,15 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const temp = mkdtempSync(join(tmpdir(), 'code map package-'));
 
 function windowsCommand(command, args, options = {}) {
+  const baseEnv = options.baseEnv ?? process.env;
   const pathKey =
-    Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ??
-    'Path';
+    Object.keys(baseEnv).find((key) => key.toLowerCase() === 'path') ?? 'Path';
   const env = {
-    ...process.env,
+    ...baseEnv,
     ...options.env,
     ...(options.binDir
       ? {
-          [pathKey]: `${options.binDir}${delimiter}${process.env[pathKey] ?? ''}`,
+          [pathKey]: `${options.binDir}${delimiter}${baseEnv[pathKey] ?? ''}`,
         }
       : {}),
   };
@@ -43,21 +43,35 @@ function windowsCommand(command, args, options = {}) {
   );
 }
 
+function npmSmokeEnvironment() {
+  // `npm publish --dry-run` exports this config into lifecycle scripts. The
+  // package smoke must still perform its real install inside its private temp
+  // root; otherwise dry-run reports success without creating anything.
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => key.toLowerCase() !== 'npm_config_dry_run',
+    ),
+  );
+}
+
 function npm(args, cwd = projectRoot) {
   const npmCli = process.env.npm_execpath;
+  const env = npmSmokeEnvironment();
   let result;
   if (npmCli) {
     result = spawnSync(process.execPath, [npmCli, ...args], {
       cwd,
       encoding: 'utf8',
+      env,
       windowsHide: true,
     });
   } else if (process.platform === 'win32') {
-    result = windowsCommand('npm.cmd', args, { cwd });
+    result = windowsCommand('npm.cmd', args, { baseEnv: env, cwd });
   } else {
     result = spawnSync('npm', args, {
       cwd,
       encoding: 'utf8',
+      env,
       windowsHide: true,
     });
   }

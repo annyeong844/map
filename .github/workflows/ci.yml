@@ -42,6 +42,10 @@ jobs:
           CODE_MAP_ARCHIVE_URL: https://github.com/${{ github.repository }}/archive/${{ github.event.pull_request.head.sha || github.sha }}.tar.gz
       - run: npm run check:package
       - run: npm run smoke:package # install the tarball in a fresh prefix; exercise CLI + real stdio MCP schema/call
+      - if: runner.os == 'Linux'
+        run: npm run smoke:package # publish --dry-run must not turn the nested temp install into a no-op
+        env:
+          npm_config_dry_run: 'true'
       - run: npm audit --omit=dev
       - run: npm ci
         working-directory: code-oracle

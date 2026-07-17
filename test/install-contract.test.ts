@@ -31,3 +31,30 @@ test('GitHub installs need no dependency lifecycle approval', () => {
     assert.ok(!text.includes('npm install -g github:annyeong844/map'));
   }
 });
+
+test('npm publication permits one protected bootstrap and then requires OIDC', () => {
+  const workflow = readFileSync(
+    resolve(root, '.github', 'workflows', 'publish.yml'),
+    'utf8',
+  );
+
+  assert.match(workflow, /id-token: write/u);
+  assert.match(workflow, /environment: npm/u);
+  assert.match(
+    workflow,
+    /git merge-base --is-ancestor "\$GITHUB_SHA" origin\/main/u,
+  );
+  assert.match(
+    workflow,
+    /NPM_BOOTSTRAP_TOKEN: \$\{\{ secrets\.NPM_BOOTSTRAP_TOKEN \}\}/u,
+  );
+  assert.match(
+    workflow,
+    /must be removed after the first package publication/u,
+  );
+  assert.match(
+    workflow,
+    /npm publish --access public --tag "\$TAG" --provenance/u,
+  );
+  assert.doesNotMatch(workflow, /secrets\.NPM_TOKEN/u);
+});

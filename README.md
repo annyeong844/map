@@ -483,7 +483,7 @@ are a checker-visible over-approximation, and Python references are an intra-fil
 <summary><b>🔧 Maintainer / publishing</b></summary>
 
 ```bash
-npm test                 # 49 tests
+npm test                 # core contract tests
 npm run typecheck        # tsc --noEmit, strict (0 errors; src/ is any-free)
 npm run lint             # pinned oxlint
 npm run release:check    # all checks + fresh-tarball CLI/MCP smoke
@@ -494,9 +494,14 @@ npm run release:check    # all checks + fresh-tarball CLI/MCP smoke
 GitHub releases publish through npm Trusted Publishing (OIDC + provenance); prereleases go to
 the `next` dist-tag and stable versions to `latest`.
 
-The first npm publication is the one-time bootstrap: publish `0.9.0-rc.1` manually with 2FA,
-then configure npm's GitHub trusted publisher for `annyeong844/map`, workflow `publish.yml`,
-environment `npm`, and allowed action `npm publish`. Protect that GitHub environment. Every later
-release uses OIDC and automatic provenance; never add a long-lived npm token to Actions.
+The first npm publication is a one-time CI bootstrap so the first public RC still carries all five
+native extractors. Revoke any previously exposed token, enable account 2FA, and create a
+shortest-lived granular token with read/write access to the `@annyeong844` scope and bypass 2FA.
+Store it only as `NPM_BOOTSTRAP_TOKEN` in the protected GitHub environment `npm`, then publish the
+matching GitHub release. The workflow builds the complete native matrix and publishes with
+provenance. Delete the secret immediately afterward and configure npm's GitHub trusted publisher
+for `annyeong844/map`, workflow `publish.yml`, environment `npm`, and allowed action `npm publish`.
+The workflow refuses a lingering bootstrap token after the package exists; every later release uses
+OIDC without an npm token.
 
 </details>

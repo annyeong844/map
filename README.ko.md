@@ -462,7 +462,7 @@ Python references는 intra-file 하한선입니다.
 <summary><b>🔧 메인테이너 / 퍼블리싱</b></summary>
 
 ```bash
-npm test                 # 49 tests
+npm test                 # 핵심 계약 테스트
 npm run typecheck        # tsc --noEmit, strict (에러 0; src/는 any-free)
 npm run lint             # 핀한 oxlint
 npm run release:check    # 전체 검사 + 새 tarball CLI/MCP smoke
@@ -473,9 +473,14 @@ npm run release:check    # 전체 검사 + 새 tarball CLI/MCP smoke
 GitHub release는 npm Trusted Publishing(OIDC + provenance)으로 배포하고, prerelease는 `next`,
 stable은 `latest` dist-tag로 갑니다.
 
-첫 npm 퍼블리시만 1회 부트스트랩입니다. `0.9.0-rc.1`을 2FA로 수동 퍼블리시한 뒤 npm의
-GitHub Trusted Publisher를 `annyeong844/map` · workflow `publish.yml` · environment `npm` ·
-허용 액션 `npm publish`로 설정하고 GitHub environment를 보호하세요. 그다음 릴리스부터는
-OIDC와 자동 provenance를 쓰며, Actions에 장기 npm token을 넣지 않습니다.
+첫 npm 퍼블리시는 첫 공개 RC에도 다섯 플랫폼 네이티브 추출기를 모두 싣기 위한 1회성
+CI 부트스트랩입니다. 노출된 기존 token을 폐기하고 계정 2FA를 켠 뒤, `@annyeong844`
+scope에 read/write 권한과 bypass 2FA를 준 최단 수명의 granular token을 만드세요. 보호된
+GitHub environment `npm`의 `NPM_BOOTSTRAP_TOKEN` secret에만 넣고 일치하는 GitHub release를
+발행하면 workflow가 전체 네이티브 matrix를 빌드해 provenance와 함께 퍼블리시합니다.
+직후 secret을 삭제하고 npm GitHub Trusted Publisher를 `annyeong844/map` · workflow
+`publish.yml` · environment `npm` · 허용 액션 `npm publish`로 설정하세요. 패키지가 생긴 뒤
+bootstrap token이 남아 있으면 workflow는 일부러 실패하며, 이후 릴리스는 npm token 없이
+OIDC만 사용합니다.
 
 </details>

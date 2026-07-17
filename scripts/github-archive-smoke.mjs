@@ -23,6 +23,10 @@ if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'github.com') {
 
 const temporary = mkdtempSync(join(tmpdir(), 'code-map-github-archive-'));
 const installRoot = join(temporary, 'install');
+const globalModulesRoot =
+  process.platform === 'win32'
+    ? join(installRoot, 'node_modules')
+    : join(installRoot, 'lib', 'node_modules');
 const fixture = join(temporary, 'fixture');
 
 function run(command, args, options = {}) {
@@ -60,7 +64,7 @@ function runNpm(args) {
 }
 
 try {
-  mkdirSync(installRoot, { recursive: true });
+  mkdirSync(globalModulesRoot, { recursive: true });
   runNpm([
     'install',
     '--global',
@@ -72,12 +76,7 @@ try {
     archiveUrl,
   ]);
 
-  const packageRoot = join(
-    installRoot,
-    'node_modules',
-    '@annyeong844',
-    'code-map',
-  );
+  const packageRoot = join(globalModulesRoot, '@annyeong844', 'code-map');
   if (!existsSync(packageRoot) || lstatSync(packageRoot).isSymbolicLink()) {
     throw new Error('GitHub archive did not install as a resident package.');
   }

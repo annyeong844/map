@@ -97,7 +97,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "oxc-parser": "^0.136.0"
+    "oxc-parser": "0.136.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",

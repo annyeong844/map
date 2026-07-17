@@ -234,7 +234,7 @@ function analyzeStaticImporter(
   };
 }
 
-export interface StaticCallSite {
+interface StaticCallSite {
   uri: string;
   line: number;
   character: number;

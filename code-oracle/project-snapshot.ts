@@ -40,10 +40,10 @@ const SKIP_DIRS = new Set([
 ]);
 
 export type Lang = 'ts' | 'py';
-export type ProjectFileKind = Lang | `${Lang}-config`;
+type ProjectFileKind = Lang | `${Lang}-config`;
 export type ProjectFile = { signature: string; kind: ProjectFileKind };
 export type Epoch = string;
-export type ProjectScanDegradation = {
+type ProjectScanDegradation = {
   failureCount: number;
   examples: Array<{
     phase: 'list-directory' | 'stat-file';
@@ -65,14 +65,14 @@ interface AbortableFlight<T> {
   promise: Promise<T>;
 }
 
-export interface ProjectSnapshotOptions {
+interface ProjectSnapshotOptions {
   maxActiveScans: number;
   cacheMaxBytes: number;
   cacheIdleMs: number;
   ttlMs: number;
 }
 
-export interface ProjectSnapshotStats {
+interface ProjectSnapshotStats {
   admission: AdmissionStats;
   cache: ByteLruStats;
 }

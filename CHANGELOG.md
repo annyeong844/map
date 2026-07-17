@@ -4,6 +4,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- Repair global GitHub installs by resetting npm's inherited global lifecycle config and bootstrapping only the build dependencies needed to produce `dist`.
 - Preserve the complete `export` / `export default` wrapper in exact top-level symbol reads and force legacy indexes to rebuild.
 - Keep distinct same-line Oracle references, close LSP document overlays after each query transaction, never cache checker zeroes, and stage positive answers until a later snapshot validates their epoch without an extra scan.
 - Make exact `path#name` reads fail closed instead of promoting a different fuzzy symbol, and add slash-delimited lexical refs for class methods and nested Python declarations without breaking legacy canonical IDs.

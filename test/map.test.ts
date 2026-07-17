@@ -19,7 +19,6 @@ import { createInterface } from 'node:readline';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { buildIndex } from '../src/core/build-index.ts';
-import { extractSymbols } from '../src/core/extract-symbols.ts';
 import { gitFileListCommand } from '../src/core/files.ts';
 import { autoIndexDecision, scanIndexDrift } from '../src/core/index-drift.ts';
 import { locate } from '../src/core/locate.ts';
@@ -266,19 +265,6 @@ test('Gemini setup distinguishes config I/O, JSON syntax, and root shape', () =>
       return true;
     },
   );
-});
-
-test('raw Oxc transfer preserves the complete extraction contract', () => {
-  const source = `
-    import base, { value as input } from './dep.js';
-    export { input as publicValue };
-    export default class Example extends base {
-      run() { return input + input; }
-    }
-  `;
-  const normal = extractSymbols('fixture.ts', source);
-  const raw = extractSymbols('fixture.ts', source, { rawTransfer: true });
-  assert.deepEqual(raw, normal);
 });
 
 test('index extracts coordinates + an anchor from real source, no meaning, no external graph', async () => {

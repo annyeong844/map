@@ -544,9 +544,6 @@ async function runPyBackend(
 }
 
 const READ_CONCURRENCY = 32;
-// Raw transfer removes JSON AST materialization but has a fixed virtual-buffer
-// setup cost. Corpus A/B keeps tiny repositories and edits on the cheaper path.
-const RAW_TRANSFER_MIN_CHANGED_BYTES = 262_144;
 async function readAll(
   root: string,
   files: string[],
@@ -789,13 +786,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   }
 
   const pyFiles = files.filter(isPython);
-  const pyChanged: string[] = [];
-  let jsChangedBytes = 0;
-  for (const file of changedFiles) {
-    if (isPython(file)) pyChanged.push(file);
-    else jsChangedBytes += stats.get(file)?.size ?? 0;
-  }
-  const useRawTransfer = jsChangedBytes >= RAW_TRANSFER_MIN_CHANGED_BYTES;
+  const pyChanged = changedFiles.filter(isPython);
 
   // Python files go through the native extractor when its platform prebuilt is
   // present; the stdlib fallback keeps the same result contract.
@@ -910,9 +901,7 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
           ino: st.ino,
         };
       }
-      const parsed = extractSymbols(file, src, {
-        rawTransfer: useRawTransfer,
-      });
+      const parsed = extractSymbols(file, src);
       fileImports[file] = parsed.imports;
       const lines = buildLineIndex(src);
       for (const rec of parsed.symbols) {

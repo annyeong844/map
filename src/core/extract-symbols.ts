@@ -1,10 +1,5 @@
-import { parseSync, rawTransferSupported } from 'oxc-parser';
+import { parseSync } from 'oxc-parser';
 import { isRecord } from './util.ts';
-
-const OXC_PARSE_OPTIONS = { preserveParens: false };
-const OXC_RAW_PARSE_OPTIONS = rawTransferSupported()
-  ? { preserveParens: false, experimentalRawTransfer: true }
-  : OXC_PARSE_OPTIONS;
 
 /**
  * Extract every routable symbol AND every cross-module import edge from one
@@ -266,18 +261,14 @@ function localTargets(
 export function extractSymbols(
   file: string,
   text: string,
-  opts: { includeRefs?: boolean; rawTransfer?: boolean } = {},
+  opts: { includeRefs?: boolean } = {},
 ): FileParse {
   let res: ReturnType<typeof parseSync>;
   try {
     // Parenthesis wrapper nodes carry no routing information. Omitting them
     // preserves declaration/identifier coordinates while shrinking the AST
     // that the refs walk must traverse and later collect.
-    res = parseSync(
-      file,
-      text,
-      opts.rawTransfer ? OXC_RAW_PARSE_OPTIONS : OXC_PARSE_OPTIONS,
-    );
+    res = parseSync(file, text, { preserveParens: false });
   } catch (error) {
     throw new Error(`Oxc could not parse ${file}.`, { cause: error });
   }

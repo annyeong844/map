@@ -1,5 +1,6 @@
 node_modules/
-dist/
+# GitHub source installs cannot rely on dependency lifecycle scripts. Keep the
+# small JavaScript distribution checked in and verify it against source in CI.
 __pycache__/
 *.py[cod]
 native/bin/

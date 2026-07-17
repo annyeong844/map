@@ -36,6 +36,7 @@ jobs:
           CODE_MAP_PY_BACKEND: stdlib
       - run: npm run lint # oxlint (correctness)
       - run: npm run check:versions
+      - run: npm run check:dist # GitHub source installs consume the committed JS without lifecycle scripts
       - run: npm run check:package
       - run: npm run smoke:package # install the tarball in a fresh prefix; exercise CLI + real stdio MCP schema/call
       - run: npm audit --omit=dev

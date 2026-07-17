@@ -67,7 +67,7 @@ notes.
 ```bash
 # 1. install the release candidate (`next` after the first npm release)
 npm install -g @annyeong844/code-map@next
-# Before that release exists (source build is automatic): npm install -g github:annyeong844/map
+# Before that release exists (uses verified prebuilt JS): npm install -g github:annyeong844/map
 
 # 2. wire both the routing plugin/rules and MCP (dry-run without --apply)
 map setup codex --apply
@@ -240,7 +240,7 @@ is resident after a build, and packaged installs need no Python runtime. Honest 
 
 **Requirements:** Node ≥ 23.6, one installed npm runtime dependency (`oxc-parser`); `ripgrep`
 used for the file walk when present. Published tarballs need no install-time build. The temporary
-GitHub source route builds `dist` automatically with pinned build dependencies. Supported packages include the
+GitHub source route uses the same reviewed `dist`, committed and checked against source in CI. Supported packages include the
 native Python extractor. Release CI builds and executes prebuilt binaries for Windows x64,
 Linux x64/arm64 (static musl), and macOS x64/arm64; npm installs never compile Rust. On an
 unsupported/source-only install, Python 3 is auto-detected as
@@ -254,8 +254,8 @@ upgrade a stale WSL Node, and code-map requires ≥23.6 in the environment that 
 **Install:** `npm install -g @annyeong844/code-map@next` (RC channel) ·
 `npm install -g github:annyeong844/map` (before npm release) · or clone + `npm install && npm link`.
 All expose `map` and `map-mcp`.
-The `github:` route is source-only: npm builds the JavaScript automatically, while Python uses the
-documented stdlib fallback unless you explicitly stage a native extractor.
+The `github:` route is source-only: its JavaScript is prebuilt without an install lifecycle script,
+while Python uses the documented stdlib fallback unless you explicitly stage a native extractor.
 
 `oxc-parser` includes an OS-native binding, so Windows and WSL must not share one
 `node_modules` tree. In particular, never `npm link` a WSL `map-mcp` to a Windows checkout under

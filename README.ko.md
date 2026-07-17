@@ -65,7 +65,7 @@ named export는 deep import를 포함해 패키지 호환 표면입니다. 저�
 ```bash
 # 1. 릴리스 후보 설치 (첫 npm 릴리스 뒤에는 `next` 채널)
 npm install -g @annyeong844/code-map@next
-# 그 전에는(소스 빌드는 자동): npm install -g github:annyeong844/map
+# 그 전에는(검증된 프리빌트 JS 사용): npm install -g github:annyeong844/map
 
 # 2. 라우팅 plugin/rules와 MCP를 함께 배선 (--apply 없이는 dry-run)
 map setup codex --apply
@@ -233,8 +233,8 @@ Python 런타임도 필요 없습니다. 정직한 범위: namespace / `export *
 <summary><b>🔌 실전 배선 (설치 옵션 + 효율 이득)</b></summary>
 
 **요구사항:** Node ≥ 23.6, 설치 후 npm 런타임 의존성 1개(`oxc-parser`); 파일 walk엔 `ripgrep`이
-있으면 사용. 정식 tarball은 설치 중 빌드하지 않고, 임시 GitHub 소스 경로는 고정된 빌드 의존성으로
-`dist`를 자동 생성합니다. 지원되는 정식 패키지에는 네이티브 Python
+있으면 사용. 정식 tarball은 설치 중 빌드하지 않고, 임시 GitHub 소스 경로도 CI에서 소스와 대조한
+동일한 `dist`를 사용합니다. 지원되는 정식 패키지에는 네이티브 Python
 추출기가 포함됩니다. 릴리스 CI가 Windows x64, Linux x64/arm64(정적 musl), macOS x64/arm64
 프리빌트를 각각 빌드·실행 검증하며 npm 설치 중에는 Rust를 컴파일하지 않습니다. 미지원/소스 전용
 설치에서는 Python 3을 Unix의 `python3`/`python`,
@@ -247,8 +247,8 @@ fallback을 강제하고, `CODE_MAP_PYTHON`은 그 인터프리터를, `CODE_MAP
 **설치:** `npm install -g @annyeong844/code-map@next`(RC 채널) ·
 `npm install -g github:annyeong844/map`(npm 릴리스 전) · 또는 clone + `npm install && npm link`.
 모두 `map`과 `map-mcp`를 제공.
-`github:` 경로는 소스 전용이라 JavaScript는 npm이 자동 빌드하고, Python은 네이티브 추출기를
-별도로 준비하지 않으면 아래의 stdlib fallback을 사용합니다.
+`github:` 경로는 소스 전용이지만 JavaScript는 install lifecycle 없이 프리빌트로 제공하고,
+Python은 네이티브 추출기를 별도로 준비하지 않으면 아래의 stdlib fallback을 사용합니다.
 
 `oxc-parser`에는 OS별 native binding이 있으므로 Windows와 WSL이 하나의 `node_modules`를
 공유하면 안 됩니다. 특히 WSL의 `map-mcp`를 `/mnt/c` 아래 Windows checkout에 `npm link`하면

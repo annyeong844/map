@@ -9,7 +9,7 @@
  * exact spot. What the spot *means* is never the map's claim.
  */
 
-export const INDEX_VERSION = 17;
+export const INDEX_VERSION = 18;
 /** Entries have been globally ordered by file, then line, since this format. */
 export const ORDERED_ENTRIES_VERSION = 13;
 
@@ -115,12 +115,18 @@ export interface MapIndex {
    */
   fileStats: Record<string, FileStat>;
   /**
-   * Per-file import/re-export edges (`{ source, name }`), cached so incremental
-   * rebuilds can recompute global fan-in without re-reading unchanged files.
+   * Per-file import/re-export edges, cached so incremental rebuilds can
+   * recompute global fan-in without re-reading unchanged files. A renamed
+   * re-export keeps its exposed `name` and original `sourceName`.
    */
   fileImports: Record<
     string,
-    { source: string; name: string; reexport?: boolean }[]
+    {
+      source: string;
+      name: string;
+      sourceName?: string;
+      reexport?: boolean;
+    }[]
   >;
   entries: MapEntry[];
 }

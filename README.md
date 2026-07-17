@@ -37,7 +37,7 @@ small, exact, drift-proof. That's the whole idea.
 | 🎯 **Never silently wrong**      | After heavy edits with no re-index, `read` re-anchors on the signature line: **0 silently-wrong bytes** (a naive "line number" cache is ~100% wrong). It returns the right code or tells you it can't — never the wrong bytes.                                                                                                                                                       |
 | ⚡ **Fewer tokens, fewer steps** | Direct known-ref run (**GPT-5.6 Sol, pass@30, 180 tasks, forced real-`rg` baseline**): **−22.4% effective input, −26.3% raw input, −14.7% time, −67.9% calls**, with semantic correctness tied. A newer **paired n=10 multi-stage pilot** measured **−31.8% effective / −40.4% raw input, −14.7% time, and −74.6% calls** across 240 scored stages; pass@30 confirmation is pending. |
 | 🧭 **Routing is the lever**      | Agents won't reach for `read` on their own (~17%). The bundled **plugin/skill** makes them: it flips discovery from a _loss_ to **−31%** by killing the double-call, and turns vague usage (erratic, **+61%** worse on one task) into a steady win — **30/30 pass**.                                                                                                                 |
-| 🧩 **Tiny & drop-in**            | Node + **one** dependency (`oxc-parser`), no build step. TS/JS **and** Python. MCP server + a one-line skill — install for Claude, Codex, grok, or Antigravity.                                                                                                                                                                                                                      |
+| 🧩 **Tiny & drop-in**            | Node + **one installed runtime dependency** (`oxc-parser`), no manual build step. TS/JS **and** Python. MCP server + a one-line skill — install for Claude, Codex, grok, or Antigravity.                                                                                                                                                                                             |
 
 > **Honest about the edges** (this repo's whole point): code-map does **not** beat `grep` at
 > _searching_ — it ties, so keep grepping. And it's **not** a universal token-saver — the win
@@ -67,7 +67,8 @@ notes.
 ```bash
 # 1. install the release candidate (`next` after the first npm release)
 npm install -g @annyeong844/code-map@next
-# Before that release exists: npm install -g github:annyeong844/map
+# Before that release exists (verified prebuilt JS from GitHub):
+npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz
 
 # 2. wire both the routing plugin/rules and MCP (dry-run without --apply)
 map setup codex --apply
@@ -238,8 +239,9 @@ is resident after a build, and packaged installs need no Python runtime. Honest 
 <details>
 <summary><b>🔌 Wiring it for real (install options + the efficiency win)</b></summary>
 
-**Requirements:** Node ≥ 23.6 (runs TypeScript directly, no build), one npm runtime dep
-(`oxc-parser`); `ripgrep` used for the file walk when present. Supported packages include the
+**Requirements:** Node ≥ 23.6, one installed npm runtime dependency (`oxc-parser`); `ripgrep`
+used for the file walk when present. Published tarballs need no install-time build. The temporary
+GitHub source route uses the same reviewed `dist`, committed and checked against source in CI. Supported packages include the
 native Python extractor. Release CI builds and executes prebuilt binaries for Windows x64,
 Linux x64/arm64 (static musl), and macOS x64/arm64; npm installs never compile Rust. On an
 unsupported/source-only install, Python 3 is auto-detected as
@@ -251,8 +253,12 @@ For a native WSL install, check `node --version` _inside WSL_—a current Window
 upgrade a stale WSL Node, and code-map requires ≥23.6 in the environment that launches it.
 
 **Install:** `npm install -g @annyeong844/code-map@next` (RC channel) ·
-`npm install -g github:annyeong844/map` (before npm release) · or clone + `npm install && npm link`.
+`npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz` (before npm release) · or clone + `npm install && npm link`.
 All expose `map` and `map-mcp`.
+The GitHub archive route is source-only: its JavaScript is prebuilt without an install lifecycle script,
+while Python uses the documented stdlib fallback unless you explicitly stage a native extractor.
+Do not substitute npm's `github:annyeong844/map` Git-dependency shorthand: npm 11.18 can return
+success while leaving its global package junction pointed at a deleted preparation directory.
 
 `oxc-parser` includes an OS-native binding, so Windows and WSL must not share one
 `node_modules` tree. In particular, never `npm link` a WSL `map-mcp` to a Windows checkout under

@@ -45,7 +45,7 @@ type BoundedCacheText = {
   oversized: boolean;
 };
 
-export interface ResultCacheOptions {
+interface ResultCacheOptions {
   directory: string;
   schema: number;
   maxBytes: number;
@@ -72,7 +72,7 @@ export interface CachedOracleResult extends Record<string, unknown> {
   note?: string;
 }
 
-export type ResultCacheLookup =
+type ResultCacheLookup =
   | { hit: false }
   | { hit: true; value: CachedOracleResult };
 
@@ -621,7 +621,7 @@ type SourceIndex = {
   readError: string | null;
 };
 
-export type SourceLineResult = { preview: string; readError: string | null };
+type SourceLineResult = { preview: string; readError: string | null };
 
 export class SourceLineCache {
   private readonly cache: ByteLru<string, SourceIndex>;

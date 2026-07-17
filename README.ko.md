@@ -37,7 +37,7 @@ code-map이 옆에 있으면 에이전트는 그냥:
 | 🎯 **조용히 틀리지 않음** | 대량 편집 후 재인덱싱 없이도 `read`는 시그니처 줄로 재앵커링: **조용히-틀린 바이트 0개** (순진한 "줄번호" 캐시는 ~100% 틀림). 맞는 코드를 주거나 _못 준다고 말할 뿐_, 절대 엉뚱한 바이트를 안 줍니다.                                                                                                                                          |
 | ⚡ **토큰·단계 절감**     | 직접 기지-ref 실험(**GPT-5.6 Sol, pass@30, 180태스크, 실제 `rg` 강제 기준선**): **effective 입력 −22.4%, raw 입력 −26.3%, 시간 −14.7%, 호출 −67.9%**, 의미 정답률 동률. 더 최신 **다단 워크플로 paired n=10 파일럿**은 240개 채점 단계에서 **effective −31.8% / raw −40.4%, 시간 −14.7%, 호출 −74.6%**였고, pass@30 확인은 아직 진행 전입니다. |
 | 🧭 **라우팅이 레버**      | 에이전트는 스스로 `read`를 잘 안 씀(~17%). 동봉 **plugin/skill**이 그걸 시킴: discovery를 *손해*에서 **−31%**로 뒤집고(이중호출 제거), 들쭉날쭉한 사용(한 시나리오 **+61%** 손해)을 안정적 승리로(**30/30 pass**).                                                                                                                             |
-| 🧩 **가볍고 drop-in**     | Node + 의존성 **1개**(`oxc-parser`), 빌드 단계 없음. TS/JS **그리고** Python. MCP 서버 + 한 줄 skill — Claude·Codex·grok·Antigravity에 설치.                                                                                                                                                                                                   |
+| 🧩 **가볍고 drop-in**     | Node + 설치 후 런타임 의존성 **1개**(`oxc-parser`), 수동 빌드 단계 없음. TS/JS **그리고** Python. MCP 서버 + 한 줄 skill — Claude·Codex·grok·Antigravity에 설치.                                                                                                                                                                               |
 
 > **경계에 대해 정직하게** (이 레포의 핵심): code-map은 *검색*에서 `grep`을 못 이깁니다 —
 > 동급이라 grep은 그냥 쓰세요. 그리고 _어디서나_ 토큰을 줄이는 마법도 아닙니다 — 기지 ref
@@ -65,7 +65,8 @@ named export는 deep import를 포함해 패키지 호환 표면입니다. 저�
 ```bash
 # 1. 릴리스 후보 설치 (첫 npm 릴리스 뒤에는 `next` 채널)
 npm install -g @annyeong844/code-map@next
-# 그 전에는: npm install -g github:annyeong844/map
+# 그 전에는(GitHub의 검증된 프리빌트 JS 사용):
+npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz
 
 # 2. 라우팅 plugin/rules와 MCP를 함께 배선 (--apply 없이는 dry-run)
 map setup codex --apply
@@ -232,8 +233,9 @@ Python 런타임도 필요 없습니다. 정직한 범위: namespace / `export *
 <details>
 <summary><b>🔌 실전 배선 (설치 옵션 + 효율 이득)</b></summary>
 
-**요구사항:** Node ≥ 23.6(TypeScript 직접 실행, 빌드 없음), npm 런타임 의존성 1개
-(`oxc-parser`); 파일 walk엔 `ripgrep`이 있으면 사용. 지원되는 정식 패키지에는 네이티브 Python
+**요구사항:** Node ≥ 23.6, 설치 후 npm 런타임 의존성 1개(`oxc-parser`); 파일 walk엔 `ripgrep`이
+있으면 사용. 정식 tarball은 설치 중 빌드하지 않고, 임시 GitHub 소스 경로도 CI에서 소스와 대조한
+동일한 `dist`를 사용합니다. 지원되는 정식 패키지에는 네이티브 Python
 추출기가 포함됩니다. 릴리스 CI가 Windows x64, Linux x64/arm64(정적 musl), macOS x64/arm64
 프리빌트를 각각 빌드·실행 검증하며 npm 설치 중에는 Rust를 컴파일하지 않습니다. 미지원/소스 전용
 설치에서는 Python 3을 Unix의 `python3`/`python`,
@@ -244,8 +246,12 @@ fallback을 강제하고, `CODE_MAP_PYTHON`은 그 인터프리터를, `CODE_MAP
 낡은 WSL Node는 그대로이고, 실제 실행 환경의 Node가 23.6 이상이어야 합니다.
 
 **설치:** `npm install -g @annyeong844/code-map@next`(RC 채널) ·
-`npm install -g github:annyeong844/map`(npm 릴리스 전) · 또는 clone + `npm install && npm link`.
+`npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz`(npm 릴리스 전) · 또는 clone + `npm install && npm link`.
 모두 `map`과 `map-mcp`를 제공.
+GitHub archive 경로는 소스 전용이지만 JavaScript는 install lifecycle 없이 프리빌트로 제공하고,
+Python은 네이티브 추출기를 별도로 준비하지 않으면 아래의 stdlib fallback을 사용합니다.
+npm의 `github:annyeong844/map` Git-dependency 축약형으로 바꾸면 안 됩니다. npm 11.18은 성공을
+반환하고도 삭제된 준비 디렉터리를 가리키는 전역 junction을 남길 수 있습니다.
 
 `oxc-parser`에는 OS별 native binding이 있으므로 Windows와 WSL이 하나의 `node_modules`를
 공유하면 안 됩니다. 특히 WSL의 `map-mcp`를 `/mnt/c` 아래 Windows checkout에 `npm link`하면

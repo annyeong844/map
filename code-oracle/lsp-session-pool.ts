@@ -13,7 +13,7 @@ import {
 const MINUTE_MS = 60_000;
 const DEFAULT_SESSION_IDLE_MINUTES = 10;
 
-export interface LspSessionPoolOptions {
+interface LspSessionPoolOptions {
   maxResident?: number;
   maxActive?: number;
   idleMs?: number;
@@ -25,7 +25,7 @@ type SessionEntry = {
   idleTimer: NodeJS.Timeout | null;
 };
 
-export type SessionLease = {
+type SessionLease = {
   session: LspSession;
   release: () => void;
 };

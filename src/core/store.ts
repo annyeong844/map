@@ -81,6 +81,7 @@ function isImportEdge(value: unknown): boolean {
     isRecord(value) &&
     typeof value.source === 'string' &&
     typeof value.name === 'string' &&
+    hasOnlyOptionalType(value, ['sourceName'], 'string') &&
     hasOnlyOptionalType(value, ['reexport'], 'boolean')
   );
 }

@@ -386,7 +386,10 @@ function cachedResult(index: MapIndex, key: string): Scored[] | undefined {
 
 function rememberResult(index: MapIndex, key: string, scored: Scored[]): void {
   let cache = resultCaches.get(index);
-  if (!cache) resultCaches.set(index, (cache = new Map()));
+  if (!cache) {
+    cache = new Map<string, Scored[]>();
+    resultCaches.set(index, cache);
+  }
   cache.set(key, scored);
   if (cache.size > RESULT_CACHE_SIZE) {
     const oldest = cache.keys().next().value;

@@ -294,6 +294,37 @@ test('a local declaration exported by list stays one real, unambiguous symbol', 
   assert.equal(read(index, 'local').status, 'exact');
 });
 
+test('export lists promote every overload and merged declaration range', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/overloads.ts': [
+        'function f(value: string): string;',
+        'function f(value: number): number;',
+        'function f(value: string | number) { return value; }',
+        'interface Merged { value: number }',
+        'namespace Merged { export const tag = "merged"; }',
+        'export { f, f as publicF, Merged };',
+        '',
+      ].join('\n'),
+    }),
+  });
+  const overloads = index.entries.filter(
+    (entry) => entry.file === 'src/overloads.ts' && entry.name === 'f',
+  );
+  assert.equal(overloads.length, 3);
+  assert.ok(overloads.every((entry) => entry.visibility === undefined));
+  const aliasOverloads = index.entries.filter(
+    (entry) => entry.file === 'src/overloads.ts' && entry.name === 'publicF',
+  );
+  assert.equal(aliasOverloads.length, 3);
+  assert.ok(aliasOverloads.every((entry) => entry.kind === 'ExportSpecifier'));
+  const merged = index.entries.filter(
+    (entry) => entry.file === 'src/overloads.ts' && entry.name === 'Merged',
+  );
+  assert.equal(merged.length, 2);
+  assert.ok(merged.every((entry) => entry.visibility === undefined));
+});
+
 test('saved indexes rebase their root portably, including legacy conventional indexes', async () => {
   const root = repo({ 'src/m.ts': SRC });
   const path = join(root, '.map-index.json');
@@ -1275,11 +1306,25 @@ test('read preserves direct top-level export syntax for every declaration shape'
   const declarations = {
     alpha: 'export function alpha(): number { return 1; }',
     Beta: 'export class Beta { method(): number { return 2; } }',
+    Decorated: '@sealed\nexport class Decorated {}',
     gamma: 'export const gamma = 3, delta = 4;',
     delta: 'export const gamma = 3, delta = 4;',
     Shape: 'export interface Shape { value: number }',
     Alias: 'export type Alias = string | number;',
     Choice: 'export enum Choice { One }',
+    ambient: 'export declare function ambient(value: number): void;',
+    boundOne:
+      'export const { boundOne, nested: { boundTwo }, ...boundRest } = source;',
+    boundTwo:
+      'export const { boundOne, nested: { boundTwo }, ...boundRest } = source;',
+    boundRest:
+      'export const { boundOne, nested: { boundTwo }, ...boundRest } = source;',
+    firstBound:
+      'export const [firstBound, , thirdBound = 3, ...tailBound] = values;',
+    thirdBound:
+      'export const [firstBound, , thirdBound = 3, ...tailBound] = values;',
+    tailBound:
+      'export const [firstBound, , thirdBound = 3, ...tailBound] = values;',
     omega: 'export default function omega(): number { return 5; }',
   } as const;
   const root = repo({
@@ -1328,6 +1373,31 @@ test('class methods are indexed with exact coordinates', async () => {
   const r = read(index, bar.id);
   assert.equal(r.status, 'exact');
   assert.match(r.raw, /bar\(n: number\): number/);
+});
+
+test('dynamic computed class keys do not invent method identities', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/computed.ts':
+        'const key = "dynamic";\nexport class Computed {\n  [key](): void {}\n  ["fixed"](): void {}\n  [""](): void {}\n}\n',
+    }),
+  });
+  assert.equal(
+    index.entries.some(
+      (entry) => entry.className === 'Computed' && entry.name === 'key',
+    ),
+    false,
+  );
+  const fixed = index.entries.find(
+    (entry) => entry.className === 'Computed' && entry.name === 'fixed',
+  );
+  assert.equal(fixed?.kind, 'ClassMethod');
+  assert.match(read(index, fixed!.id).raw ?? '', /^\["fixed"\]/);
+  const empty = index.entries.find(
+    (entry) => entry.className === 'Computed' && entry.name === '',
+  );
+  assert.equal(empty?.kind, 'ClassMethod');
+  assert.match(read(index, empty!.id).raw ?? '', /^\[""\]/);
 });
 
 test('read re-anchors via searchText after the file drifts', async () => {
@@ -1509,13 +1579,19 @@ test('intraRefs distinguishes dead code from a merely-dead export', async () => 
   assert.ok((reallyDead.intraRefs ?? 0) <= 1, 'reallyDead used nowhere');
 });
 
-test('default-exported function/class keeps real kind; default class methods are indexed', async () => {
+test('named default declarations keep real kinds and every class method shape is indexed', async () => {
   const { index } = await buildIndex({
     root: repo({
       'src/w.ts': 'export default function widget(): number { return 1; }\n',
       'src/c.ts':
         'export default class Bar {\n  greet(): string { return "hi"; }\n}\n',
+      'src/shape.ts':
+        'export default interface WidgetShape { value: number }\n',
+      'src/abstract.ts':
+        'export default abstract class AbstractWidget {\n  abstract run(): void;\n  #hidden(): void {}\n}\n',
       'src/anon.ts': 'export default function (): void {}\n',
+      'src/anon-class.ts':
+        'export default class {\n  act(): number { return 1; }\n}\n',
     }),
   });
   // #2: real AST kind, not 'default' (so --kind filters work); locatable by name.
@@ -1527,6 +1603,10 @@ test('default-exported function/class keeps real kind; default class methods are
     index.entries.find((e) => e.name === 'Bar')?.kind,
     'ClassDeclaration',
   );
+  const shape = index.entries.find((e) => e.name === 'WidgetShape');
+  assert.equal(shape?.kind, 'TSInterfaceDeclaration');
+  assert.equal(shape?.default, true);
+  assert.match(read(index, shape!.id).raw ?? '', /^export default interface/);
   // #1: methods of a default-exported class are extracted.
   const greet = index.entries.find((e) => e.name === 'greet');
   assert.ok(greet && greet.className === 'Bar', 'default class method indexed');
@@ -1535,10 +1615,26 @@ test('default-exported function/class keeps real kind; default class methods are
   const hierarchicalRead = read(index, 'src/c.ts#Bar/greet');
   assert.equal(hierarchicalRead.status, 'exact');
   assert.match(hierarchicalRead.raw ?? '', /^greet\(\): string/);
-  // Anonymous default still recorded as 'default'.
-  assert.ok(
-    index.entries.some((e) => e.name === 'default' && e.kind === 'default'),
+  const abstractMethod = index.entries.find(
+    (e) => e.name === 'run' && e.className === 'AbstractWidget',
   );
+  assert.equal(abstractMethod?.kind, 'ClassMethod');
+  assert.match(read(index, abstractMethod!.id).raw ?? '', /^abstract run\(\)/);
+  const privateMethod = index.entries.find(
+    (e) => e.name === 'hidden' && e.className === 'AbstractWidget',
+  );
+  assert.equal(privateMethod?.visibility, 'private');
+  assert.match(read(index, privateMethod!.id).raw ?? '', /^#hidden\(\)/);
+  const anonymousFunction = index.entries.find(
+    (e) => e.file === 'src/anon.ts' && e.name === 'default',
+  );
+  assert.equal(anonymousFunction?.kind, 'FunctionDeclaration');
+  assert.equal(anonymousFunction?.default, true);
+  const anonymousMethod = index.entries.find(
+    (e) => e.file === 'src/anon-class.ts' && e.name === 'act',
+  );
+  assert.equal(anonymousMethod?.className, 'default');
+  assert.equal(read(index, 'src/anon-class.ts#default/act').status, 'exact');
 });
 
 test('read --snippet designates a sub-symbol char range and flags intra-symbol ambiguity', async () => {
@@ -1843,4 +1939,217 @@ test('fan-in propagates through a barrel re-export to the real definition', asyn
     2,
     'two consumers importing via the barrel credit the real definition',
   );
+});
+
+test('fan-in follows renamed re-export chains to the source identity', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/real.ts': 'export function alpha() { return 1 }\n',
+      'src/first.ts': "export { alpha as beta } from './real.ts'\n",
+      'src/second.ts': "export { beta as gamma } from './first.ts'\n",
+      'src/via-import.ts':
+        "import { alpha as local } from './real.ts'\nexport { local as delta }\n",
+      'src/a.ts': "import { gamma } from './second.ts'\ngamma()\n",
+      'src/b.ts': "import { gamma } from './second.ts'\ngamma()\n",
+      'src/c.ts': "import { delta } from './via-import.ts'\ndelta()\n",
+    }),
+  });
+  const alpha = index.entries.find(
+    (entry) => entry.file === 'src/real.ts' && entry.name === 'alpha',
+  );
+  assert.equal(
+    alpha?.fanIn,
+    4,
+    'three downstream consumers plus via-import.ts itself import alpha',
+  );
+  assert.deepEqual(index.fileImports['src/first.ts'], [
+    {
+      source: './real.ts',
+      name: 'beta',
+      sourceName: 'alpha',
+      reexport: true,
+    },
+  ]);
+  assert.deepEqual(index.fileImports['src/second.ts'], [
+    {
+      source: './first.ts',
+      name: 'gamma',
+      sourceName: 'beta',
+      reexport: true,
+    },
+  ]);
+  assert.deepEqual(index.fileImports['src/via-import.ts'], [
+    { source: './real.ts', name: 'alpha' },
+    {
+      source: './real.ts',
+      name: 'delta',
+      sourceName: 'alpha',
+      reexport: true,
+    },
+  ]);
+});
+
+test('namespace imports stay dependency edges and namespace exports stay local symbols', async () => {
+  const directSource = "export * as api from './real.ts'";
+  const indirectSource =
+    "import * as ns from './real.ts';\nexport { ns as sdk };";
+  const { index } = await buildIndex({
+    root: repo({
+      'src/real.ts': 'export function alpha() { return 1 }\n',
+      'src/direct.ts': `${directSource}\n`,
+      'src/indirect.ts': `${indirectSource}\n`,
+      'src/a.ts': "import { api } from './direct.ts'\napi.alpha()\n",
+      'src/b.ts': "import { sdk } from './indirect.ts'\nsdk.alpha()\n",
+    }),
+  });
+  const api = index.entries.find(
+    (entry) => entry.file === 'src/direct.ts' && entry.name === 'api',
+  );
+  const sdk = index.entries.find(
+    (entry) => entry.file === 'src/indirect.ts' && entry.name === 'sdk',
+  );
+  assert.equal(api?.kind, 'ExportNamespaceSpecifier');
+  assert.equal(api?.fanIn, 1);
+  assert.equal(read(index, api!.id).raw, directSource);
+  assert.equal(sdk?.kind, 'ExportNamespaceSpecifier');
+  assert.equal(sdk?.fanIn, 1);
+  assert.match(read(index, sdk!.id).raw ?? '', /^export \{ ns as sdk \};$/);
+  assert.deepEqual(index.fileImports['src/direct.ts'], [
+    { source: './real.ts', name: '*' },
+  ]);
+  assert.deepEqual(index.fileImports['src/indirect.ts'], [
+    { source: './real.ts', name: '*' },
+  ]);
+  assert.equal(
+    index.entries.find(
+      (entry) => entry.file === 'src/real.ts' && entry.name === 'alpha',
+    )?.fanIn,
+    0,
+    'namespace property calls are not misreported as named imports',
+  );
+});
+
+test('string exports, import-equals, side effects, and ambient module forms stay visible', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/dep.ts':
+        'const sourceName = 1; const empty = 2; export { sourceName as "source-name", empty as "" };\n',
+      'src/string-local.ts':
+        'const local = 1; export { local as "kebab-name" };\n',
+      'src/string-forward.ts':
+        'export { "source-name" as localName, "" as emptyName } from "./dep.ts";\n',
+      'src/string-consumer.ts':
+        'import { emptyName } from "./string-forward.ts";\nvoid emptyName;\n',
+      'src/string-direct.ts':
+        'import { "" as emptyLocal } from "./dep.ts";\nvoid emptyLocal;\n',
+      'src/empty-namespace.ts': 'export * as "" from "./dep.ts";\n',
+      'src/empty-namespace-consumer.ts':
+        'import { "" as emptyNamespace } from "./empty-namespace.ts";\nvoid emptyNamespace;\n',
+      'src/empty-module.d.ts':
+        'declare module "" { export const value: number; }\n',
+      'src/side-effect.ts': 'import "./dep.ts";\nexport const ready = true;\n',
+      'src/import-equals.ts':
+        'import Alias = require("./dep.ts");\nexport { Alias as Public };\n',
+      'src/export-import.ts': 'export import Direct = require("./dep.ts");\n',
+      'src/export-assignment.ts':
+        'declare function factory(): void;\nexport = factory;\n',
+      'src/global.d.ts': 'export as namespace GlobalLib;\n',
+    }),
+  });
+
+  const stringName = index.entries.find(
+    (entry) =>
+      entry.file === 'src/string-local.ts' && entry.name === 'kebab-name',
+  );
+  assert.equal(stringName?.kind, 'ExportSpecifier');
+  assert.match(read(index, stringName!.id).raw ?? '', /^const local = 1/);
+  assert.deepEqual(index.fileImports['src/string-forward.ts'], [
+    {
+      source: './dep.ts',
+      name: 'localName',
+      sourceName: 'source-name',
+      reexport: true,
+    },
+    {
+      source: './dep.ts',
+      name: 'emptyName',
+      sourceName: '',
+      reexport: true,
+    },
+  ]);
+  assert.deepEqual(index.fileImports['src/string-direct.ts'], [
+    { source: './dep.ts', name: '' },
+  ]);
+  const emptyName = index.entries.find(
+    (entry) => entry.file === 'src/dep.ts' && entry.name === '',
+  );
+  assert.equal(emptyName?.kind, 'ExportSpecifier');
+  assert.equal(emptyName?.fanIn, 2);
+  assert.equal(read(index, emptyName!.id).raw, 'const empty = 2;');
+  const emptyNamespace = index.entries.find(
+    (entry) => entry.file === 'src/empty-namespace.ts' && entry.name === '',
+  );
+  assert.equal(emptyNamespace?.kind, 'ExportNamespaceSpecifier');
+  assert.equal(emptyNamespace?.fanIn, 1);
+  assert.equal(
+    read(index, emptyNamespace!.id).raw,
+    'export * as "" from "./dep.ts";',
+  );
+  assert.deepEqual(index.fileImports['src/empty-namespace.ts'], [
+    { source: './dep.ts', name: '*' },
+  ]);
+  const emptyModule = index.entries.find(
+    (entry) => entry.file === 'src/empty-module.d.ts' && entry.name === '',
+  );
+  assert.equal(emptyModule?.kind, 'TSModuleDeclaration');
+  assert.equal(
+    read(index, emptyModule!.id).raw,
+    'declare module "" { export const value: number; }',
+  );
+  assert.deepEqual(index.fileImports['src/side-effect.ts'], [
+    { source: './dep.ts', name: '*' },
+  ]);
+
+  const publicNamespace = index.entries.find(
+    (entry) => entry.file === 'src/import-equals.ts' && entry.name === 'Public',
+  );
+  assert.equal(publicNamespace?.kind, 'ExportNamespaceSpecifier');
+  assert.deepEqual(index.fileImports['src/import-equals.ts'], [
+    { source: './dep.ts', name: '*' },
+  ]);
+  const directNamespace = index.entries.find(
+    (entry) => entry.file === 'src/export-import.ts' && entry.name === 'Direct',
+  );
+  assert.equal(directNamespace?.kind, 'TSImportEqualsDeclaration');
+  assert.deepEqual(index.fileImports['src/export-import.ts'], [
+    { source: './dep.ts', name: '*' },
+  ]);
+
+  const factory = index.entries.find(
+    (entry) =>
+      entry.file === 'src/export-assignment.ts' && entry.name === 'factory',
+  );
+  assert.equal(factory?.kind, 'TSDeclareFunction');
+  assert.equal(factory?.visibility, undefined);
+  assert.match(read(index, factory!.id).raw ?? '', /^declare function factory/);
+  const globalNamespace = index.entries.find(
+    (entry) => entry.file === 'src/global.d.ts' && entry.name === 'GlobalLib',
+  );
+  assert.equal(globalNamespace?.kind, 'TSNamespaceExportDeclaration');
+  assert.equal(
+    read(index, globalNamespace!.id).raw,
+    'export as namespace GlobalLib;',
+  );
+
+  const persistedPath = join(index.meta.root, '.map-index.json');
+  saveIndex(index, persistedPath);
+  const persisted = loadIndex(persistedPath);
+  assert.deepEqual(
+    persisted.fileImports['src/string-forward.ts'],
+    index.fileImports['src/string-forward.ts'],
+  );
+  const persistedEmpty = persisted.entries.find(
+    (entry) => entry.file === 'src/dep.ts' && entry.name === '',
+  );
+  assert.equal(read(persisted, persistedEmpty!.id).raw, 'const empty = 2;');
 });

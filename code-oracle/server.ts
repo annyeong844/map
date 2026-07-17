@@ -150,7 +150,7 @@ function isImportLine(line: string): boolean {
   return /^\s*import\b/.test(line) || /^\s*(export\b.*\bfrom\b)/.test(line);
 }
 
-export interface OracleCoverage {
+interface OracleCoverage {
   kind:
     | 'checker-resolved'
     | 'checker-confirmed'
@@ -253,7 +253,7 @@ const ORACLE_SOURCE_AT_START = runtimeFileIdentity(ORACLE_SERVER_FILE);
 const ORACLE_RUNTIME_AT_START = runtimeSourceManifest(HERE);
 const ORACLE_SOURCE_DIGEST_AT_START = ORACLE_RUNTIME_AT_START.digest;
 
-export function oracleRuntimeDiagnostics(): {
+function oracleRuntimeDiagnostics(): {
   version: string;
   buildId: string;
   instanceId: string;
@@ -336,7 +336,7 @@ interface AbortableFlight<T> {
   promise: Promise<T>;
 }
 
-export interface StaticInstantiationHint {
+interface StaticInstantiationHint {
   name: string;
   kind: 'constructor' | 'di-use-class';
   file: string;

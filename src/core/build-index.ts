@@ -62,10 +62,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 function isNumberRecord(value: unknown): value is Record<string, number> {
-  return (
-    isRecord(value) &&
-    Object.values(value).every((item) => typeof item === 'number')
-  );
+  return isRecord(value) && Object.values(value).every(isIndexNumber);
 }
 
 function isPyImportEdge(value: unknown): value is ImportEdge {
@@ -73,6 +70,7 @@ function isPyImportEdge(value: unknown): value is ImportEdge {
     isRecord(value) &&
     typeof value.source === 'string' &&
     typeof value.name === 'string' &&
+    (value.sourceName === undefined || typeof value.sourceName === 'string') &&
     (value.reexport === undefined || typeof value.reexport === 'boolean')
   );
 }
@@ -83,15 +81,24 @@ function isPySymbol(value: unknown): value is PySymbolRec {
     typeof value.name === 'string' &&
     typeof value.kind === 'string' &&
     typeof value.file === 'string' &&
-    typeof value.line === 'number' &&
-    typeof value.endLine === 'number' &&
-    typeof value.charStart === 'number' &&
-    typeof value.charEnd === 'number' &&
+    isIndexNumber(value.line) &&
+    value.line >= 1 &&
+    isIndexNumber(value.endLine) &&
+    value.endLine >= value.line &&
+    isIndexNumber(value.charStart) &&
+    isIndexNumber(value.charEnd) &&
+    value.charEnd >= value.charStart &&
     (value.anchorOffset === undefined ||
-      typeof value.anchorOffset === 'number') &&
+      (isIndexNumber(value.anchorOffset) &&
+        value.anchorOffset <= value.charEnd - value.charStart)) &&
     typeof value.searchText === 'string' &&
     typeof value.exported === 'boolean' &&
-    (value.namePath === undefined || typeof value.namePath === 'string')
+    (value.namePath === undefined || typeof value.namePath === 'string') &&
+    (value.className === undefined || typeof value.className === 'string') &&
+    (value.extends === undefined || typeof value.extends === 'string') &&
+    (value.visibility === undefined || typeof value.visibility === 'string') &&
+    (value.static === undefined || typeof value.static === 'boolean') &&
+    (value.default === undefined || typeof value.default === 'boolean')
   );
 }
 
@@ -132,21 +139,109 @@ function isIndexNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
+type NativePyEntry = readonly [
+  name: string,
+  kindIndex: number,
+  charStart: number,
+  charEnd: number,
+  line: number,
+  endLine: number,
+  searchText: string,
+  anchorOffset: number | null,
+  namePath: string | null,
+  className: string | null,
+  extendsName: string | null,
+];
+
+type NativePyFileRecord = readonly [
+  file: string,
+  sourceToken: string,
+  entries: unknown[],
+  imports: unknown[],
+  refs: Record<string, number>,
+];
+
+interface NativePyEnvelope {
+  v: 1;
+  p: unknown[];
+  i: unknown[];
+  m: string[];
+}
+
+function isNativePyEnvelope(value: unknown): value is NativePyEnvelope {
+  return (
+    isRecord(value) &&
+    value.v === 1 &&
+    Array.isArray(value.p) &&
+    Array.isArray(value.i) &&
+    Array.isArray(value.m) &&
+    value.m.every((file) => typeof file === 'string')
+  );
+}
+
+function isNativePyFileRecord(value: unknown): value is NativePyFileRecord {
+  return (
+    Array.isArray(value) &&
+    value.length === NATIVE_PY_FILE_FIELDS &&
+    typeof value[0] === 'string' &&
+    typeof value[1] === 'string' &&
+    Array.isArray(value[2]) &&
+    Array.isArray(value[3]) &&
+    isNumberRecord(value[4])
+  );
+}
+
+function isNativePyImportEdge(
+  value: unknown,
+): value is readonly [source: string, name: string] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === 'string' &&
+    typeof value[1] === 'string'
+  );
+}
+
+function isNativePyEntry(value: unknown): value is NativePyEntry {
+  return (
+    Array.isArray(value) &&
+    value.length === NATIVE_PY_ENTRY_FIELDS &&
+    typeof value[0] === 'string' &&
+    isIndexNumber(value[1]) &&
+    value[1] < NATIVE_PY_KINDS.length &&
+    isIndexNumber(value[2]) &&
+    isIndexNumber(value[3]) &&
+    value[3] >= value[2] &&
+    isIndexNumber(value[4]) &&
+    value[4] >= 1 &&
+    isIndexNumber(value[5]) &&
+    value[5] >= value[4] &&
+    typeof value[6] === 'string' &&
+    (value[7] === null ||
+      (isIndexNumber(value[7]) && value[7] <= value[3] - value[2])) &&
+    (value[8] === null || typeof value[8] === 'string') &&
+    (value[9] === null || typeof value[9] === 'string') &&
+    (value[10] === null || typeof value[10] === 'string')
+  );
+}
+
+function isNativePyInvalidRecord(
+  value: unknown,
+): value is readonly [file: string, sourceToken: string] {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === 'string' &&
+    typeof value[1] === 'string'
+  );
+}
+
 /** Decode the native extractor's file-grouped wire format. Repeated field
  * names and file paths would otherwise dominate its output on large corpora.
  * The validation stays strict because CODE_MAP_PY_NATIVE may point at a
  * user-supplied executable. */
 function decodeNativePyParse(value: unknown): PyParse | null {
-  if (
-    !isRecord(value) ||
-    value.v !== 1 ||
-    !Array.isArray(value.p) ||
-    !Array.isArray(value.i) ||
-    !Array.isArray(value.m) ||
-    !value.m.every((file) => typeof file === 'string')
-  ) {
-    return null;
-  }
+  if (!isNativePyEnvelope(value)) return null;
   const result: PyParse = {
     entries: [],
     fileImports: {},
@@ -157,70 +252,46 @@ function decodeNativePyParse(value: unknown): PyParse | null {
   };
   const seen = new Set<string>();
   for (const record of value.p) {
-    if (
-      !Array.isArray(record) ||
-      record.length !== NATIVE_PY_FILE_FIELDS ||
-      typeof record[0] !== 'string' ||
-      typeof record[1] !== 'string' ||
-      !Array.isArray(record[2]) ||
-      !Array.isArray(record[3]) ||
-      !isNumberRecord(record[4]) ||
-      seen.has(record[0])
-    ) {
+    if (!isNativePyFileRecord(record) || seen.has(record[0])) {
       return null;
     }
     const [file, sourceToken, wireEntries, wireImports, refs] = record;
     seen.add(file);
     const imports: ImportEdge[] = [];
     for (const edge of wireImports) {
-      if (
-        !Array.isArray(edge) ||
-        edge.length !== 2 ||
-        typeof edge[0] !== 'string' ||
-        typeof edge[1] !== 'string'
-      ) {
-        return null;
-      }
+      if (!isNativePyImportEdge(edge)) return null;
       imports.push({ source: edge[0], name: edge[1] });
     }
     for (const entry of wireEntries) {
-      if (
-        !Array.isArray(entry) ||
-        entry.length !== NATIVE_PY_ENTRY_FIELDS ||
-        typeof entry[0] !== 'string' ||
-        !isIndexNumber(entry[1]) ||
-        entry[1] >= NATIVE_PY_KINDS.length ||
-        !isIndexNumber(entry[2]) ||
-        !isIndexNumber(entry[3]) ||
-        entry[3] < entry[2] ||
-        !isIndexNumber(entry[4]) ||
-        entry[4] < 1 ||
-        !isIndexNumber(entry[5]) ||
-        entry[5] < entry[4] ||
-        typeof entry[6] !== 'string' ||
-        !(entry[7] === null || isIndexNumber(entry[7])) ||
-        !(entry[8] === null || typeof entry[8] === 'string') ||
-        !(entry[9] === null || typeof entry[9] === 'string') ||
-        !(entry[10] === null || typeof entry[10] === 'string')
-      ) {
-        return null;
-      }
-      const name = entry[0];
+      if (!isNativePyEntry(entry)) return null;
+      const [
+        name,
+        kindIndex,
+        charStart,
+        charEnd,
+        line,
+        endLine,
+        searchText,
+        anchorOffset,
+        namePath,
+        className,
+        extendsName,
+      ] = entry;
       result.entries.push({
         name,
-        kind: NATIVE_PY_KINDS[entry[1]],
+        kind: NATIVE_PY_KINDS[kindIndex],
         file,
-        charStart: entry[2],
-        charEnd: entry[3],
-        line: entry[4],
-        endLine: entry[5],
-        searchText: entry[6],
+        charStart,
+        charEnd,
+        line,
+        endLine,
+        searchText,
         exported: !name.startsWith('_'),
-        anchorOffset: entry[7] ?? undefined,
-        namePath: entry[8] ?? undefined,
+        anchorOffset: anchorOffset ?? undefined,
+        namePath: namePath ?? undefined,
         visibility: name.startsWith('_') ? 'module-private' : undefined,
-        className: entry[9] ?? undefined,
-        extends: entry[10] ?? undefined,
+        className: className ?? undefined,
+        extends: extendsName ?? undefined,
       });
     }
     result.fileTokens[file] = sourceToken;
@@ -228,13 +299,7 @@ function decodeNativePyParse(value: unknown): PyParse | null {
     result.fileRefs[file] = refs;
   }
   for (const record of value.i) {
-    if (
-      !Array.isArray(record) ||
-      record.length !== 2 ||
-      typeof record[0] !== 'string' ||
-      typeof record[1] !== 'string' ||
-      seen.has(record[0])
-    ) {
+    if (!isNativePyInvalidRecord(record) || seen.has(record[0])) {
       return null;
     }
     const [file, sourceToken] = record;
@@ -549,6 +614,7 @@ function sameImportEdges(before: ImportEdge[], after: ImportEdge[]): boolean {
     if (
       a.source !== b.source ||
       a.name !== b.name ||
+      (a.sourceName ?? a.name) !== (b.sourceName ?? b.name) ||
       !!a.reexport !== !!b.reexport
     ) {
       return false;

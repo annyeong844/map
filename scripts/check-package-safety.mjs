@@ -18,7 +18,6 @@ const allowPathPatterns = [
   /^scripts\/build-native\.mjs$/,
   /^scripts\/check-native-smoke\.mjs$/,
   /^scripts\/stage-native\.mjs$/,
-  /^scripts\/prepare-package\.mjs$/,
   /^scripts\/benchmark\.mjs$/,
   /^scripts\/corpus-lab(?:-config|-worker)?\.mjs$/,
   /^docs\/corpus-lab\.md$/,

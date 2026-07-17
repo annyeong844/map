@@ -24,4 +24,10 @@ test('GitHub installs need no dependency lifecycle approval', () => {
   for (const target of Object.values(manifest.bin)) {
     assert.ok(existsSync(resolve(root, target)), `missing committed ${target}`);
   }
+
+  for (const readme of ['README.md', 'README.ko.md']) {
+    const text = readFileSync(resolve(root, readme), 'utf8');
+    assert.ok(text.includes('/archive/refs/heads/main.tar.gz'));
+    assert.ok(!text.includes('npm install -g github:annyeong844/map'));
+  }
 });

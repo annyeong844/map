@@ -67,7 +67,8 @@ notes.
 ```bash
 # 1. install the release candidate (`next` after the first npm release)
 npm install -g @annyeong844/code-map@next
-# Before that release exists (uses verified prebuilt JS): npm install -g github:annyeong844/map
+# Before that release exists (verified prebuilt JS from GitHub):
+npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz
 
 # 2. wire both the routing plugin/rules and MCP (dry-run without --apply)
 map setup codex --apply
@@ -252,10 +253,12 @@ For a native WSL install, check `node --version` _inside WSL_—a current Window
 upgrade a stale WSL Node, and code-map requires ≥23.6 in the environment that launches it.
 
 **Install:** `npm install -g @annyeong844/code-map@next` (RC channel) ·
-`npm install -g github:annyeong844/map` (before npm release) · or clone + `npm install && npm link`.
+`npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz` (before npm release) · or clone + `npm install && npm link`.
 All expose `map` and `map-mcp`.
-The `github:` route is source-only: its JavaScript is prebuilt without an install lifecycle script,
+The GitHub archive route is source-only: its JavaScript is prebuilt without an install lifecycle script,
 while Python uses the documented stdlib fallback unless you explicitly stage a native extractor.
+Do not substitute npm's `github:annyeong844/map` Git-dependency shorthand: npm 11.18 can return
+success while leaving its global package junction pointed at a deleted preparation directory.
 
 `oxc-parser` includes an OS-native binding, so Windows and WSL must not share one
 `node_modules` tree. In particular, never `npm link` a WSL `map-mcp` to a Windows checkout under

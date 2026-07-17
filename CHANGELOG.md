@@ -4,7 +4,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-- Make global GitHub installs lifecycle-free by committing the small JavaScript `dist` and verifying it against source in tests and CI.
+- Replace the broken npm Git-dependency install with a lifecycle-free GitHub archive route; commit the small JavaScript `dist` and verify both it and the remote archive installation in CI.
 - Preserve the complete `export` / `export default` wrapper in exact top-level symbol reads and force legacy indexes to rebuild.
 - Keep distinct same-line Oracle references, close LSP document overlays after each query transaction, never cache checker zeroes, and stage positive answers until a later snapshot validates their epoch without an extra scan.
 - Make exact `path#name` reads fail closed instead of promoting a different fuzzy symbol, and add slash-delimited lexical refs for class methods and nested Python declarations without breaking legacy canonical IDs.

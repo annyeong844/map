@@ -65,7 +65,8 @@ named export는 deep import를 포함해 패키지 호환 표면입니다. 저�
 ```bash
 # 1. 릴리스 후보 설치 (첫 npm 릴리스 뒤에는 `next` 채널)
 npm install -g @annyeong844/code-map@next
-# 그 전에는(검증된 프리빌트 JS 사용): npm install -g github:annyeong844/map
+# 그 전에는(GitHub의 검증된 프리빌트 JS 사용):
+npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz
 
 # 2. 라우팅 plugin/rules와 MCP를 함께 배선 (--apply 없이는 dry-run)
 map setup codex --apply
@@ -245,10 +246,12 @@ fallback을 강제하고, `CODE_MAP_PYTHON`은 그 인터프리터를, `CODE_MAP
 낡은 WSL Node는 그대로이고, 실제 실행 환경의 Node가 23.6 이상이어야 합니다.
 
 **설치:** `npm install -g @annyeong844/code-map@next`(RC 채널) ·
-`npm install -g github:annyeong844/map`(npm 릴리스 전) · 또는 clone + `npm install && npm link`.
+`npm install -g https://github.com/annyeong844/map/archive/refs/heads/main.tar.gz`(npm 릴리스 전) · 또는 clone + `npm install && npm link`.
 모두 `map`과 `map-mcp`를 제공.
-`github:` 경로는 소스 전용이지만 JavaScript는 install lifecycle 없이 프리빌트로 제공하고,
+GitHub archive 경로는 소스 전용이지만 JavaScript는 install lifecycle 없이 프리빌트로 제공하고,
 Python은 네이티브 추출기를 별도로 준비하지 않으면 아래의 stdlib fallback을 사용합니다.
+npm의 `github:annyeong844/map` Git-dependency 축약형으로 바꾸면 안 됩니다. npm 11.18은 성공을
+반환하고도 삭제된 준비 디렉터리를 가리키는 전역 junction을 남길 수 있습니다.
 
 `oxc-parser`에는 OS별 native binding이 있으므로 Windows와 WSL이 하나의 `node_modules`를
 공유하면 안 됩니다. 특히 WSL의 `map-mcp`를 `/mnt/c` 아래 Windows checkout에 `npm link`하면

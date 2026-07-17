@@ -1,4 +1,7 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface PythonCommand {
   command: string;
@@ -6,10 +9,24 @@ export interface PythonCommand {
   display: string;
 }
 
-interface ResolvePythonOptions {
+export type PythonBackendKind = 'native' | 'stdlib';
+
+export interface PythonBackendCommand extends PythonCommand {
+  kind: PythonBackendKind;
+}
+
+export interface ResolvePythonOptions {
   platform?: NodeJS.Platform;
   override?: string;
   probe?: (command: string, args: string[]) => boolean;
+}
+
+export interface ResolvePythonBackendOptions extends ResolvePythonOptions {
+  arch?: NodeJS.Architecture;
+  backend?: 'auto' | PythonBackendKind;
+  exists?: (path: string) => boolean;
+  nativeOverride?: string;
+  packageRoot?: string;
 }
 
 const defaultProbe = (command: string, args: string[]): boolean => {
@@ -20,12 +37,20 @@ const defaultProbe = (command: string, args: string[]): boolean => {
   return result.status === 0;
 };
 
+let cachedDefaultCommand: PythonCommand | undefined;
+
 /** Find Python 3 without assuming Unix's `python3` spelling on Windows. */
 export function resolvePythonCommand(
   options: ResolvePythonOptions = {},
 ): PythonCommand {
   const override = options.override ?? process.env.CODE_MAP_PYTHON;
   if (override) return { command: override, args: [], display: override };
+
+  const cacheable =
+    options.platform === undefined &&
+    options.override === undefined &&
+    options.probe === undefined;
+  if (cacheable && cachedDefaultCommand) return cachedDefaultCommand;
 
   const platform = options.platform ?? process.platform;
   const probe = options.probe ?? defaultProbe;
@@ -42,10 +67,75 @@ export function resolvePythonCommand(
         ];
 
   for (const candidate of candidates) {
-    if (probe(candidate.command, candidate.args)) return candidate;
+    if (probe(candidate.command, candidate.args)) {
+      if (cacheable) cachedDefaultCommand = candidate;
+      return candidate;
+    }
   }
   throw new Error(
     `Python 3 was not found (tried ${candidates.map((candidate) => candidate.display).join(', ')}). ` +
       'Install Python 3 or set CODE_MAP_PYTHON to its executable.',
   );
+}
+
+const packageRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+);
+
+export function nativePythonBinaryPath(
+  platform: NodeJS.Platform = process.platform,
+  arch: NodeJS.Architecture = process.arch,
+  root = packageRoot,
+): string {
+  const executable =
+    platform === 'win32' ? 'code-map-python.exe' : 'code-map-python';
+  return resolve(root, 'native', 'bin', `${platform}-${arch}`, executable);
+}
+
+/** Prefer the packaged Rust extractor, retaining stdlib Python as a portable fallback. */
+export function resolvePythonBackend(
+  options: ResolvePythonBackendOptions = {},
+): PythonBackendCommand {
+  const requested =
+    options.backend ?? process.env.CODE_MAP_PY_BACKEND ?? 'auto';
+  if (!['auto', 'native', 'stdlib'].includes(requested)) {
+    throw new Error(
+      `Invalid CODE_MAP_PY_BACKEND=${requested}; expected auto, native, or stdlib.`,
+    );
+  }
+
+  const pythonOverride = options.override ?? process.env.CODE_MAP_PYTHON;
+  if (requested === 'stdlib' || (requested === 'auto' && pythonOverride)) {
+    return {
+      kind: 'stdlib',
+      ...resolvePythonCommand({ ...options, override: pythonOverride }),
+    };
+  }
+
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  const nativeOverride =
+    options.nativeOverride ?? process.env.CODE_MAP_PY_NATIVE;
+  const nativePath =
+    nativeOverride ??
+    nativePythonBinaryPath(platform, arch, options.packageRoot ?? packageRoot);
+  const pathExists = options.exists ?? existsSync;
+  if (pathExists(nativePath)) {
+    return {
+      kind: 'native',
+      command: nativePath,
+      args: [],
+      display: nativePath,
+    };
+  }
+  if (requested === 'native') {
+    throw new Error(
+      `Native Python extractor was not found at ${nativePath}. ` +
+        'Run npm run build:native or set CODE_MAP_PY_NATIVE to its executable.',
+    );
+  }
+
+  return { kind: 'stdlib', ...resolvePythonCommand(options) };
 }

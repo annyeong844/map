@@ -324,6 +324,9 @@ test('exact path-scoped read and fuzzy locate inspect only that v13 file range',
         endLine: j + 1,
         searchText: `symbol${n}`,
       };
+      if (file === targetFile && j === perFile - 1) {
+        entry.namePath = `Owner/symbol${n}`;
+      }
       if (file === targetFile) {
         entry.charStart = targetOffset;
         entry.charEnd = targetOffset + raw.length;
@@ -358,6 +361,18 @@ test('exact path-scoped read and fuzzy locate inspect only that v13 file range',
   assert.ok(
     indexedReads <= 3 * Math.ceil(Math.log2(base.length)) + perFile,
     `path read touched ${indexedReads} entries`,
+  );
+
+  prepareLookup(index);
+  indexedReads = 0;
+  const hierarchical = read(
+    index,
+    `${targetFile}#Owner/symbol${targetBase + perFile - 1}`,
+  );
+  assert.equal(hierarchical.status, 'exact');
+  assert.ok(
+    indexedReads <= 3 * Math.ceil(Math.log2(base.length)) + perFile,
+    `hierarchical path read touched ${indexedReads} entries`,
   );
 
   indexedReads = 0;

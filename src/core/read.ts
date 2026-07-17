@@ -17,6 +17,7 @@ import {
   type FileEntryRange,
   getPreparedLookup,
   nextSiblingLine,
+  qualifiedSymbolRef,
 } from './store.ts';
 
 /**
@@ -79,6 +80,29 @@ function exactFileFromRef(ref: string): string | undefined {
   return hash > 0 ? ref.slice(0, hash) : undefined;
 }
 
+function hasIndexedFile(index: MapIndex, file: string): boolean {
+  if (Object.hasOwn(index.fileTokens, file)) return true;
+  if (exactFileEntryRange(index, file)) return true;
+  // Legacy/unordered indexes cannot use the range lookup. Keep strict read
+  // semantics without imposing this scan on current indexes.
+  return index.entries.some((entry) => entry.file === file);
+}
+
+function qualifiedEntryInRange(
+  index: MapIndex,
+  ref: string,
+  range: FileEntryRange,
+): MapEntry | null {
+  let found: MapEntry | null = null;
+  for (let i = range.start; i < range.end; i++) {
+    const entry = index.entries[i];
+    if (qualifiedSymbolRef(entry) !== ref) continue;
+    if (found) return null;
+    found = entry;
+  }
+  return found;
+}
+
 function stateFor(index: MapIndex): RuntimeState {
   const cached = runtimeStates.get(index);
   if (cached) return cached;
@@ -111,7 +135,7 @@ function contextFor(index: MapIndex, refs: string[] = []): ReadContext {
   if (refs.length <= 1 || getPreparedLookup(index)) return context;
 
   const needed = new Set(refs);
-  const byId = new Map<string, MapEntry>();
+  const byExactRef = new Map<string, MapEntry | null>();
   const byName = new Map<string, MapEntry | null>();
   const rangesByFile = new Map<string, FileEntryRange | undefined>();
   const scoped = new Map<
@@ -142,7 +166,13 @@ function contextFor(index: MapIndex, refs: string[] = []): ReadContext {
   }
 
   const inspect = (entry: MapEntry, wanted: Set<string>): void => {
-    if (wanted.has(entry.id)) byId.set(entry.id, entry);
+    const rememberExact = (candidate: string | undefined): void => {
+      if (!candidate || !wanted.has(candidate)) return;
+      if (byExactRef.has(candidate)) byExactRef.set(candidate, null);
+      else byExactRef.set(candidate, entry);
+    };
+    rememberExact(entry.id);
+    rememberExact(qualifiedSymbolRef(entry));
     if (wanted.has(entry.name)) {
       if (byName.has(entry.name)) byName.set(entry.name, null);
       else byName.set(entry.name, entry);
@@ -159,9 +189,8 @@ function contextFor(index: MapIndex, refs: string[] = []): ReadContext {
   }
   for (const ref of needed) {
     context.exactChecked.add(ref);
-    const exact = byId.get(ref);
-    if (exact) {
-      context.resolvedRefs.set(ref, exact);
+    if (byExactRef.has(ref)) {
+      context.resolvedRefs.set(ref, byExactRef.get(ref) ?? null);
     } else if (byName.has(ref)) {
       context.resolvedRefs.set(ref, byName.get(ref) ?? null);
     }
@@ -431,7 +460,7 @@ function readCore(
     const { hits } = locatedFor(index, ref, context);
     const candidates = hits.map((hit) => ({
       line: hit.line,
-      preview: `${hit.id}  ·  ${hit.signature}`,
+      preview: `${hit.id}${hit.namePath ? ` (alias: ${hit.file}#${hit.namePath})` : ''}  ·  ${hit.signature}`,
     }));
     if (hits.length) {
       return {
@@ -500,13 +529,14 @@ function readCore(
   // 2 — file changed: re-anchor on the signature line.
   const hits = indexOfAll(text, entry.searchText);
   if (hits.length === 1) {
-    const start = hits[0];
+    const anchoredStart = hits[0];
+    const start = Math.max(0, anchoredStart - (entry.anchorOffset ?? 0));
     const lines = linesFor(index, entry.file, snapshot);
     const startLine = indexedLineAt(lines, start);
     if (entry.charStart != null && entry.charEnd != null) {
-      const current = relocatedSymbolRange(entry, snapshot, start);
+      const current = relocatedSymbolRange(entry, snapshot, anchoredStart);
       const end =
-        current?.end ?? fallbackRelocatedEnd(index, entry, text, start);
+        current?.end ?? fallbackRelocatedEnd(index, entry, text, anchoredStart);
       const raw = text.slice(start, end);
       return {
         status: 'relocated',
@@ -574,6 +604,17 @@ function resolve(
       context.resolvedRefs.set(ref, exact);
       return exact;
     }
+    const file = exactFileFromRef(ref);
+    const range = file ? exactFileEntryRange(index, file) : undefined;
+    if (range) {
+      const qualified = qualifiedEntryInRange(index, ref, range);
+      context.resolvedRefs.set(ref, qualified);
+      return qualified;
+    }
+    if (file && hasIndexedFile(index, file)) {
+      context.resolvedRefs.set(ref, null);
+      return null;
+    }
     const named = lookup.byName.get(ref);
     if (named) {
       if (Array.isArray(named)) {
@@ -586,6 +627,8 @@ function resolve(
   } else if (!context.exactChecked.has(ref)) {
     let named: MapEntry | null = null;
     let nameAmbiguous = false;
+    let qualified: MapEntry | null = null;
+    let qualifiedAmbiguous = false;
     const file = exactFileFromRef(ref);
     const range = file ? exactFileEntryRange(index, file) : undefined;
     const start = range?.start ?? 0;
@@ -596,10 +639,22 @@ function resolve(
         context.resolvedRefs.set(ref, entry);
         return entry;
       }
+      if (qualifiedSymbolRef(entry) === ref) {
+        if (qualified) qualifiedAmbiguous = true;
+        else qualified = entry;
+      }
       if (entry.name === ref) {
         if (named) nameAmbiguous = true;
         else named = entry;
       }
+    }
+    if (qualifiedAmbiguous) {
+      context.resolvedRefs.set(ref, null);
+      return null;
+    }
+    if (qualified) {
+      context.resolvedRefs.set(ref, qualified);
+      return qualified;
     }
     if (nameAmbiguous) {
       context.resolvedRefs.set(ref, null);
@@ -609,6 +664,15 @@ function resolve(
       context.resolvedRefs.set(ref, named);
       return named;
     }
+  }
+
+  // A repository-relative `path#name` is an exact read contract when `path`
+  // names an indexed file. Fuzzy discovery remains available through locate(),
+  // but read() must never promote a different leaf to an exact source slice.
+  const explicitFile = exactFileFromRef(ref);
+  if (explicitFile && hasIndexedFile(index, explicitFile)) {
+    context.resolvedRefs.set(ref, null);
+    return null;
   }
 
   const located = locatedFor(index, ref, context);

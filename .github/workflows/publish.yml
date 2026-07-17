@@ -9,11 +9,86 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    environment: npm
+  native:
+    name: Native Python / ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            rust_target: x86_64-unknown-linux-musl
+            musl: true
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            rust_target: aarch64-unknown-linux-musl
+            musl: true
+          - os: windows-latest
+            platform: win32-x64
+            rust_target: x86_64-pc-windows-msvc
+            musl: false
+          - os: macos-15-intel
+            platform: darwin-x64
+            rust_target: x86_64-apple-darwin
+            musl: false
+          - os: macos-latest
+            platform: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            musl: false
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install musl linker
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build static Linux extractor
+        if: matrix.musl
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked --manifest-path native/python-extractor/Cargo.toml --target ${{ matrix.rust_target }}
+      - name: Verify static Linux linkage
+        if: matrix.musl
+        shell: bash
+        run: |
+          if readelf -l native/python-extractor/target/${{ matrix.rust_target }}/release/code-map-python | grep -q 'Requesting program interpreter'; then
+            echo 'Linux prebuilt is dynamically linked' >&2
+            exit 1
+          fi
+      - name: Build native extractor
+        if: ${{ !matrix.musl }}
+        run: cargo build --release --locked --manifest-path native/python-extractor/Cargo.toml --target ${{ matrix.rust_target }}
+      - run: node scripts/stage-native.mjs
+        env:
+          CODE_MAP_NATIVE_PLATFORM: ${{ matrix.platform }}
+          CODE_MAP_NATIVE_TARGET: ${{ matrix.rust_target }}
+      - run: node scripts/check-native-smoke.mjs
+        env:
+          CODE_MAP_NATIVE_PLATFORM: ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}
+          path: native/bin/${{ matrix.platform }}
+          if-no-files-found: error
+
+  publish:
+    needs: native
+    runs-on: ubuntu-latest
+    environment: npm
+    env:
+      CODE_MAP_USE_STAGED_NATIVE: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
@@ -22,6 +97,24 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: '*-*'
+          path: native/bin
+      - name: Verify native bundle
+        shell: bash
+        run: |
+          for file in \
+            native/bin/linux-x64/code-map-python \
+            native/bin/linux-arm64/code-map-python \
+            native/bin/darwin-x64/code-map-python \
+            native/bin/darwin-arm64/code-map-python
+          do
+            test -s "$file"
+            chmod +x "$file"
+          done
+          test -s native/bin/win32-x64/code-map-python.exe
+          test "$(find native/bin -type f | wc -l)" -eq 5
       - run: npm ci
       - run: npm run release:check
       - run: npm ci

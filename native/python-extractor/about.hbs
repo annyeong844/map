@@ -1,0 +1,39 @@
+<html lang='en'>
+  <head>
+    <meta charset='utf-8' />
+    <title>code-map native Python extractor — third-party licenses</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        line-height: 1.4;
+        margin: 2rem auto;
+        max-width: 72rem;
+        padding: 0 1rem;
+      }
+      pre {
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Third-party licenses</h1>
+    <p>This file covers the Rust crates linked into code-map's prebuilt native
+      Python extractor.</p>
+    {{#each licenses}}
+      <section>
+        <h2 id='{{id}}'>{{name}}</h2>
+        <p>Used by:</p>
+        <ul>
+          {{#each used_by}}
+            <li>{{crate.name}}
+              {{crate.version}}{{#if crate.repository}}
+                —
+                <a href='{{crate.repository}}'>source</a>{{/if}}</li>
+          {{/each}}
+        </ul>
+        <pre>{{text}}</pre>
+      </section>
+    {{/each}}
+  </body>
+</html>

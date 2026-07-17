@@ -55,12 +55,12 @@ function isMapEntry(value: unknown): value is MapEntry {
     typeof value.searchText === 'string' &&
     hasOnlyOptionalType(
       value,
-      ['className', 'extends', 'visibility', 'definitionId'],
+      ['namePath', 'className', 'extends', 'visibility', 'definitionId'],
       'string',
     ) &&
     hasOnlyOptionalType(
       value,
-      ['endLine', 'charStart', 'charEnd', 'fanIn', 'intraRefs'],
+      ['endLine', 'charStart', 'charEnd', 'anchorOffset', 'fanIn', 'intraRefs'],
       'number',
     ) &&
     hasOnlyOptionalType(value, ['static', 'default'], 'boolean')
@@ -113,13 +113,30 @@ function isMapIndex(value: unknown): value is MapIndex {
     return false;
   }
   const counts = value.meta.counts;
+  const invalidFiles = value.meta.invalidFiles;
+  if (
+    invalidFiles !== undefined &&
+    (!Array.isArray(invalidFiles) ||
+      !invalidFiles.every((file) => typeof file === 'string'))
+  ) {
+    return false;
+  }
   return (
     counts === undefined ||
     (isRecord(counts) &&
       typeof counts.defs === 'number' &&
       typeof counts.methods === 'number' &&
-      typeof counts.privateDefs === 'number')
+      typeof counts.privateDefs === 'number' &&
+      hasOnlyOptionalType(counts, ['nestedDefs'], 'number'))
   );
+}
+
+/** Exact hierarchical alias for declarations whose lexical owner path matters. */
+export function qualifiedSymbolRef(entry: MapEntry): string | undefined {
+  const namePath =
+    entry.namePath ??
+    (entry.className ? `${entry.className}/${entry.name}` : undefined);
+  return namePath ? `${entry.file}#${namePath}` : undefined;
 }
 
 const lookupTables = new WeakMap<MapIndex, LookupTables>();

@@ -110,6 +110,7 @@ cd /path/to/your-repo && map index --root .  # ./.map-index.json 생성
 
 ```bash
 map read "alias-map.ts#buildAliasMap"        # 경로-스코프 이름 → 정확한 슬라이스
+map read "server.py#Outer/Inner/run"          # 중첩 심볼의 정확한 어휘 경로
 map read buildAliasMap                       # 맨이름 (모호하면 에러)
 map read withRetry --snippet "req.copy()"    # 심볼 *안의* char 범위
 map read --refs "getModel,createMessage,withRetry"   # batch: 여러 심볼, 한 콜
@@ -123,6 +124,16 @@ Windows에서 실행 중인 MCP가 네이티브 WSL ext4 레포를 읽을 때는
 `\\wsl.localhost\<distro>\...` UNC 경로를 `root`로 주세요. WSL에서 실행 중인 서버도
 현재 배포판과 일치하는 UNC 표기를 받아들입니다. `ref`는 계속 레포 상대 `path#symbol`로
 주세요.
+실제 파일을 지정한 `path#symbol`은 strict 계약입니다. 정확한 심볼이나 어휘 경로가 없으면
+다른 fuzzy 이름을 조용히 승격하지 않고 후보/실패를 반환합니다. 클래스 메서드와 Python 중첩
+선언은 `path#Outer/Inner/method`도 받으며, 기존 leaf ID도 계속 유효합니다.
+AST로 증명된 Python 모듈 binding—일반/주석 assignment와 PEP 695 `type` alias—도 인덱싱하지만,
+함수 local과 class field는 심볼 표면에 넣지 않습니다.
+exact slice는 UTF-8 소스(UTF-8 BOM 포함)를 요구하며, 다른 인코딩은 잘못 디코딩하거나 missing으로
+숨기지 않고 degraded로 표시합니다.
+Python 슬라이스는 앞의 데코레이터(`@dataclass`, `@property` 등)까지 포함합니다. 저장 중인
+Python 파일이 잠시 문법 오류 상태가 되면 증명된 이전 심볼을 조용히 삭제하지 않고 stale로
+보존하며, 다음 유효한 편집 전까지 CLI와 MCP 진단에 degraded 파일로 표시합니다.
 UNC 레포에서는 Windows 서버가 해당 WSL 배포판의 네이티브 Git에 gitignore-aware 파일
 목록을 요청합니다. 그래서 Windows와 Linux가 같은 파일 집합을 보고 공유 인덱스를 번갈아
 재빌드하지 않습니다.
@@ -208,19 +219,27 @@ _의미_(요약)를 저장하는 지도는 그게 stale 되는 걸 막아야 해
 LLM이 raw 바이트를 매 콜마다 새로 읽고 판정해요.
 
 **좌표는 어디서 오나:** code-map은 소스 트리를 _직접_ 파싱해요(외부 그래프 없음). git-추적
-파일(`git ls-files`, `.gitignore` 존중) → **TS/JS는 `oxc-parser`**, **Python은 stdlib-`ast`
-백엔드** — 둘 다 같은 per-file 기본형(심볼 좌표 + `searchText` 드리프트-앵커 + 콘텐츠 토큰)을
+파일(`git ls-files`, `.gitignore` 존중) → **TS/JS는 `oxc-parser`**, **Python은 패키지에 포함된
+네이티브 Ruff 파서**(정확히 동치인 stdlib-`ast` fallback 포함) — 둘 다 같은 per-file 기본형
+(심볼 좌표 + `searchText` 드리프트-앵커 + 콘텐츠 토큰)을
 냅니다. `fanIn`(cross-file 참조 수)은 맨이름이 둘 이상으로 resolve될 때 *타이브레이크*에만 씀.
-정직한 범위: namespace / `export *` / alias 임포트는 미귀속.
+네이티브 추출기는 한 프로세스 안에서 병렬 파싱하고, 미지원/소스 전용 설치는 메모리 상황에 맞춘
+단기 Python worker로 fallback합니다. 빌드 뒤 남는 상주 파서 프로세스는 없고, 정식 패키지는
+Python 런타임도 필요 없습니다. 정직한 범위: namespace / `export *` / alias 임포트는 미귀속.
 
 </details>
 
 <details>
 <summary><b>🔌 실전 배선 (설치 옵션 + 효율 이득)</b></summary>
 
-**요구사항:** Node ≥ 23.6(TypeScript 직접 실행, 빌드 없음), 런타임 의존성 1개(`oxc-parser`);
-파일 walk엔 `ripgrep`이 있으면 사용. Python 3은 Unix에서 `python3`/`python`, Windows에서
-`py -3`/`python3`/`python` 순으로 자동 탐지하며 `CODE_MAP_PYTHON`으로 덮어쓸 수 있어요.
+**요구사항:** Node ≥ 23.6(TypeScript 직접 실행, 빌드 없음), npm 런타임 의존성 1개
+(`oxc-parser`); 파일 walk엔 `ripgrep`이 있으면 사용. 지원되는 정식 패키지에는 네이티브 Python
+추출기가 포함됩니다. 릴리스 CI가 Windows x64, Linux x64/arm64(정적 musl), macOS x64/arm64
+프리빌트를 각각 빌드·실행 검증하며 npm 설치 중에는 Rust를 컴파일하지 않습니다. 미지원/소스 전용
+설치에서는 Python 3을 Unix의 `python3`/`python`,
+Windows의 `py -3`/`python3`/`python` 순으로 탐지합니다. `CODE_MAP_PY_BACKEND=stdlib`은
+fallback을 강제하고, `CODE_MAP_PYTHON`은 그 인터프리터를, `CODE_MAP_PY_NATIVE`는 별도 네이티브
+실행 파일을 지정합니다. 소스 기여자는 `npm run build:native`로 현재 OS 바이너리를 준비할 수 있어요.
 네이티브 WSL 설치라면 WSL _안에서_ `node --version`을 확인하세요. Windows Node가 최신이어도
 낡은 WSL Node는 그대로이고, 실제 실행 환경의 Node가 23.6 이상이어야 합니다.
 
@@ -405,9 +424,11 @@ _대체_(보완 아님)할 수 있을 때 가장 강합니다.
 ```
 src/
   core/    types · files · extract-symbols (oxc) · fan-in · index-drift · build-index · locate · read · store
-  py/      extract.py   (Python: stdlib ast →같은 per-file 기본형)
+  py/      extract.py   (이식 가능한 Python stdlib fallback)
   cli/     main.ts      (index / read / changed / stats / setup / version)
   mcp/     server.ts    (유일한 `read` 도구, 지연 자동 인덱싱 + 실제 프로세스 진단)
+native/
+  python-extractor/     (핀 고정 Ruff 파서 → 같은 per-file 기본형)
 test/      extract · exact-slice · methods · relocation · anchor-lost · incremental · fan-in
            · snippet-aim · batch · path-traversal 거부 · Python
 ```

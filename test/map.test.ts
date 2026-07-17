@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -22,7 +23,12 @@ import { gitFileListCommand } from '../src/core/files.ts';
 import { autoIndexDecision, scanIndexDrift } from '../src/core/index-drift.ts';
 import { locate } from '../src/core/locate.ts';
 import { changed, read } from '../src/core/read.ts';
-import { getPreparedLookup, loadIndex, saveIndex } from '../src/core/store.ts';
+import {
+  getPreparedLookup,
+  loadIndex,
+  prepareLookup,
+  saveIndex,
+} from '../src/core/store.ts';
 import {
   changedSourceFiles,
   discoverLocalModuleFiles,
@@ -854,9 +860,10 @@ test('MCP source identity diagnostics cover transitive local modules', () => {
     'leaf.ts': 'export const value = 1;\n',
   });
   try {
+    const canonicalRoot = realpathSync(root);
     const files = discoverLocalModuleFiles(join(root, 'entry.ts'));
     assert.deepEqual(
-      files.map((file) => relative(root, file)),
+      files.map((file) => relative(canonicalRoot, file)),
       ['dep.ts', 'entry.ts', 'leaf.ts'],
     );
     const snapshot = sourceIdentitySnapshot(files);
@@ -865,7 +872,7 @@ test('MCP source identity diagnostics cover transitive local modules', () => {
       'export const value = 200; // changed after startup\n',
     );
     assert.deepEqual(
-      changedSourceFiles(snapshot).map((file) => relative(root, file)),
+      changedSourceFiles(snapshot).map((file) => relative(canonicalRoot, file)),
       ['leaf.ts'],
     );
   } finally {
@@ -1230,6 +1237,30 @@ test('locate ranks exact above fuzzy', async () => {
   assert.equal(hits[0].match, 'exact');
 });
 
+test('an exact path ref never promotes a different fuzzy symbol to exact', async () => {
+  const { index } = await buildIndex({
+    root: repo({
+      'src/provider.ts':
+        'export function createDependencyProvider(): string { return "provider"; }\n',
+    }),
+  });
+  const ref = 'src/provider.ts#DependencyProvider';
+
+  for (const prepared of [false, true]) {
+    if (prepared) prepareLookup(index);
+    const result = read(index, ref);
+    assert.notEqual(result.status, 'exact');
+    assert.equal(result.raw, null);
+    assert.notEqual(result.id, 'src/provider.ts#createDependencyProvider');
+  }
+
+  assert.equal(
+    locate(index, 'src/provider.ts#DependencyProvider')[0]?.name,
+    'createDependencyProvider',
+    'explicit discovery remains fuzzy; only read resolution is strict',
+  );
+});
+
 test('read returns the exact source when the file is unchanged', async () => {
   const { index } = await buildIndex({ root: repo({ 'src/m.ts': SRC }) });
   const r = read(index, index.entries.find((e) => e.name === 'alpha')!.id);
@@ -1499,6 +1530,11 @@ test('default-exported function/class keeps real kind; default class methods are
   // #1: methods of a default-exported class are extracted.
   const greet = index.entries.find((e) => e.name === 'greet');
   assert.ok(greet && greet.className === 'Bar', 'default class method indexed');
+  assert.equal(greet.namePath, undefined, 'className already owns the path');
+  assert.equal(greet.id, 'src/c.ts#greet', 'legacy method id stays stable');
+  const hierarchicalRead = read(index, 'src/c.ts#Bar/greet');
+  assert.equal(hierarchicalRead.status, 'exact');
+  assert.match(hierarchicalRead.raw ?? '', /^greet\(\): string/);
   // Anonymous default still recorded as 'default'.
   assert.ok(
     index.entries.some((e) => e.name === 'default' && e.kind === 'default'),

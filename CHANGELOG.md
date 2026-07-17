@@ -6,6 +6,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - Preserve the complete `export` / `export default` wrapper in exact top-level symbol reads and force legacy indexes to rebuild.
 - Keep distinct same-line Oracle references, close LSP document overlays after each query transaction, never cache checker zeroes, and stage positive answers until a later snapshot validates their epoch without an extra scan.
+- Make exact `path#name` reads fail closed instead of promoting a different fuzzy symbol, and add slash-delimited lexical refs for class methods and nested Python declarations without breaking legacy canonical IDs.
+- Preserve Python decorators in fresh and relocated exact slices, retain last-known-good symbols while a Python file is syntax-invalid, show selectable canonical IDs when lexical aliases collide, and make changed-file selection linear.
+- Cut large Python rebuild latency with one exact reference walk plus memory-aware, size-balanced short-lived workers; keep small edits single-process and leave no resident worker behind.
+- Add a pinned, prebuilt Ruff-based Python extractor with exact stdlib-backend parity, bounded in-process parallelism, a file-grouped compact wire format, five smoke-tested release artifacts (static musl on Linux), and an explicit stdlib fallback; preserve CRLF hashes and coordinates in both paths.
+- Index AST-proven Python module assignments, annotations, and PEP 695 type aliases; support UTF-8 BOM and bare-CR source coordinates, report non-UTF-8 source as degraded instead of missing, resolve named imports from `.pyi` modules, and never substitute a later mixin for an unsupported primary base.
 
 ## 0.9.0-rc.1 — 2026-07-14
 

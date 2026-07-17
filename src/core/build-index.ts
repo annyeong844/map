@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { availableParallelism, freemem } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -10,7 +11,10 @@ import {
 } from './extract-symbols.ts';
 import { computeFanIn } from './fan-in.ts';
 import { type IndexDriftScan, scanIndexDrift } from './index-drift.ts';
-import { resolvePythonCommand } from './python-command.ts';
+import {
+  type PythonBackendCommand,
+  resolvePythonBackend,
+} from './python-command.ts';
 import {
   type FileStat,
   INDEX_VERSION,
@@ -25,12 +29,11 @@ import {
   token,
 } from './util.ts';
 
-/** Python parse backend: the stdlib-ast extractor, shelled out once per build.
- * The whole tree is walked for import resolution; only `targets` are parsed
- * (incremental). Returns the same per-file primitives the oxc path does, so the
- * shared entry/fan-in pipeline runs over Python unchanged. A backend failure
- * aborts the build: silently replacing valid Python entries with an empty set
- * would corrupt an incremental index. */
+/** Python parse backend: packaged native Ruff parser, with stdlib AST fallback.
+ * Only `targets` are parsed (incremental); the complete file set is used for
+ * import resolution. Both implementations return the same per-file primitives
+ * as oxc, so the shared entry/fan-in pipeline stays unchanged. A backend failure
+ * aborts the build: silently replacing valid entries would corrupt the index. */
 // Both src/core/build-index.ts and dist/core/build-index.js resolve this to the
 // package's single shipped Python source file.
 const PY_BACKEND = fileURLToPath(
@@ -48,6 +51,7 @@ interface PyParse {
   fileTokens: Record<string, string>;
   fileRefs: Record<string, Record<string, number>>;
   filesMissing: string[];
+  filesInvalid: string[];
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
@@ -83,8 +87,11 @@ function isPySymbol(value: unknown): value is PySymbolRec {
     typeof value.endLine === 'number' &&
     typeof value.charStart === 'number' &&
     typeof value.charEnd === 'number' &&
+    (value.anchorOffset === undefined ||
+      typeof value.anchorOffset === 'number') &&
     typeof value.searchText === 'string' &&
-    typeof value.exported === 'boolean'
+    typeof value.exported === 'boolean' &&
+    (value.namePath === undefined || typeof value.namePath === 'string')
   );
 }
 
@@ -96,6 +103,8 @@ function isPyParse(value: unknown): value is PyParse {
     !isStringRecord(value.fileTokens) ||
     !Array.isArray(value.filesMissing) ||
     !value.filesMissing.every((file) => typeof file === 'string') ||
+    !Array.isArray(value.filesInvalid) ||
+    !value.filesInvalid.every((file) => typeof file === 'string') ||
     !isRecord(value.fileImports) ||
     !isRecord(value.fileRefs)
   ) {
@@ -108,30 +117,230 @@ function isPyParse(value: unknown): value is PyParse {
   );
 }
 
-function runPyBackend(
+const NATIVE_PY_KINDS = [
+  'FunctionDeclaration',
+  'ClassDeclaration',
+  'ClassMethod',
+  'assign-var',
+  'ann-var',
+  'TypeAlias',
+] as const;
+const NATIVE_PY_FILE_FIELDS = 5;
+const NATIVE_PY_ENTRY_FIELDS = 11;
+
+function isIndexNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Decode the native extractor's file-grouped wire format. Repeated field
+ * names and file paths would otherwise dominate its output on large corpora.
+ * The validation stays strict because CODE_MAP_PY_NATIVE may point at a
+ * user-supplied executable. */
+function decodeNativePyParse(value: unknown): PyParse | null {
+  if (
+    !isRecord(value) ||
+    value.v !== 1 ||
+    !Array.isArray(value.p) ||
+    !Array.isArray(value.i) ||
+    !Array.isArray(value.m) ||
+    !value.m.every((file) => typeof file === 'string')
+  ) {
+    return null;
+  }
+  const result: PyParse = {
+    entries: [],
+    fileImports: {},
+    fileTokens: {},
+    fileRefs: {},
+    filesMissing: value.m,
+    filesInvalid: [],
+  };
+  const seen = new Set<string>();
+  for (const record of value.p) {
+    if (
+      !Array.isArray(record) ||
+      record.length !== NATIVE_PY_FILE_FIELDS ||
+      typeof record[0] !== 'string' ||
+      typeof record[1] !== 'string' ||
+      !Array.isArray(record[2]) ||
+      !Array.isArray(record[3]) ||
+      !isNumberRecord(record[4]) ||
+      seen.has(record[0])
+    ) {
+      return null;
+    }
+    const [file, sourceToken, wireEntries, wireImports, refs] = record;
+    seen.add(file);
+    const imports: ImportEdge[] = [];
+    for (const edge of wireImports) {
+      if (
+        !Array.isArray(edge) ||
+        edge.length !== 2 ||
+        typeof edge[0] !== 'string' ||
+        typeof edge[1] !== 'string'
+      ) {
+        return null;
+      }
+      imports.push({ source: edge[0], name: edge[1] });
+    }
+    for (const entry of wireEntries) {
+      if (
+        !Array.isArray(entry) ||
+        entry.length !== NATIVE_PY_ENTRY_FIELDS ||
+        typeof entry[0] !== 'string' ||
+        !isIndexNumber(entry[1]) ||
+        entry[1] >= NATIVE_PY_KINDS.length ||
+        !isIndexNumber(entry[2]) ||
+        !isIndexNumber(entry[3]) ||
+        entry[3] < entry[2] ||
+        !isIndexNumber(entry[4]) ||
+        entry[4] < 1 ||
+        !isIndexNumber(entry[5]) ||
+        entry[5] < entry[4] ||
+        typeof entry[6] !== 'string' ||
+        !(entry[7] === null || isIndexNumber(entry[7])) ||
+        !(entry[8] === null || typeof entry[8] === 'string') ||
+        !(entry[9] === null || typeof entry[9] === 'string') ||
+        !(entry[10] === null || typeof entry[10] === 'string')
+      ) {
+        return null;
+      }
+      const name = entry[0];
+      result.entries.push({
+        name,
+        kind: NATIVE_PY_KINDS[entry[1]],
+        file,
+        charStart: entry[2],
+        charEnd: entry[3],
+        line: entry[4],
+        endLine: entry[5],
+        searchText: entry[6],
+        exported: !name.startsWith('_'),
+        anchorOffset: entry[7] ?? undefined,
+        namePath: entry[8] ?? undefined,
+        visibility: name.startsWith('_') ? 'module-private' : undefined,
+        className: entry[9] ?? undefined,
+        extends: entry[10] ?? undefined,
+      });
+    }
+    result.fileTokens[file] = sourceToken;
+    result.fileImports[file] = imports;
+    result.fileRefs[file] = refs;
+  }
+  for (const record of value.i) {
+    if (
+      !Array.isArray(record) ||
+      record.length !== 2 ||
+      typeof record[0] !== 'string' ||
+      typeof record[1] !== 'string' ||
+      seen.has(record[0])
+    ) {
+      return null;
+    }
+    const [file, sourceToken] = record;
+    seen.add(file);
+    result.fileTokens[file] = sourceToken;
+    result.fileImports[file] = [];
+    result.fileRefs[file] = {};
+    result.filesInvalid.push(file);
+  }
+  return result;
+}
+
+const MAX_PY_SHARDS = 8;
+const PY_BYTES_PER_SHARD = 2_097_152; // 2 MiB of changed source
+const PY_MEMORY_RESERVE = 536_870_912; // leave 512 MiB outside workers
+const PY_MEMORY_PER_SHARD = 134_217_728; // conservative 128 MiB allowance
+
+function partitionPyTargets(
+  targets: string[],
+  stats: ReadonlyMap<string, FileStat | null>,
+): string[][] {
+  let totalBytes = 0;
+  const weighted = targets.map((file, order) => {
+    const bytes = stats.get(file)?.size ?? 0;
+    totalBytes += bytes;
+    return { file, order, bytes };
+  });
+  const availableMemory =
+    typeof process.availableMemory === 'function'
+      ? process.availableMemory()
+      : freemem();
+  const memoryShards = Math.max(
+    1,
+    Math.floor(
+      Math.max(0, availableMemory - PY_MEMORY_RESERVE) / PY_MEMORY_PER_SHARD,
+    ),
+  );
+  const shardCount = Math.min(
+    MAX_PY_SHARDS,
+    availableParallelism(),
+    memoryShards,
+    targets.length,
+    Math.max(1, Math.ceil(totalBytes / PY_BYTES_PER_SHARD)),
+  );
+  if (shardCount <= 1) return [targets];
+
+  // Largest-first greedy packing prevents one generated or god-file from
+  // becoming the serial tail. Sorting is O(files log files); the capped
+  // assignment that follows is O(files).
+  weighted.sort((a, b) => b.bytes - a.bytes || a.order - b.order);
+  const shards = Array.from({ length: shardCount }, () => ({
+    bytes: 0,
+    targets: [] as { file: string; order: number }[],
+  }));
+  for (const target of weighted) {
+    let lightest = shards[0];
+    for (let i = 1; i < shards.length; i++) {
+      if (shards[i].bytes < lightest.bytes) lightest = shards[i];
+    }
+    lightest.bytes += target.bytes;
+    lightest.targets.push(target);
+  }
+  return shards.map((shard) =>
+    shard.targets.sort((a, b) => a.order - b.order).map(({ file }) => file),
+  );
+}
+
+function mergePyParses(parts: PyParse[]): PyParse {
+  const merged: PyParse = {
+    entries: [],
+    fileImports: {},
+    fileTokens: {},
+    fileRefs: {},
+    filesMissing: [],
+    filesInvalid: [],
+  };
+  for (const part of parts) {
+    for (const entry of part.entries) merged.entries.push(entry);
+    Object.assign(merged.fileImports, part.fileImports);
+    Object.assign(merged.fileTokens, part.fileTokens);
+    Object.assign(merged.fileRefs, part.fileRefs);
+    for (const file of part.filesMissing) merged.filesMissing.push(file);
+    for (const file of part.filesInvalid) merged.filesInvalid.push(file);
+  }
+  return merged;
+}
+
+function runPyShard(
+  backend: PythonBackendCommand,
   root: string,
   files: string[],
   targets: string[],
   signal?: AbortSignal,
 ): Promise<PyParse> {
   return new Promise((res, rej) => {
-    let python;
-    try {
-      python = resolvePythonCommand();
-    } catch (error) {
-      rej(
-        error instanceof Error
-          ? error
-          : new Error('Python command resolution failed.', { cause: error }),
-      );
-      return;
-    }
     if (signal?.aborted) {
       rej(new Error('Index build aborted.'));
       return;
     }
-    const p = spawn(python.command, [...python.args, PY_BACKEND, root], {
+    const backendArgs =
+      backend.kind === 'native'
+        ? [...backend.args, root]
+        : [...backend.args, PY_BACKEND, root];
+    const p = spawn(backend.command, backendArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -153,9 +362,17 @@ function runPyBackend(
       if (settled) return;
       settled = true;
       signal?.removeEventListener('abort', onAbort);
+      try {
+        p.kill();
+      } catch {
+        /* already gone */
+      }
       rej(
         new Error(
-          `Python backend failed (${python.display}): ${reason}. Set CODE_MAP_PYTHON to a working Python 3 executable.`,
+          `Python backend failed (${backend.display}): ${reason}. ` +
+            (backend.kind === 'native'
+              ? 'Set CODE_MAP_PY_BACKEND=stdlib to use the portable fallback.'
+              : 'Set CODE_MAP_PYTHON to a working Python 3 executable.'),
         ),
       );
     };
@@ -185,24 +402,80 @@ function runPyBackend(
         const parsed: unknown = JSON.parse(
           Buffer.concat(stdout, stdoutBytes).toString(),
         );
-        if (!isPyParse(parsed)) {
+        let normalized: PyParse | null;
+        if (backend.kind === 'native') {
+          normalized = decodeNativePyParse(parsed);
+        } else {
+          normalized = isPyParse(parsed) ? parsed : null;
+        }
+        if (!normalized) {
           fail('returned JSON with an invalid result shape');
           return;
         }
         settled = true;
         signal?.removeEventListener('abort', onAbort);
-        res(parsed);
+        res(normalized);
       } catch (e) {
         fail(
           `returned invalid JSON${e instanceof Error ? `: ${e.message}` : ''}`,
         );
       }
     });
-    // Node already enumerated the gitignore-aware source set. Hand it to Python
-    // so the backend neither walks the whole repository again nor sees ignored
+    // Node already enumerated the gitignore-aware source set. Hand it to the
+    // backend so it neither walks the whole repository again nor sees ignored
     // Python files that the main index intentionally excluded.
     p.stdin.end(JSON.stringify({ files, targets }));
   });
+}
+
+async function runPyBackend(
+  root: string,
+  files: string[],
+  targets: string[],
+  stats: ReadonlyMap<string, FileStat | null>,
+  signal?: AbortSignal,
+): Promise<PyParse> {
+  let backend: PythonBackendCommand;
+  try {
+    backend = resolvePythonBackend();
+  } catch (error) {
+    throw error instanceof Error
+      ? error
+      : new Error('Python backend resolution failed.', { cause: error });
+  }
+
+  // The native extractor parallelizes within one process. Node-side sharding
+  // would only duplicate process startup and memory; keep it for stdlib Python.
+  if (backend.kind === 'native') {
+    return runPyShard(backend, root, files, targets, signal);
+  }
+
+  const shards = partitionPyTargets(targets, stats);
+  if (shards.length === 1) {
+    return runPyShard(backend, root, files, shards[0], signal);
+  }
+
+  // One failing or cancelled shard tears down its siblings. Workers are
+  // short-lived direct Node children; no resident pool survives the build.
+  const controller = new AbortController();
+  const onAbort = (): void => {
+    controller.abort();
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) controller.abort();
+  try {
+    const parts = await Promise.all(
+      shards.map((targetsInShard) =>
+        runPyShard(backend, root, files, targetsInShard, controller.signal),
+      ),
+    );
+    return mergePyParses(parts);
+  } catch (error) {
+    controller.abort();
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 const READ_CONCURRENCY = 32;
@@ -247,12 +520,16 @@ export interface BuildReport {
   index: MapIndex;
   filesIndexed: number;
   filesMissing: string[];
+  /** Python files whose current text did not parse. */
+  filesInvalid: string[];
   /** Exported top-level symbols. */
   defs: number;
   /** Class methods. */
   methods: number;
   /** Module-private top-level symbols. */
   privateDefs: number;
+  /** Declarations below a top-level function or class, excluding methods. */
+  nestedDefs: number;
   /** Files reused verbatim from the previous index (incremental). */
   reused: number;
   /** Files re-read and re-parsed this build. */
@@ -280,12 +557,22 @@ function sameImportEdges(before: ImportEdge[], after: ImportEdge[]): boolean {
   return true;
 }
 
-const fanInSurfaceKey = (entry: MapEntry): string =>
-  `${entry.name}\0${entry.default ? 1 : 0}`;
+const fanInSurfaceKey = (entry: MapEntry): string | null =>
+  entry.kind === 'ClassMethod' || entry.namePath
+    ? null
+    : `${entry.name}\0${entry.default ? 1 : 0}`;
 
 function sameFanInSurface(before: MapEntry[], after: MapEntry[]): boolean {
-  const oldKeys = new Set(before.map(fanInSurfaceKey));
-  const newKeys = new Set(after.map(fanInSurfaceKey));
+  const oldKeys = new Set<string>();
+  const newKeys = new Set<string>();
+  for (const entry of before) {
+    const key = fanInSurfaceKey(entry);
+    if (key !== null) oldKeys.add(key);
+  }
+  for (const entry of after) {
+    const key = fanInSurfaceKey(entry);
+    if (key !== null) newKeys.add(key);
+  }
   if (oldKeys.size !== newKeys.size) return false;
   for (const key of oldKeys) if (!newKeys.has(key)) return false;
   return true;
@@ -357,23 +644,28 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     if (!counts) {
       let methods = 0;
       let privateDefs = 0;
+      let nestedDefs = 0;
       for (const entry of prev.entries) {
         if (entry.kind === 'ClassMethod') methods++;
+        else if (entry.namePath) nestedDefs++;
         else if (entry.visibility === 'module-private') privateDefs++;
       }
       counts = {
-        defs: prev.entries.length - methods - privateDefs,
+        defs: prev.entries.length - methods - privateDefs - nestedDefs,
         methods,
         privateDefs,
+        nestedDefs,
       };
     }
     return {
       index: prev,
       filesIndexed: files.length,
       filesMissing: [],
+      filesInvalid: prev.meta.invalidFiles ?? [],
       defs: counts.defs,
       methods: counts.methods,
       privateDefs: counts.privateDefs,
+      nestedDefs: counts.nestedDefs ?? 0,
       reused: files.length,
       changed: 0,
       unchanged: true,
@@ -386,6 +678,10 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const fileStats: Record<string, FileStat> = {};
   const fileImports: Record<string, ImportEdge[]> = {};
   const filesMissing: string[] = [];
+  const currentFiles = new Set(files);
+  const filesInvalid = new Set(
+    (prev?.meta.invalidFiles ?? []).filter((file) => currentFiles.has(file)),
+  );
   const usedIds = new Map<string, number>();
 
   const mkId = (
@@ -426,12 +722,14 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
   const pyFiles = files.filter(isPython);
   const pyChanged = changedFiles.filter(isPython);
 
-  // Python files go through the stdlib-ast backend (one batched subprocess, the
-  // gitignore-aware file set supplied by Node); TS/JS goes through oxc.
+  // Python files go through the native extractor when its platform prebuilt is
+  // present; the stdlib fallback keeps the same result contract.
   const pyByFile = new Map<string, PySymbolRec[]>();
+  const pyInvalidFiles = new Set<string>();
   let py: PyParse | null = null;
   if (pyChanged.length) {
-    py = await runPyBackend(root, pyFiles, pyChanged, opts.signal);
+    py = await runPyBackend(root, pyFiles, pyChanged, stats, opts.signal);
+    for (const file of py.filesInvalid) pyInvalidFiles.add(file);
     for (const rec of py.entries) {
       const a = pyByFile.get(rec.file);
       if (a) a.push(rec);
@@ -461,6 +759,29 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
           filesMissing.push(file);
           continue;
         }
+        if (pyInvalidFiles.has(file)) {
+          filesInvalid.add(file);
+          const priorToken = prev?.fileTokens[file];
+          if (priorToken !== undefined) {
+            for (const entry of prevByFile.get(file) ?? []) {
+              bucket.push({ ...entry });
+            }
+            entriesByFile.set(file, bucket);
+            fileTokens[file] = priorToken;
+            if (st) {
+              fileStats[file] = {
+                mtimeMs: st.mtimeMs,
+                size: st.size,
+                ctimeMs: st.ctimeMs,
+                ino: st.ino,
+              };
+            }
+            fileImports[file] = prev?.fileImports?.[file] ?? [];
+            continue;
+          }
+        } else {
+          filesInvalid.delete(file);
+        }
         entriesByFile.set(file, bucket);
         fileTokens[file] = sourceToken;
         if (st) {
@@ -477,12 +798,14 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
           bucket.push({
             id: mkId(file, rec.name, rec.kind, rec.line),
             name: rec.name,
+            namePath: rec.namePath,
             kind: rec.kind,
             file,
             line: rec.line,
             endLine: rec.endLine,
             charStart: rec.charStart,
             charEnd: rec.charEnd,
+            anchorOffset: rec.anchorOffset,
             searchText: rec.searchText || rec.name,
             className: rec.className,
             extends: rec.extends,
@@ -520,12 +843,14 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
         bucket.push({
           id: mkId(file, rec.name, rec.kind, line),
           name: rec.name,
+          namePath: rec.namePath,
           kind: rec.kind,
           file,
           line,
           endLine: indexedLineAt(lines, rec.charEnd),
           charStart: rec.charStart,
           charEnd: rec.charEnd,
+          anchorOffset: rec.anchorOffset,
           searchText: firstLine(src, rec.charStart) || rec.name,
           className: rec.className,
           extends: rec.extends,
@@ -575,10 +900,12 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     for (const file of changedFiles) {
       const oldFanIn = new Map<string, number>();
       for (const entry of prevByFile.get(file) ?? []) {
-        oldFanIn.set(fanInSurfaceKey(entry), entry.fanIn ?? 0);
+        const key = fanInSurfaceKey(entry);
+        if (key !== null) oldFanIn.set(key, entry.fanIn ?? 0);
       }
       for (const entry of entriesByFile.get(file) ?? []) {
-        entry.fanIn = oldFanIn.get(fanInSurfaceKey(entry)) ?? 0;
+        const key = fanInSurfaceKey(entry);
+        entry.fanIn = key === null ? 0 : (oldFanIn.get(key) ?? 0);
       }
     }
   } else {
@@ -587,6 +914,10 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     );
     const fanIn = computeFanIn(files, importsByFile);
     for (const e of entries) {
+      if (e.kind === 'ClassMethod' || e.namePath) {
+        e.fanIn = 0;
+        continue;
+      }
       // A default-exported symbol is referenced by importers as `default`, not its
       // local name, so credit that bucket too (`import foo from './x'` → x.ts::default).
       e.fanIn =
@@ -597,11 +928,13 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
 
   let methods = 0;
   let privateDefs = 0;
+  let nestedDefs = 0;
   for (const e of entries) {
     if (e.kind === 'ClassMethod') methods++;
+    else if (e.namePath) nestedDefs++;
     else if (e.visibility === 'module-private') privateDefs++;
   }
-  const defs = entries.length - methods - privateDefs;
+  const defs = entries.length - methods - privateDefs - nestedDefs;
 
   const index: MapIndex = {
     meta: {
@@ -612,7 +945,8 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
       root,
       entryCount: entries.length,
       fileCount: files.length,
-      counts: { defs, methods, privateDefs },
+      counts: { defs, methods, privateDefs, nestedDefs },
+      invalidFiles: [...filesInvalid].sort(),
     },
     fileTokens,
     fileStats,
@@ -624,9 +958,11 @@ export async function buildIndex(opts: BuildOptions): Promise<BuildReport> {
     index,
     filesIndexed: files.length,
     filesMissing,
+    filesInvalid: [...filesInvalid].sort(),
     defs,
     methods,
     privateDefs,
+    nestedDefs,
     reused: reusableFiles.length,
     changed: changedFiles.length,
     unchanged: false,

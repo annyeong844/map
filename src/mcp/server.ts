@@ -72,6 +72,7 @@ function findUp(name: string, start: string): string | null {
 // from the server cwd. Per-call `root` selection overrides this default below.
 const configuredIndexPath = process.env.MAP_INDEX ?? argIndex();
 const MAX_INDEX_RUNTIMES = 8;
+const MAX_INVALID_FILE_DIAGNOSTICS = 8;
 const MAX_OBSERVATIONS = 8192;
 const DEFAULT_AUTO_INDEX_POLL_MS = 2_000;
 const DEFAULT_MAX_ACTIVE_INDEXES = 2;
@@ -359,7 +360,13 @@ function disposeRuntime(runtime: IndexRuntime | undefined): void {
 }
 
 function ensureRootWatch(runtime: IndexRuntime, rootInput: string): void {
-  const root = resolve(rootInput);
+  const resolvedRoot = resolve(rootInput);
+  let root = resolvedRoot;
+  try {
+    root = realpathSync.native(resolvedRoot);
+  } catch {
+    // A disappearing root falls through to the watcher fallback below.
+  }
   if (
     runtime.root === root &&
     (runtime.watcher || runtime.watcherUnavailable)
@@ -894,6 +901,14 @@ function withResponseMeta(
             indexPath: context.indexPath,
             loaded: !!runtime.index,
             generated: runtime.index?.meta.generated ?? null,
+            invalidFiles: {
+              count: runtime.index?.meta.invalidFiles?.length ?? 0,
+              sample:
+                runtime.index?.meta.invalidFiles?.slice(
+                  0,
+                  MAX_INVALID_FILE_DIAGNOSTICS,
+                ) ?? [],
+            },
             watchMode: runtime.watcher ? 'active' : 'on-call-fallback',
             dirty: runtime.changeGeneration !== runtime.checkedGeneration,
             lastCheckedAt: runtime.lastCheckAt

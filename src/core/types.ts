@@ -9,7 +9,7 @@
  * exact spot. What the spot *means* is never the map's claim.
  */
 
-export const INDEX_VERSION = 14;
+export const INDEX_VERSION = 17;
 /** Entries have been globally ordered by file, then line, since this format. */
 export const ORDERED_ENTRIES_VERSION = 13;
 
@@ -19,6 +19,10 @@ export interface MapEntry {
   id: string;
   /** Symbol name as written in source. */
   name: string;
+  /** Slash-delimited lexical path for a non-method nested declaration. Methods
+   * derive the same exact alias from `className/name`, avoiding duplicate index
+   * strings. The legacy canonical `id` remains stable. */
+  namePath?: string;
   /** AST node kind, verbatim from the parser (FunctionDeclaration, ClassMethod, ...). */
   kind: string;
   /** Source path, POSIX-normalized, relative to the index root. */
@@ -35,8 +39,11 @@ export interface MapEntry {
    */
   charStart?: number;
   charEnd?: number;
+  /** UTF-16 distance from `charStart` to `searchText`. Python decorators make
+   * the exact slice begin before its signature anchor. */
+  anchorOffset?: number;
   /**
-   * The declaration's first line, trimmed. This is the drift anchor: if the
+   * The declaration's signature line, trimmed. This is the drift anchor: if the
    * file changed and offsets no longer hold, read() re-locates by searching
    * for this string. Line numbers drift; a signature line rarely does.
    */
@@ -85,7 +92,15 @@ export interface MapIndex {
      * rebuild without mistaking a deleted symbol-less file for "unchanged". */
     fileCount?: number;
     /** Cached report counters so a true no-op rebuild never scans every symbol. */
-    counts?: { defs: number; methods: number; privateDefs: number };
+    counts?: {
+      defs: number;
+      methods: number;
+      privateDefs: number;
+      nestedDefs?: number;
+    };
+    /** Files whose current Python text is syntactically invalid. Their last
+     * known-good symbols remain available but deliberately stay stale. */
+    invalidFiles?: string[];
   };
   /**
    * file -> short content hash. This is the sourceVersionToken: read() compares
@@ -123,6 +138,7 @@ export interface FileStat {
 export interface LocateHit {
   id: string;
   name: string;
+  namePath?: string;
   kind: string;
   file: string;
   line: number;

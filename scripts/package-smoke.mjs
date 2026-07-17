@@ -21,12 +21,15 @@ function windowsCommand(command, args, options = {}) {
   const pathKey =
     Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ??
     'Path';
-  const env = options.binDir
-    ? {
-        ...process.env,
-        [pathKey]: `${options.binDir}${delimiter}${process.env[pathKey] ?? ''}`,
-      }
-    : process.env;
+  const env = {
+    ...process.env,
+    ...options.env,
+    ...(options.binDir
+      ? {
+          [pathKey]: `${options.binDir}${delimiter}${process.env[pathKey] ?? ''}`,
+        }
+      : {}),
+  };
   return spawnSync(
     process.env.ComSpec ?? 'cmd.exe',
     ['/d', '/c', command, ...args],
@@ -98,7 +101,7 @@ try {
     temp,
   );
 
-  const runInstalledMap = (args) => {
+  const runInstalledMap = (args, options = {}) => {
     const bin = join(
       installRoot,
       'node_modules',
@@ -110,11 +113,13 @@ try {
         ? windowsCommand('map.cmd', args, {
             cwd: temp,
             binDir: dirname(bin),
+            env: options.env,
             timeout: 30_000,
           })
         : spawnSync(bin, args, {
             cwd: temp,
             encoding: 'utf8',
+            env: { ...process.env, ...options.env },
             windowsHide: true,
             timeout: 30_000,
           });
@@ -165,10 +170,14 @@ try {
   );
   writeFileSync(
     join(fixture, 'src', 'sample.py'),
-    'def python_alpha():\n    return 43\n',
+    'PY_VALUE = 43\n\ndef python_alpha():\n    return PY_VALUE\n',
   );
   const indexPath = join(fixture, '.map-index.json');
-  runInstalledMap(['index', '--root', fixture, '--out', indexPath]);
+  // Force the installed package's prebuilt here: a missing binary must not be
+  // hidden by the stdlib fallback in the release smoke.
+  runInstalledMap(['index', '--root', fixture, '--out', indexPath], {
+    env: { CODE_MAP_PY_BACKEND: 'native' },
+  });
   const read = JSON.parse(
     runInstalledMap(['read', 'alpha', '--index', indexPath, '--json']).stdout,
   );
@@ -185,6 +194,18 @@ try {
   ) {
     throw new Error(
       `installed Python read smoke failed: ${JSON.stringify(pythonRead)}`,
+    );
+  }
+  const pythonBindingRead = JSON.parse(
+    runInstalledMap(['read', 'PY_VALUE', '--index', indexPath, '--json'])
+      .stdout,
+  );
+  if (
+    pythonBindingRead.status !== 'exact' ||
+    pythonBindingRead.raw !== 'PY_VALUE = 43'
+  ) {
+    throw new Error(
+      `installed Python binding read smoke failed: ${JSON.stringify(pythonBindingRead)}`,
     );
   }
 

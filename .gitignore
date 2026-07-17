@@ -1,5 +1,9 @@
 node_modules/
 dist/
+__pycache__/
+*.py[cod]
+native/bin/
+native/python-extractor/target/
 .map-index.json
 *.log
 *.tmp

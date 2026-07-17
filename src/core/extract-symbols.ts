@@ -13,9 +13,11 @@ import { isRecord } from './util.ts';
  */
 export interface SymbolRec {
   name: string;
+  namePath?: string;
   kind: string;
   charStart: number;
   charEnd: number;
+  anchorOffset?: number;
   exported: boolean;
   className?: string;
   static?: boolean;
@@ -233,6 +235,7 @@ export function extractSymbols(
 
   const symbols: SymbolRec[] = [];
   const imports: ImportEdge[] = [];
+  let hasLocalExportSpecifiers = false;
 
   for (const node of body) {
     if (node.type === 'ImportDeclaration') {
@@ -288,6 +291,7 @@ export function extractSymbols(
           continue;
         }
         const target = locals.get(local) ?? spec;
+        hasLocalExportSpecifiers = true;
         symbols.push({
           name: exp,
           kind: 'ExportSpecifier',
@@ -326,7 +330,13 @@ export function extractSymbols(
     if (isDeclNode(node)) pushDecl(node, false, symbols);
   }
   const refs = opts.includeRefs === false ? {} : walkProgram(res.program).refs;
-  return { symbols: consolidateLocalExports(symbols), imports, refs };
+  return {
+    symbols: hasLocalExportSpecifiers
+      ? consolidateLocalExports(symbols)
+      : symbols,
+    imports,
+    refs,
+  };
 }
 
 function pushDecl(

@@ -1,0 +1,30 @@
+[package]
+name = "code-map-python-extractor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+license = "MIT"
+
+[[bin]]
+name = "code-map-python"
+path = "src/main.rs"
+
+[dependencies]
+# Ruff's component crates are explicitly unstable; pin the complete parser set.
+# get-size2 0.10.2 changed compact_str majors and does not compile with Ruff 0.0.4.
+get-size2 = "=0.10.1"
+rayon = "=1.12.0"
+ruff_python_ast = "=0.0.4"
+ruff_python_parser = "=0.0.4"
+ruff_text_size = "=0.0.4"
+rustc-hash = "=2.1.3"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

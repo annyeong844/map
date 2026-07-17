@@ -15,6 +15,9 @@ const allowPathPatterns = [
   /^scripts\/check-versions\.mjs$/,
   /^scripts\/package-smoke\.mjs$/,
   /^scripts\/build\.mjs$/,
+  /^scripts\/build-native\.mjs$/,
+  /^scripts\/check-native-smoke\.mjs$/,
+  /^scripts\/stage-native\.mjs$/,
   /^scripts\/prepare-package\.mjs$/,
   /^scripts\/benchmark\.mjs$/,
   /^scripts\/corpus-lab(?:-config|-worker)?\.mjs$/,
@@ -22,6 +25,9 @@ const allowPathPatterns = [
   /^dist\/(?:cli|core|mcp)\/[A-Za-z0-9_-]+\.js$/,
   /^dist\/version\.js$/,
   /^src\/py\/extract\.py$/,
+  /^native\/THIRD_PARTY_LICENSES\.html$/,
+  /^native\/bin\/(?:darwin-(?:arm64|x64)|linux-(?:arm64|x64))\/code-map-python$/,
+  /^native\/bin\/win32-x64\/code-map-python\.exe$/,
   /^skills\/[A-Za-z0-9_-]+\/SKILL\.md$/,
   /^hooks\/hooks\.json$/,
   /^hooks\/code-map-guard\.mjs$/,
@@ -99,14 +105,23 @@ try {
 
 const files = entries.flatMap((entry) => entry.files ?? []);
 const failures = [];
+const packedPaths = new Set(files.map((file) => file.path));
+if (!packedPaths.has('native/THIRD_PARTY_LICENSES.html')) {
+  failures.push('native third-party license notice is missing');
+}
 
 for (const file of files) {
   const path = file.path;
+  const nativeBinary = path.startsWith('native/bin/');
   if (!allowPathPatterns.some((re) => re.test(path))) {
     failures.push(`unexpected path in package: ${path}`);
   }
   for (const re of denyPathPatterns) {
     if (re.test(path)) failures.push(`blocked path in package: ${path}`);
+  }
+  if (nativeBinary) {
+    if (!(file.size > 0)) failures.push(`empty native binary: ${path}`);
+    continue;
   }
   let text = '';
   try {

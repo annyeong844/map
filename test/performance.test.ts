@@ -599,6 +599,44 @@ test('fan-in resolves a 12k wildcard barrel chain iteratively for many names', (
 });
 
 test(
+  'fan-in keeps a renamed route iterative across a mixed wildcard tail',
+  { timeout: 1500 },
+  () => {
+    const depth = 4_000;
+    const files = ['alias.ts'];
+    for (let i = 0; i < depth; i++) files.push(`f${i}.ts`);
+    files.push('use.ts');
+    const imports = new Map<
+      string,
+      {
+        source: string;
+        name: string;
+        sourceName?: string;
+        reexport?: boolean;
+      }[]
+    >();
+    imports.set('alias.ts', [
+      {
+        source: './f0',
+        name: 'publicName',
+        sourceName: 'sourceName',
+        reexport: true,
+      },
+    ]);
+    for (let i = 0; i < depth - 1; i++) {
+      imports.set(`f${i}.ts`, [
+        { source: `./missing${i}`, name: `other${i}`, reexport: true },
+        { source: `./f${i + 1}`, name: '*', reexport: true },
+      ]);
+    }
+    imports.set('use.ts', [{ source: './alias', name: 'publicName' }]);
+
+    const fanIn = computeFanIn(files, imports);
+    assert.equal(fanIn.get(`f${depth - 1}.ts::sourceName`), 1);
+  },
+);
+
+test(
   'fan-in batches names through mixed named/wildcard barrels',
   { timeout: 1500 },
   () => {
@@ -878,5 +916,41 @@ test('incremental fan-in skips body-only graphs but rejects import and definitio
     changedImport.index.entries.find((entry) => entry.id === 'target.ts#target')
       ?.fanIn,
     2,
+  );
+});
+
+test('incremental fan-in invalidates a source-name-only re-export edit', async () => {
+  const root = repo({
+    'real.ts': [
+      'export function alpha() { return 1 }',
+      'export function omega() { return 2 }',
+      '',
+    ].join('\n'),
+    'barrel.ts': "export { alpha as publicName } from './real';\n",
+    'use.ts': "import { publicName } from './barrel';\nvoid publicName;\n",
+  });
+  const first = await buildIndex({ root });
+  assert.equal(
+    first.index.entries.find((entry) => entry.id === 'real.ts#alpha')?.fanIn,
+    1,
+  );
+  assert.equal(
+    first.index.entries.find((entry) => entry.id === 'real.ts#omega')?.fanIn,
+    0,
+  );
+
+  writeFileSync(
+    join(root, 'barrel.ts'),
+    "export { omega as publicName } from './real';\n",
+  );
+  const changed = await buildIndex({ root, previous: first.index });
+  assert.equal(changed.fanInReused, false);
+  assert.equal(
+    changed.index.entries.find((entry) => entry.id === 'real.ts#alpha')?.fanIn,
+    0,
+  );
+  assert.equal(
+    changed.index.entries.find((entry) => entry.id === 'real.ts#omega')?.fanIn,
+    1,
   );
 });

@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Cut large Python rebuild latency with one exact reference walk plus memory-aware, size-balanced short-lived workers; keep small edits single-process and leave no resident worker behind.
 - Add a pinned, prebuilt Ruff-based Python extractor with exact stdlib-backend parity, bounded in-process parallelism, a file-grouped compact wire format, five smoke-tested release artifacts (static musl on Linux), and an explicit stdlib fallback; preserve CRLF hashes and coordinates in both paths.
 - Index AST-proven Python module assignments, annotations, and PEP 695 type aliases; support UTF-8 BOM and bare-CR source coordinates, report non-UTF-8 source as degraded instead of missing, resolve named imports from `.pyi` modules, and never substitute a later mixin for an unsupported primary base.
+- Validate both Python extractor wire formats without `any` escapes, including safe coordinates, bounded anchors, compact tuple shapes, and non-negative reference counts.
+- Preserve renamed re-export identities through mixed wildcard barrels; index namespace, side-effect, import-equals, export-assignment, overload, merged, destructured, abstract/private, anonymous-default, and arbitrary string-named TypeScript/JavaScript declarations without inventing dynamic computed names.
 
 ## 0.9.0-rc.1 — 2026-07-14
 

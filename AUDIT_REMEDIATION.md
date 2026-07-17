@@ -1,6 +1,6 @@
 # Code-map Full Audit and Remediation Ledger
 
-Last updated: 2026-07-15
+Last updated: 2026-07-17
 Scope: current working-tree bytes in `C:\Users\endof\.gemini\antigravity\scratch\map`
 Checklist: Lumin repository review checklist v2.1
 Fresh full artifacts: `.audit/` (generated, intentionally not checked in)
@@ -27,31 +27,38 @@ entry below includes the human correction applied to the raw artifact.
 
 ### Fresh structural evidence
 
-- Lumin full profile: 42 files, 16,667 LOC, zero parse errors, 19/19 applicable
-  producers complete. Coverage input and CI-only SARIF were the two explicit skips.
-- Runtime SCC count: 0; internal dependency edges: 84; resolved cross-submodule
-  edges: 39. The inspected directions are consistently leaf/adapter/test to core.
+- Lumin full profile: 51 scanned files (50 topology files), 22,429 LOC, and zero
+  parse errors. The one declared precision gap is Python method resolution.
+- Runtime SCC count: 0; internal dependency edges: 100; resolved cross-submodule
+  edges: 50. The inspected directions are consistently leaf/adapter/test to core.
 - Exact exported-shape duplicate groups: 0. The four near-shape cues represent
   different lifecycle stages or evidence semantics and remain separate.
 - Workspace barrel amplification: not applicable in this single-package scan.
 - Textual type escapes (`any`, `as any`, `as unknown as`, `@ts-ignore`,
-  `@ts-expect-error`): 0 across the scanned 16,667 LOC.
+  `@ts-expect-error`): 0 across the scanned 22,429 LOC.
+- Lumin's Rust syntax lane parsed the nested extractor, but its root-level Cargo
+  semantic oracle was unavailable. The repository-owned nested-manifest check is
+  covered separately by passing `cargo fmt --check` and Clippy with `-D warnings`.
 
 ### Fresh executable evidence
 
 - `npm run release:check`: pass after the full remediation.
-- Core tests: 75/75; Oracle tests: 30/30.
-- Import boundary check: 41 files, 220 edges, zero violations.
+- Core tests: 116/116; Oracle tests: 36/36.
+- Import boundary check: 49 files, 275 edges, zero violations.
 - Root and Oracle audits: zero known vulnerabilities in the verified installs.
-- Native Node coverage: core 87.16% line / 81.44% branch / 84.35% function;
-  Oracle 90.32% line / 75.57% branch / 95.83% function.
-- Full benchmarks pass. Representative results: full build 98.35 ms, no-op
-  2.28 ms, warm locate 0.08 ms, 10,000-deep barrel 52.63 ms, mixed 10,000
-  names 209.25 ms, and flat 50,000 symbols 123.64 ms. A 10x prepare input
-  measured an 11.8x time ratio, consistent with near-linear rather than quadratic
-  growth at this scale.
+- A read-only post-test process audit found no map-owned Node, Python extractor,
+  or tsgo process created during the final 20-minute validation window; no
+  process was stopped.
+- Last measured native Node coverage (2026-07-15): core 87.16% line / 81.44%
+  branch / 84.35% function; Oracle 90.32% line / 75.57% branch / 95.83%
+  function. It is retained as dated evidence, not claimed as a fresh run.
+- Fresh full benchmarks pass. Representative results: full build 69.95 ms,
+  no-op 1.99 ms, warm locate 0.08 ms, 10,000-deep barrel 37.56 ms, mixed
+  10,000 names 196.61 ms, and flat 50,000 importers 72.40 ms. A 10x prepare
+  input measured a 12.0x time ratio; the dedicated adversarial tests separately
+  lock the renamed/wildcard paths against quadratic traversal.
 
-### Live-process observation
+### Live-process observation (2026-07-15)
 
 The audit did not reproduce an OS-level orphan. It did find three stale installed
 Oracle -> tsgo chains that predated the verified source. Their exact command lines,
@@ -63,10 +70,10 @@ The synchronized standalone install then completed a fresh MCP handshake with
 runtime build SHA-256
 `c61baa52e27423b0ec2a944350b2115cb7800ce1bfd9e5619d940549942ba74c`,
 nine runtime source identities, `restartRequired: false`, and clean EOF exit. A
-connected WSL client subsequently started a new post-sync Oracle process. One
-unrelated `node --input-type=module -` process remains unowned by this audit and was
-deliberately left alone; it can add benchmark variance but is not evidence against
-code-map.
+connected WSL client subsequently started a new post-sync Oracle process. At that
+time, one unrelated `node --input-type=module -` process was unowned by the audit
+and deliberately left alone; it could add benchmark variance but was not evidence
+against code-map.
 
 ## Remediation queue
 
@@ -193,6 +200,36 @@ code-map.
       and the shared index SHA-256 stayed
       `ad108a470d8293fe05a07f6c94fac3a6eb1266e2be749b42e5e7eef11bb4c777`.
       Cold checks were 1.8-4.4 s; the same Windows process then read warm in 26 ms.
+
+- [x] **P0-06 Preserve complete JS/TS declaration and re-export identities.**
+  - Closed 2026-07-17:
+    - exact top-level slices retain export/default/decorator wrappers while local
+      variables retain their declaration keyword;
+    - overloads and merged declarations are all promoted by export lists rather
+      than silently leaving later ranges module-private;
+    - renamed re-export chains preserve both exposed and source names through
+      mixed wildcard barrels without attributing namespace property access as a
+      named import;
+    - side-effect imports, import-equals, export assignment, namespace export,
+      destructured bindings, abstract/private methods, anonymous defaults, and
+      literal computed methods are indexed without inventing dynamic names;
+    - arbitrary string module names, including the empty string, remain valid
+      through local export, direct import, renamed forwarding, namespace export,
+      ambient module, exact read, persistence, and fan-in;
+    - focused correctness regressions and a 4,000-file renamed/wildcard stress
+      regression pass; the full 10,000-deep and 50,000-importer benchmarks remain
+      below their prior recorded times on this machine.
+
+- [x] **P0-07 Validate Python extractor output at the process boundary.**
+  - Closed 2026-07-17:
+    - stdlib JSON symbols now require safe ordered coordinates, bounded anchors,
+      typed optional metadata, and non-negative safe reference counts;
+    - the compact native tuple envelope is narrowed by explicit record, entry,
+      import, invalid-file, and kind-index guards before destructuring;
+    - all unsafe-assignment/member/call/argument checks are clean without adding
+      `any`, assertions, or a repository-size cap;
+    - native/stdlib parity, syntax-degradation, dirty-growth, Unicode/newline, and
+      incremental convergence tests remain green.
 
 ### P1 — bounded active work without semantic caps
 
@@ -400,10 +437,10 @@ code-map.
   - Split only where a stable responsibility/test seam exists. `computeFanIn` in
     particular is a cohesive optimized algorithm and is not a refactor target merely
     because it is long.
-  - Closed 2026-07-15:
-    - all five Lumin size triggers were read in full: `computeFanIn` (313 LOC),
-      `buildIndex` (294), CLI `main` (233), Oracle `query` (189), and
-      `extractSymbols` (153);
+  - Reviewed again 2026-07-17:
+    - all five current Lumin size triggers were read in full: `computeFanIn`
+      (443 LOC), `buildIndex` (343), `extractSymbols` (275), CLI `main` (243),
+      and Oracle `query` (205);
     - each is one algorithm or request/CLI orchestration transaction with shared
       local state and a stable outer test seam;
     - no further extraction was made solely to satisfy LOC. This is a deliberate
@@ -411,19 +448,19 @@ code-map.
 
 ## Corrected machine findings
 
-- Lumin's cross-submodule ratio is 39/84 (0.464), but the dominant directions are
+- Lumin's cross-submodule ratio is 50/100 (0.5), but the dominant directions are
   test/script/MCP/CLI -> core. That is healthy leaf-to-core layering, not a
   decoupling failure.
 - Lumin marked boundary lint evidence degraded because it cannot model the custom
-  checker. The executable source of truth passes 41 files and 220 edges, while
+  checker. The executable source of truth passes 49 files and 275 edges, while
   regressions reject unknown owners, forbidden crossings, and bypasses.
-- The raw dead plan reports 28 `SAFE_FIX`, but root `src/*` exports are emitted to
+- The raw dead plan reports 31 `SAFE_FIX`, but root `src/*` exports are emitted to
   shipped `dist/*` and the package intentionally has no `exports` map. Those are
   package-surface false positives, not deletion authority.
-- The five exact body-clone groups are tiny local guards, character predicates, or
-  runtime-specific path/identity helpers. Centralizing them would create a generic
-  util dependency across otherwise clean owners; they remain intentional local
-  duplication.
+- The seven exact body-clone groups are tiny local guards, character predicates,
+  wire-shape validators, or runtime-specific path/identity helpers. Centralizing
+  them would create a generic util dependency across otherwise clean owners; they
+  remain intentional local duplication.
 - Four near-shape pairs model different evidence semantics, persistence/runtime
   identity, optionality, or pipeline stages. They are not shared-contract drift.
 - The five large functions are cohesive algorithms/orchestrators. Their raw `fix`
@@ -442,10 +479,10 @@ code-map.
 | ----------------------- | ------------- | --------------------------------------------------------------------------- |
 | A — size/simplicity     | Watch/keep    | God-file split is complete; five cohesive cores were reviewed, not chopped. |
 | B — duplication/shapes  | Healthy/watch | No exact shape drift; local micro-duplication preserves clean ownership.    |
-| C — cohesion/boundaries | Healthy       | Runtime SCC 0; 41-file/220-edge boundary enforcement passes.                |
+| C — cohesion/boundaries | Healthy       | Runtime SCC 0; 49-file/275-edge boundary enforcement passes.                |
 | D — types/contracts     | Healthy/watch | Zero textual escapes; runtime inputs and state unions are now explicit.     |
 | E — failure handling    | Healthy/watch | Checker failures/degradation surface; remaining catches are bounded probes. |
-| F — abstraction/tests   | Healthy       | 105 tests plus shared wire/lifecycle regressions cover the changed seams.   |
+| F — abstraction/tests   | Healthy       | 152 core/Oracle tests plus wire/lifecycle regressions cover changed seams.  |
 | G — security/operations | Healthy/watch | Roots, bytes, work, caches, diagnostics, and tool versions are bounded.     |
 | H — ceremony            | Healthy       | No ceremony stack; package compatibility policy is now explicit.            |
 
@@ -454,11 +491,11 @@ code-map.
 - [x] Every P0-P2 item is closed with focused regression evidence.
 - [x] Every P3 decision is implemented or explicitly retained after body-level
       review; no LOC-only or machine-score-only refactor remains.
-- [x] `npm run release:check` passes from a fresh package build: 75 core tests,
-      30 Oracle tests, both type checks, formatting, syntax/typed/review lint, version
+- [x] `npm run release:check` passes from a fresh package build: 116 core tests,
+      36 Oracle tests, both type checks, formatting, syntax/typed/review lint, version
       contract, package safety, and TS/Python CLI+MCP smoke.
-- [x] Native coverage improved to 87.16% core and 90.32% Oracle line coverage;
-      branch/function values are recorded above rather than hidden.
+- [x] The dated 2026-07-15 coverage run measured 87.16% core and 90.32% Oracle
+      line coverage; branch/function values are recorded above rather than hidden.
 - [x] Stress and benchmark suites pass without a semantic repository cap or
       material normal-path regression.
 - [x] Installed-package smoke proves the synchronized runtime build identity and
@@ -467,10 +504,10 @@ code-map.
       owners were retired without touching unrelated processes.
 - [x] Fresh Lumin full artifacts were read at raw-value level and every triggered
       gate was either fixed or corrected with a recorded rationale.
-- [x] Final code-map rebuild indexed 796 symbols across 42 files. The compact,
-      UNC-bridge, Git-routing, and drift helpers are present in the current index;
-      cross-host field reads returned exact source without rewriting their shared
-      index.
+- [x] Fresh Lumin full evidence covers 51 files with zero parse errors, zero runtime
+      SCCs, zero textual type escapes, and no exact exported-shape duplicate group.
+      Cross-host field-read evidence remains recorded above and was not re-run by
+      this local residual-hardening pass.
 
 Status: remediation complete on the current working-tree bytes. Re-run the full
 profile after future structural changes; generated `.audit/` artifacts are evidence,

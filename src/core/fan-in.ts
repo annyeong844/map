@@ -24,6 +24,23 @@ const JS_TO_TS_ENTRIES = Object.entries(JS_TO_TS);
 const DOT_CHAR_CODE = '.'.charCodeAt(0);
 const SLASH_CHAR_CODE = '/'.charCodeAt(0);
 
+interface RenamedDefinition {
+  file: string;
+  name: string;
+}
+type ResolvedDefinition = string | RenamedDefinition;
+
+function definitionFile(definition: ResolvedDefinition): string {
+  return typeof definition === 'string' ? definition : definition.file;
+}
+
+function definitionName(
+  definition: ResolvedDefinition,
+  requestedName: string,
+): string {
+  return typeof definition === 'string' ? requestedName : definition.name;
+}
+
 /** Join the dominant `./name` import shape without paying for general path
  * normalization. Dot segments and repeated separators deliberately fall back. */
 function simpleRelativeBase(fromFile: string, source: string): string | null {
@@ -121,6 +138,7 @@ export function computeFanIn(
   interface Route {
     target: string | null;
     order: number;
+    sourceName?: string;
   }
   interface Routes {
     exact?: Map<string, Route>;
@@ -142,11 +160,14 @@ export function computeFanIn(
     for (let order = 0; order < edges.length; order++) {
       const edge = edges[order];
       if (!edge.reexport) {
-        if (!edge.name || edge.name === '*') continue;
+        if (edge.name === '*') continue;
         const target = targetFor(f, edge.source);
         if (!target) continue;
         let byName = requests.get(target);
-        if (!byName) requests.set(target, (byName = new Map()));
+        if (!byName) {
+          byName = new Map<string, Consumers>();
+          requests.set(target, byName);
+        }
         const consumers = byName.get(edge.name);
         if (consumers === undefined) {
           byName.set(edge.name, f);
@@ -160,7 +181,10 @@ export function computeFanIn(
         continue;
       }
       routes ??= { unconditional: false };
-      const route = { target: targetFor(f, edge.source), order };
+      const route: Route = { target: targetFor(f, edge.source), order };
+      if (edge.sourceName !== undefined && edge.sourceName !== edge.name) {
+        route.sourceName = edge.sourceName;
+      }
       if (edge.name === '*') {
         routes.wildcard ??= route;
       } else if (routes.exact) {
@@ -290,62 +314,99 @@ export function computeFanIn(
   const skipWildcard = (start: string): SkipResult =>
     collapseWildcardPath(start, wildcardStops, true);
 
-  /** Walk `export { name } from …` / `export * from …` chains to the file that
-   * actually defines `name`, so importers through a barrel count toward the real
-   * definition rather than the barrel. */
-  const resolvedDefs = new Map<string, string>();
-  const resolveDef = (start: string, name: string): string => {
-    const startKey = `${start}\0${name}`;
+  const rebaseDefinition = (
+    definition: ResolvedDefinition,
+    requestedName: string,
+    exposedName: string,
+  ): ResolvedDefinition => {
+    const terminalName = definitionName(definition, requestedName);
+    if (terminalName === exposedName) return definitionFile(definition);
+    return typeof definition === 'string'
+      ? { file: definition, name: terminalName }
+      : definition;
+  };
+
+  /** Walk named/wildcard re-export chains to the real definition identity.
+   * The common no-rename result remains a file string; only `x as y` paths
+   * allocate a `{ file, name }` pair. */
+  const resolvedDefs = new Map<string, ResolvedDefinition>();
+  const resolveDef = (
+    start: string,
+    requestedName: string,
+  ): ResolvedDefinition => {
+    const startKey = `${start}\0${requestedName}`;
     const cachedStart = resolvedDefs.get(startKey);
     if (cachedStart !== undefined) return cachedStart;
-    if (!dominantExactNames.has(name)) {
+    if (!dominantExactNames.has(requestedName)) {
       const terminal = skipWildcard(start).file;
       resolvedDefs.set(startKey, terminal);
       return terminal;
     }
 
-    const path: string[] = [];
+    const path: { file: string; name: string }[] = [];
     const seenAt = new Map<string, number>();
     let file = start;
-    let terminal: string;
+    let name = requestedName;
+    let terminalFile: string;
+    let terminalName: string;
     for (;;) {
+      if (!dominantExactNames.has(name)) {
+        terminalFile = skipWildcard(file).file;
+        terminalName = name;
+        break;
+      }
       const skipped = skipUnconditional(file);
       file = skipped.file;
       if (skipped.cyclic) {
-        terminal = file;
+        terminalFile = file;
+        terminalName = name;
         break;
       }
       const key = `${file}\0${name}`;
       const cached = resolvedDefs.get(key);
       if (cached !== undefined) {
-        terminal = cached;
+        terminalFile = definitionFile(cached);
+        terminalName = definitionName(cached, name);
         break;
       }
-      const cycleAt = seenAt.get(file);
+      const cycleAt = seenAt.get(key);
       if (cycleAt !== undefined) {
         const cycle = path.slice(cycleAt);
-        terminal = cycle.reduce((best, candidate) =>
-          candidate < best ? candidate : best,
+        const terminal = cycle.reduce((best, candidate) =>
+          `${candidate.file}\0${candidate.name}` < `${best.file}\0${best.name}`
+            ? candidate
+            : best,
         );
-        for (const cycleFile of cycle) {
-          resolvedDefs.set(`${cycleFile}\0${name}`, terminal);
-        }
+        terminalFile = terminal.file;
+        terminalName = terminal.name;
         break;
       }
-      seenAt.set(file, path.length);
-      path.push(file);
+      seenAt.set(key, path.length);
+      path.push({ file, name });
       const route = pickRoute(file, name);
       if (!route || !route.target) {
-        terminal = file;
+        terminalFile = file;
+        terminalName = name;
         break;
       }
       file = route.target;
+      name = route.sourceName ?? name;
     }
+    let renamedTerminal: RenamedDefinition | undefined;
     for (let i = path.length - 1; i >= 0; i--) {
-      const key = `${path[i]}\0${name}`;
-      if (!resolvedDefs.has(key)) resolvedDefs.set(key, terminal);
+      const state = path[i];
+      const key = `${state.file}\0${state.name}`;
+      if (resolvedDefs.has(key)) continue;
+      if (state.name === terminalName) {
+        resolvedDefs.set(key, terminalFile);
+      } else {
+        renamedTerminal ??= { file: terminalFile, name: terminalName };
+        resolvedDefs.set(key, renamedTerminal);
+      }
     }
-    return terminal;
+    return terminalName === requestedName
+      ? terminalFile
+      : (renamedTerminal ?? { file: terminalFile, name: terminalName });
   };
 
   /** Resolve many names entering the same barrel as one flowing group. At a
@@ -356,8 +417,8 @@ export function computeFanIn(
   const resolveDefs = (
     start: string,
     names: Iterable<string>,
-  ): Map<string, string> => {
-    const results = new Map<string, string>();
+  ): Map<string, ResolvedDefinition> => {
+    const results = new Map<string, ResolvedDefinition>();
     const active = new Set<string>();
     let wildcardTerminal: string | undefined;
     for (const name of names) {
@@ -420,7 +481,14 @@ export function computeFanIn(
             continue;
           }
           active.delete(name);
-          const terminal = exact.target ? resolveDef(exact.target, name) : file;
+          const sourceName = exact.sourceName ?? name;
+          const terminal = exact.target
+            ? rebaseDefinition(
+                resolveDef(exact.target, sourceName),
+                sourceName,
+                name,
+              )
+            : file;
           resolvedDefs.set(`${start}\0${name}`, terminal);
           results.set(name, terminal);
         }
@@ -434,7 +502,14 @@ export function computeFanIn(
           (!wildcard || exact.order < wildcard.order)
         ) {
           active.delete(name);
-          const terminal = exact.target ? resolveDef(exact.target, name) : file;
+          const sourceName = exact.sourceName ?? name;
+          const terminal = exact.target
+            ? rebaseDefinition(
+                resolveDef(exact.target, sourceName),
+                sourceName,
+                name,
+              )
+            : file;
           resolvedDefs.set(`${start}\0${name}`, terminal);
           results.set(name, terminal);
         }
@@ -453,7 +528,8 @@ export function computeFanIn(
   for (const [target, byName] of requests) {
     const defs = resolveDefs(target, byName.keys());
     for (const [name, consumers] of byName) {
-      const key = `${defs.get(name) ?? target}::${name}`;
+      const definition = defs.get(name) ?? target;
+      const key = `${definitionFile(definition)}::${definitionName(definition, name)}`;
       const existing = importers.get(key);
       if (existing === undefined) {
         importers.set(key, consumers);
